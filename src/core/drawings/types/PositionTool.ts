@@ -48,7 +48,7 @@ export class PositionTool extends Drawing {
     showText!: boolean;
     /** Show the `DIR · R:R` header line above the box. */
     showHeader!: boolean;
-    /** Append the level price to the target/stop labels. */
+    /** Append the level price to the target/stop labels, and paint the entry's own readout. */
     showPrices!: boolean;
     /** Show the `Loss $ · Size` line above the box. */
     showLossSize!: boolean;
@@ -67,7 +67,7 @@ export class PositionTool extends Drawing {
         if (this.accountBalance === undefined) this.accountBalance = PositionTool.DEFAULT_ACCOUNT_BALANCE;
         if (this.showText === undefined) this.showText = true;
         if (this.showHeader === undefined) this.showHeader = true;
-        if (this.showPrices === undefined) this.showPrices = false;
+        if (this.showPrices === undefined) this.showPrices = true;
         if (this.showLossSize === undefined) this.showLossSize = true;
         if (this.showTargetLabel === undefined) this.showTargetLabel = true;
         if (this.showStopLabel === undefined) this.showStopLabel = true;
@@ -274,10 +274,14 @@ export class PositionTool extends Drawing {
     }
 
     // ── painted label lines (each respects its own toggle; the painter checks showText) ──
+    //
+    // Each line is written against its own level, so the level's name leads and its numbers
+    // follow in a fixed order — price, then the move it represents. The painter sets them in
+    // mono against one left edge, which is what keeps the columns lining up.
 
-    /** `DIR · R:R x.xx` — the always-on header when text is shown. */
+    /** `LONG   R:R x.xx` — the header, read off the geometry so it flips with the block. */
     headerLabel(): string {
-        return `${this.directionLabel()}  ·  R:R ${this.rr().toFixed(2)}`;
+        return `${this.directionLabel()}   R:R ${this.rr().toFixed(2)}`;
     }
 
     /** `Loss $… · Size …` — the painter hides it when showLossSize is off. */
@@ -285,18 +289,24 @@ export class PositionTool extends Drawing {
         return `Loss $${formatMoney(this.dollarLoss())}  ·  Size ${formatQty(this.positionSize())}`;
     }
 
-    /** `Target +x.xx%`, with the level price appended when showPrices is on. */
+    /** `TP  <price>   +x.xx%`; the price drops out when showPrices is off. */
     targetLabel(): string {
         const p = this.prices();
-        const at = this.showPrices && p ? `  @ ${formatPrice(p.target)}` : '';
-        return `Target +${this.rewardPct().toFixed(2)}%${at}`;
+        const at = this.showPrices && p ? `${formatPrice(p.target)}   ` : '';
+        return `TP  ${at}+${this.rewardPct().toFixed(2)}%`;
     }
 
-    /** `Stop −x.xx%`, with the level price appended when showPrices is on. */
+    /** `SL  <price>   −x.xx%`; the price drops out when showPrices is off. */
     stopLabel(): string {
         const p = this.prices();
-        const at = this.showPrices && p ? `  @ ${formatPrice(p.stop)}` : '';
-        return `Stop −${this.riskPct().toFixed(2)}%${at}`;
+        const at = this.showPrices && p ? `${formatPrice(p.stop)}   ` : '';
+        return `SL  ${at}−${this.riskPct().toFixed(2)}%`;
+    }
+
+    /** `Entry  <price>` — a price and nothing else, so it only appears with showPrices on. */
+    entryLabel(): string {
+        const p = this.prices();
+        return `Entry  ${formatPrice(p ? p.entry : 0)}`;
     }
 
     // ── stop/target input units (the gear panel's Price / Points dropdowns) ──

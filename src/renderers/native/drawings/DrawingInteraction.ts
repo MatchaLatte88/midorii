@@ -375,7 +375,14 @@ export class DrawingInteraction {
         if (this.state.kind !== 'placing') return;
         this.snapAt = null;
         const draft = this.state.draft;
-        draft.onPlaced(this.deps.projector()); // let the type finalize its anchors (e.g. a position derives its box)
+        // Let the type finalize its anchors (e.g. a position derives its box). A pick tool answers
+        // false when the click found nothing to place — no drawing is created, and the tool stays
+        // armed (no 'tool-finished') so the next click can try again.
+        if (draft.onPlaced(this.deps.projector()) === false) {
+            this.state = { kind: 'idle' };
+            this.deps.changed();
+            return;
+        }
         const type = draft.type;
         this.state = { kind: 'idle' };
         this.deps.emit({ kind: 'create', doc: draft.serialize() });

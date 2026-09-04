@@ -1,5 +1,5 @@
 import type { Drawing, Projector, DrawingStyle } from '../../../core/drawings';
-import { SegmentDrawing, FibRatios, RadialFib, FibSpiral, GannSquare, GANN_SQUARE_ARCS, DedekindTessellation, MachFigure, MeasureBox, PositionTool, PatternDrawing, CalloutBase, Callout, Comment, PriceNote, Signpost, Note, PriceLabel, ArrowMark, GlyphStamp, RegressionChannel, AnchoredVwap, FixedRangeVolumeProfile, Magnifier, magnifierTimeframeLabel, lineSegmentIntersection, effectiveFillColor, VALID_FILL, INVALID_FILL, DEFAULT_DRAWING_COLOR } from '../../../core/drawings';
+import { SegmentDrawing, FibRatios, RadialFib, FibSpiral, GannSquare, GANN_SQUARE_ARCS, DedekindTessellation, MachFigure, MeasureBox, PositionTool, FairValueGap, FVG_MIDPOINT_DASH, PatternDrawing, CalloutBase, Callout, Comment, PriceNote, Signpost, Note, PriceLabel, ArrowMark, GlyphStamp, RegressionChannel, AnchoredVwap, FixedRangeVolumeProfile, Magnifier, magnifierTimeframeLabel, lineSegmentIntersection, effectiveFillColor, VALID_FILL, INVALID_FILL, DEFAULT_DRAWING_COLOR } from '../../../core/drawings';
 import type { VelaTheme } from '../../../core/options';
 import { contrastColor, dashPattern, extendEndpoints, namedFontSize, labelLineHeight, TEXT_FRAME_INSET, TEXT_FRAME_RISE, uprightLineAngle } from '../../shared/drawing-geometry';
 import { BEARISH, BULLISH, NEUTRAL, SLATE, SLATE_DEEP } from '../../../core/palette';
@@ -21,6 +21,9 @@ const BADGE_STROKE = SLATE;
 /** The frame a text label wears when it's the target: firm once clicked, a hint under the cursor.
  *  (Its box is the shared TEXT_FRAME inset/rise, so it coincides with the inline editor's border.) */
 const TEXT_FRAME_ALPHA = { selected: 0.3, hovered: 0.12 };
+/** The position tool's readouts are columns of numbers stacked against one left edge, so they
+ *  set in mono: proportional digits would leave every price and percentage ragged. */
+const MONO_FONT = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 
 /**
  * Paints user drawings onto the L1.5 canvas. The caller has already applied the DPR
@@ -242,6 +245,10 @@ export class DrawingPainter {
         }
         if (d instanceof PositionTool) {
             this.paintPosition(ctx, d, proj, theme);
+            return;
+        }
+        if (d instanceof FairValueGap) {
+            this.paintFvg(ctx, d, proj);
             return;
         }
         if (d instanceof RegressionChannel) {
@@ -686,8 +693,14 @@ export class DrawingPainter {
     }
 
     /** Paint a position tool: a reward zone (entry↔target) + risk zone (entry↔stop) in the
-     *  tool's own zone colors, the three level lines, and the direction / R:R / % / loss+size
-     *  labels (styled by `text`, hidden wholesale by showText). */
+     *  tool's own zone colors, the three level lines, and the TP / SL / entry / direction+R:R
+     *  readouts (styled by `text`, hidden wholesale by showText).
+     *
+     *  Everything is written INSIDE the block, left-aligned against its own line and facing the
+     *  entry: nothing hangs off the edges, so a label can neither be clipped by the pane nor
+     *  covered by anything the block itself draws. Colour follows meaning rather than direction —
+     *  the stop side takes the loss colour and the target side the profit colour — so a short
+     *  reads the same way round as a long. */
     private paintPosition(ctx: CanvasRenderingContext2D, d: PositionTool, proj: Projector, theme: VelaTheme): void {
         const L = d.layout(proj);
         if (!L) return;
@@ -702,31 +715,81 @@ export class DrawingPainter {
         };
         zone(ey, ty, d.profitColor); // reward
         zone(ey, sy, d.lossColor); // risk
-        const line = (y: number, color: string): void =>
-            this.stroke(ctx, { ...d.style, lineColor: color }, () => {
+        const line = (y: number, color: string, dashed = false): void =>
+            this.stroke(ctx, { ...d.style, lineColor: color, ...(dashed ? { lineStyle: 'dashed' as const } : {}) }, () => {
                 ctx.moveTo(x1, y);
                 ctx.lineTo(x2, y);
             });
         line(ty, d.profitColor);
         line(sy, d.lossColor);
-        line(ey, d.style.lineColor); // entry — accent
+        // The entry is the one level nobody trades against — it is where the trade starts, not a
+        // price it stops at — so it stays dashed whatever the two edges are set to.
+        line(ey, d.style.lineColor, true);
         if (!d.showText) return;
         const fs = namedFontSize(d.text?.size ?? 'normal');
-        ctx.fillStyle = d.text?.color ?? theme.textColor;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = `${fs}px ${theme.fontFamily}`;
-        const cx = x1 + w / 2;
-        // Header + loss/size stack above the box (whichever is shown alone takes the bottom
-        // slot); target/stop % stay centered in their zones.
-        const topY = Math.min(ey, sy, ty) - 9;
-        if (d.showHeader) ctx.fillText(d.headerLabel(), cx, d.showLossSize ? topY - Math.round(fs * 1.15) : topY);
-        ctx.font = `${Math.max(10, fs - 1)}px ${theme.fontFamily}`;
-        if (d.showLossSize) ctx.fillText(d.lossSizeLabel(), cx, topY);
-        if (d.showTargetLabel) ctx.fillText(d.targetLabel(), cx, (ey + ty) / 2);
-        if (d.showStopLabel) ctx.fillText(d.stopLabel(), cx, (ey + sy) / 2);
+        const ink = d.text?.color ?? theme.textColor;
+        ctx.font = `${fs}px ${MONO_FONT}`;
         ctx.textAlign = 'left';
+        // Which way the target lies decides which side of each line is "inwards".
+        const targetAbove = ty < ey;
+        const label = (y: number, side: 'above' | 'below', text: string, color: string): void => {
+            ctx.fillStyle = color;
+            ctx.textBaseline = side === 'above' ? 'bottom' : 'top';
+            ctx.fillText(text, x1 + 5, side === 'above' ? y - 3 : y + 3);
+        };
+        if (d.showTargetLabel) label(ty, targetAbove ? 'below' : 'above', d.targetLabel(), d.profitColor);
+        if (d.showStopLabel) label(sy, targetAbove ? 'above' : 'below', d.stopLabel(), d.lossColor);
+        if (d.showPrices) label(ey, targetAbove ? 'above' : 'below', d.entryLabel(), ink);
+        // Direction and reward-to-risk go into the RISK zone, right against the entry line; the
+        // loss/size readout stacks one row further into it.
+        const inward = targetAbove ? 'below' : 'above';
+        if (d.showHeader) label(ey, inward, d.headerLabel(), ink);
+        if (d.showLossSize) {
+            const step = Math.round(fs * 1.35) * (targetAbove ? 1 : -1);
+            label(ey + (d.showHeader ? step : 0), inward, d.lossSizeLabel(), ink);
+        }
         ctx.textBaseline = 'alphabetic';
+    }
+
+    /** Paint a marked fair value gap: the body filled, BOTH edges solid — those are the two
+     *  prices anyone actually trades against — and the midpoint dashed finer than any edge, since
+     *  it is a different statement from them (where consequent encroachment sits, not where price
+     *  stopped) and has to stay tellable apart at every line width.
+     *
+     *  Nothing is written on it: a gap is usually a few pixels tall and there are a lot of them,
+     *  so a label per box would cover the very candles the zone is there to be read against. */
+    private paintFvg(ctx: CanvasRenderingContext2D, d: FairValueGap, proj: Projector): void {
+        const r = d.rect(proj);
+        if (!r) return;
+        const x = Math.min(r.x1, r.x2);
+        const y = Math.min(r.y1, r.y2);
+        const w = Math.abs(r.x2 - r.x1);
+        // A gap thinner than a pixel is still a gap; without a floor it silently vanishes on a
+        // zoomed-out chart.
+        const h = Math.max(1, Math.abs(r.y2 - r.y1));
+        ctx.save();
+        ctx.globalAlpha = 0.13 * ctx.globalAlpha;
+        ctx.fillStyle = d.style.lineColor;
+        ctx.fillRect(x, y, w, h);
+        ctx.restore();
+        // Half-pixel offsets keep a 1px edge on the pixel, not across two.
+        this.stroke(ctx, d.style, () => {
+            ctx.moveTo(x, y + 0.5);
+            ctx.lineTo(x + w, y + 0.5);
+            ctx.moveTo(x, y + h - 0.5);
+            ctx.lineTo(x + w, y + h - 0.5);
+        });
+        // Any thinner and the midpoint has nowhere to sit that is not already an edge.
+        if (!d.showMidline || h <= 6) return;
+        ctx.save();
+        ctx.strokeStyle = d.style.lineColor;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([...FVG_MIDPOINT_DASH]);
+        ctx.beginPath();
+        ctx.moveTo(x, y + h / 2);
+        ctx.lineTo(x + w, y + h / 2);
+        ctx.stroke();
+        ctx.restore();
     }
 
     /** Paint a linear-regression channel: the two shaded bands (mid→upper, mid→lower), the three

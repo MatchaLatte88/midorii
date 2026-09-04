@@ -15,10 +15,38 @@
                 position: absolute;
                 inset: 0;
             }
+            #replay-root {
+                position: absolute;
+                inset: 0;
+            }
+
+            /* The OS window controls are painted over the top-right of the client
+               area (titleBarStyle 'hidden' + titleBarOverlay), so Vela's topbar
+               tools end up underneath them. Electron reports the strip left over
+               beside the controls as env(titlebar-area-*); reserving the
+               difference keeps them clear at any window width and DPI instead of
+               hardcoding a number that is right on one machine. The fallback
+               covers a build without the overlay (macOS/Linux), where the
+               controls sit at the left — which env(titlebar-area-x) accounts for. */
+            #chart .vela-widget-topbar,
+            #replay-root .vela-widget-topbar {
+                padding-right: calc(
+                    100% - env(titlebar-area-width, calc(100% - 140px)) - env(titlebar-area-x, 0px) + 10px
+                );
+                /* Without a native title bar the window has nothing to drag by;
+                   the topbar's empty background becomes that grip. */
+                -webkit-app-region: drag;
+            }
+            /* Every control inside opts back out, so dragging never swallows a click. */
+            #chart .vela-widget-topbar *,
+            #replay-root .vela-widget-topbar * {
+                -webkit-app-region: no-drag;
+            }
         </style>
     </head>
     <body>
         <div id="chart"></div>
+        <div id="replay-root" hidden></div>
         <script type="module" src="./main.ts"></script>
     </body>
 </html>

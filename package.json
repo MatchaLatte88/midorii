@@ -1,6 +1,6 @@
 {
   "name": "midorii",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Midorii — local backtesting and trading-bot workbench, built on a Vela fork.",
   "license": "Apache-2.0",
   "private": true,
@@ -65,7 +65,7 @@
     "test:watch": "vitest",
     "build": "tsup",
     "dev": "vite",
-    "app": "concurrently -k -n VITE,ELECTRON -c cyan,green \"npm run dev\" \"wait-on tcp:5300 && electron .\"",
+    "app": "concurrently -k -n VITE,ELECTRON -c cyan,green \"npm run dev\" \"wait-on tcp:5301 && electron .\"",
     "start": "electron ."
   },
   "devDependencies": {

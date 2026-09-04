@@ -15,7 +15,7 @@ setlocal
 title Midorii
 cd /d "%~dp0"
 
-set "PORT=5300"
+set "PORT=5301"
 set "USEBUILD="
 if /i "%~1"=="/build" set "USEBUILD=1"
 

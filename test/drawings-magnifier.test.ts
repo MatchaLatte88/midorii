@@ -50,6 +50,7 @@ describe('drawings/Magnifier', () => {
         expect(measure?.sections?.find((s) => s.label === 'Measurements')?.tools.map((t) => t.type)).toEqual([
             'position',
             'datepricerange',
+            'fvg',
             'magnifier',
         ]);
     });

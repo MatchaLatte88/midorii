@@ -72,6 +72,7 @@ export type DrawingTypeKey =
     | 'goldensupersonic'
     | 'datepricerange'
     | 'position'
+    | 'fvg'
     | 'magnifier'
     | 'xabcd'
     | 'abcd'
@@ -174,9 +175,11 @@ export abstract class Drawing {
      * Hook run once after interactive placement finishes, before the `create` intent —
      * lets a type finalize its anchors against the live projector (e.g. a position deriving
      * its stop/target/width in pixel space so a bare click drops a default-sized box).
-     * Default: no-op.
+     * Returning `false` ABANDONS the placement: nothing is created and the tool stays armed,
+     * which is what a pick tool needs when the click found nothing to mark (a fair value gap
+     * where there is no imbalance). Default: no-op.
      */
-    onPlaced(_proj: Projector): void {
+    onPlaced(_proj: Projector): boolean | void {
         /* base keeps its placed anchors as-is */
     }
 

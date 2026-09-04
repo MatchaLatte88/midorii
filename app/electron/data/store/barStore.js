@@ -25,7 +25,11 @@ export const BASE_TIMEFRAME = '1m';
 export const FORMAT_VERSION = 2;
 const V1_STRIDE = 6;
 
-/** Timeframe → milliseconds. The only place timeframe strings are defined. */
+/**
+ * The timeframes Midorii's own UI names, for menus and for the error message a
+ * bad one produces. NOT the set the store can serve — that is anything
+ * `parseTimeframe` accepts, which is any whole multiple of the base bar.
+ */
 export const TIMEFRAMES = {
   '1m': 60_000,
   '5m': 300_000,
@@ -36,10 +40,89 @@ export const TIMEFRAMES = {
   '1d': 86_400_000,
 };
 
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const WEEK_MS = 604_800_000;
+
+/* Epoch day 0 was a Thursday, so `t % WEEK_MS` puts week edges on Thursdays.
+ * Markets read a week as starting on Monday; shifting by four days moves every
+ * edge onto one. */
+const WEEK_ANCHOR_MS = 4 * DAY_MS;
+
+/** Unit suffix → bar length in ms. `M` (calendar months) is handled apart, and
+ *  seconds are absent on purpose: nothing here is finer than the base bar. */
+const UNIT_MS = { m: MINUTE_MS, h: HOUR_MS, H: HOUR_MS, d: DAY_MS, D: DAY_MS, w: WEEK_MS, W: WEEK_MS };
+
+/**
+ * A timeframe string as a bucketing rule.
+ *
+ * Two dialects reach this boundary and both have to work. Vela's charts speak
+ * the canonical form — a bare number is MINUTES (`60` is an hour, `240` four),
+ * with `D`/`W`/`M` for the named periods — while Midorii's own screens speak
+ * the alias form (`1m`, `4h`, `1d`). They agree everywhere except the letter
+ * `m`, which is minutes in lower case and months in upper, so the suffix is
+ * read case-sensitively.
+ *
+ * Returns `{ ms, months }`: a fixed-length bucket carries `ms`, a calendar one
+ * carries `months` (whose length varies, so it has no fixed `ms`). Anything
+ * unparsed, sub-minute, or not a whole number of base bars throws — a
+ * timeframe the store cannot bucket exactly would return quietly wrong bars.
+ */
+export function parseTimeframe(tf) {
+  const raw = typeof tf === 'string' ? tf.trim() : '';
+  const m = /^(\d*)([a-zA-Z]?)$/.exec(raw);
+  if (!m) throw new Error(unknownTimeframe(raw));
+
+  const unit = m[2];
+  const count = m[1] === '' ? 1 : Number(m[1]);
+  // A bare number is minutes and needs its digits; a lone letter means one of it.
+  if (!Number.isInteger(count) || count < 1 || (m[1] === '' && unit === '')) {
+    throw new Error(unknownTimeframe(raw));
+  }
+
+  if (unit === 'M') return { ms: null, months: count };
+  if (unit === '') return { ms: count * MINUTE_MS, months: 0 };
+
+  const unitMs = UNIT_MS[unit];
+  if (!unitMs) throw new Error(unknownTimeframe(raw));
+  return { ms: count * unitMs, months: 0 };
+}
+
+function unknownTimeframe(tf) {
+  return `Unknown timeframe "${tf}". Use minutes (60), or a unit: 15m, 4h, 1d, D, W, M.`;
+}
+
+/**
+ * Bar length in ms. A calendar month has no fixed one, so it reports a nominal
+ * 30 days — enough to size a window, never enough to place a bucket edge (use
+ * {@link bucketStart} and {@link bucketEnd} for that).
+ */
 export function timeframeMs(tf) {
-  const ms = TIMEFRAMES[tf];
-  if (!ms) throw new Error(`Unknown timeframe: ${tf}`);
-  return ms;
+  const spec = parseTimeframe(tf);
+  return spec.months ? spec.months * 30 * DAY_MS : spec.ms;
+}
+
+/** The start of the bucket holding `t`, on the edges the market reads: UTC
+ *  midnight for days, Monday for weeks, the first of the month for months. */
+export function bucketStart(t, spec) {
+  if (spec.months) {
+    const d = new Date(t);
+    const index = d.getUTCFullYear() * 12 + d.getUTCMonth();
+    const floored = Math.floor(index / spec.months) * spec.months;
+    return Date.UTC(Math.floor(floored / 12), floored % 12, 1);
+  }
+  const anchor = spec.ms % WEEK_MS === 0 ? WEEK_ANCHOR_MS : 0;
+  return Math.floor((t - anchor) / spec.ms) * spec.ms + anchor;
+}
+
+/** The instant the bucket starting at `start` ends (its next bucket's start). */
+export function bucketEnd(start, spec) {
+  if (spec.months) {
+    const d = new Date(start);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + spec.months, 1);
+  }
+  return start + spec.ms;
 }
 
 function datasetPath(dataDir, symbol) {
@@ -225,7 +308,13 @@ export function lowerBound(data, target) {
 }
 
 /**
- * Aggregates base-timeframe bars into `tf`, bucketed on UTC boundaries.
+ * Aggregates base-timeframe bars into `tf`, bucketed on the edges the market
+ * reads (see {@link bucketStart}).
+ *
+ * The scan starts at the beginning of the bucket `from` falls in, not at `from`
+ * itself: a caller asking from the middle of an hour still means that hour, and
+ * building its candle out of the minutes after `from` alone would draw a bar
+ * that never traded. It can therefore return one bar that opens before `from`.
  *
  * With `dropIncomplete` set, a trailing bucket that the data does not fully
  * cover is withheld — a half-filled bucket handed to a strategy is exactly the
@@ -236,17 +325,17 @@ export function lowerBound(data, target) {
  * (futures, equities) need session-aware boundaries — not implemented yet.
  */
 export function aggregate(data, from, to, tf, dropIncomplete = true) {
-  const step = timeframeMs(tf);
+  const spec = parseTimeframe(tf);
   const out = [];
   const count = data.length / STRIDE;
 
-  let i = lowerBound(data, from);
-  let bucketStart = -1;
+  let i = lowerBound(data, bucketStart(from, spec));
+  let open = -1;
   let o = 0, h = 0, l = 0, c = 0, v = 0, bv = 0;
 
   const flush = () => {
-    if (bucketStart >= 0) {
-      out.push({ time: bucketStart, open: o, high: h, low: l, close: c, volume: v, buyVolume: bv });
+    if (open >= 0) {
+      out.push({ time: open, open: o, high: h, low: l, close: c, volume: v, buyVolume: bv });
     }
   };
 
@@ -255,10 +344,10 @@ export function aggregate(data, from, to, tf, dropIncomplete = true) {
     const t = data[base];
     if (t >= to) break;
 
-    const bs = Math.floor(t / step) * step;
-    if (bs !== bucketStart) {
+    const bs = bucketStart(t, spec);
+    if (bs !== open) {
       flush();
-      bucketStart = bs;
+      open = bs;
       o = data[base + 1];
       h = data[base + 2];
       l = data[base + 3];
@@ -277,9 +366,9 @@ export function aggregate(data, from, to, tf, dropIncomplete = true) {
 
   // The last bucket counts as closed only if data exists up to its final minute.
   const lastTime = count ? data[(count - 1) * STRIDE] : 0;
-  const reachesEnd = bucketStart >= 0
-    && Math.min(lastTime, to - 1) >= bucketStart + step - timeframeMs(BASE_TIMEFRAME);
-  if (bucketStart >= 0 && (reachesEnd || !dropIncomplete)) flush();
+  const reachesEnd = open >= 0
+    && Math.min(lastTime, to - 1) >= bucketEnd(open, spec) - timeframeMs(BASE_TIMEFRAME);
+  if (open >= 0 && (reachesEnd || !dropIncomplete)) flush();
 
   return out;
 }
@@ -288,7 +377,9 @@ export function aggregate(data, from, to, tf, dropIncomplete = true) {
 export async function readBars(dataDir, symbol, tf, from, to, dropIncomplete = true) {
   const data = await readDataset(dataDir, symbol);
   if (!data) throw new Error(`No local data for ${symbol}. Download or import it first.`);
-  if (tf === BASE_TIMEFRAME) {
+  // Both dialects spell the base bar (`1m` and Vela's bare `1`); either takes the
+  // straight read, which aggregating would only reproduce one bucket at a time.
+  if (timeframeMs(tf) === timeframeMs(BASE_TIMEFRAME)) {
     const out = [];
     const count = data.length / STRIDE;
     for (let i = lowerBound(data, from); i < count; i++) {

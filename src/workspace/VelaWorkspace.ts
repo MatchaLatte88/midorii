@@ -612,6 +612,7 @@ export class VelaWorkspace {
             opts.bottombar !== false
                 ? new Bottombar(this.root, {
                       timezone: this.timezone,
+                      ...(opts.brand ? { brand: opts.brand } : {}),
                       onRange: (preset) => {
                           this.active.applyRange(preset);
                           this.bottombar?.setActiveRange(preset.id);

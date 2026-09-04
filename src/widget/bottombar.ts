@@ -66,6 +66,26 @@ const CSS = `
 }
 .vela-bb-range:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 .vela-bb-range[data-active='1'] { color: var(--vela-fg-bright); background: var(--vela-hover); }
+.vela-bb-brand {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-right: 8px;
+    padding-right: 10px;
+    border-right: 1px solid var(--vela-border);
+    white-space: nowrap;
+}
+.vela-bb-brand-name { color: var(--vela-fg-bright); font-weight: 700; letter-spacing: 0.01em; }
+.vela-bb-version {
+    all: unset;
+    padding: 2px 5px;
+    border-radius: 4px;
+    color: var(--vela-fg-muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+}
+.vela-bb-version[data-clickable] { cursor: pointer; }
+.vela-bb-version[data-clickable]:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 .vela-bb-spacer { flex: 1 1 auto; }
 .vela-bb-clock { font-variant-numeric: tabular-nums; color: var(--vela-fg-bright); font-weight: 600; }
 .vela-bb-tz {
@@ -113,10 +133,25 @@ const CSS = `
 .vela-bb-settings:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 `;
 
+/** The host application's own mark in the corner of its chrome. */
+export interface BottombarBrand {
+    /** The application name, shown first in the bar. */
+    name: string;
+    /** Its version, beside the name. */
+    version: string;
+    /** Called when the version is clicked — a host that has release notes shows them. */
+    onVersionClick?: () => void;
+    /** Tooltip/label for the version, when it is clickable. Default `'Release notes'`. */
+    versionLabel?: string;
+}
+
 export interface BottombarOptions {
     timezone: string;
     onRange: (preset: RangePreset) => void;
     onTimezone: (zone: string) => void;
+    /** Identifies the application in the bottom-left. Omitted, the bar starts with
+     *  the range chips as before — the library itself claims no corner. */
+    brand?: BottombarBrand;
     /** RTH/ETH toggled by the user. Fires only while the toggle is ENABLED (see {@link Bottombar.setSession}). */
     onSession?: (session: 'regular' | 'extended') => void;
     onSettingsClick?: () => void;
@@ -142,6 +177,7 @@ export class Bottombar {
 
         this.el = doc.createElement('div');
         this.el.className = 'vela-widget-bottombar';
+        if (opts.brand) this.el.appendChild(this.buildBrand(doc, opts.brand));
         for (const preset of RANGE_PRESETS) {
             const b = doc.createElement('button');
             b.className = 'vela-bb-range';
@@ -244,6 +280,32 @@ export class Bottombar {
         this.tzMenu.destroy();
         this.settingsTip?.destroy();
         this.el.remove();
+    }
+
+    /** The host's name and version, first thing in the bar. The version is a button
+     *  only where the host gave it somewhere to go — a dead one would just tease. */
+    private buildBrand(doc: Document, brand: BottombarBrand): HTMLElement {
+        const wrap = doc.createElement('span');
+        wrap.className = 'vela-bb-brand';
+
+        const name = doc.createElement('span');
+        name.className = 'vela-bb-brand-name';
+        name.textContent = brand.name;
+
+        const version = doc.createElement('button');
+        version.className = 'vela-bb-version';
+        version.textContent = brand.version;
+        if (brand.onVersionClick) {
+            version.dataset.clickable = '1';
+            version.setAttribute('aria-label', brand.versionLabel ?? 'Release notes');
+            version.title = brand.versionLabel ?? 'Release notes';
+            version.addEventListener('click', brand.onVersionClick);
+        } else {
+            version.disabled = true;
+        }
+
+        wrap.append(name, version);
+        return wrap;
     }
 
     private tzItems() {

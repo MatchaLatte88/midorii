@@ -1,8 +1,12 @@
 import { timeframeToMs } from '../../../src';
 import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor } from '../../../src';
 
-/** Timeframes barStore.js knows how to serve — see electron/data/store/barStore.js TIMEFRAMES. */
-const SUPPORTED_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
+/**
+ * The timeframes worth advertising. The store aggregates from 1-minute bars and
+ * buckets any whole multiple of them, so this is a menu rather than a limit —
+ * a typed `7` or `3h` is served just as well (see barStore.js parseTimeframe).
+ */
+const SUPPORTED_TIMEFRAMES = ['1', '3', '5', '15', '30', '60', '120', '240', '360', '720', 'D', 'W', 'M'] as const;
 
 /**
  * Bridges Vela's DataProvider port to Midori's local bar store over the

@@ -14,7 +14,7 @@ export {
 } from './topbar-composition';
 export { Statusline, type StatuslineMenuHooks, type StatuslinePart } from './statusline';
 export { Watermark } from './watermark';
-export { Bottombar, RANGE_PRESETS, type BottombarOptions, type RangePreset } from './bottombar';
+export { Bottombar, RANGE_PRESETS, type BottombarBrand, type BottombarOptions, type RangePreset } from './bottombar';
 export { SymbolPicker, filterSymbols, type SymbolPickerOptions } from './symbol-picker';
 export { IndicatorPicker, type IndicatorPickerOptions, type IndicatorRow } from './indicator-picker';
 export { TimeframeQuick, type TimeframeQuickOptions } from './timeframe-quick';

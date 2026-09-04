@@ -6,6 +6,7 @@
 // (one chart vs N cells) is noted per field, never a semantic fork.
 import type { DataProvider } from '../core/ports/DataProvider';
 import type { ScriptingEngine } from '../core/ports/ScriptingEngine';
+import type { BottombarBrand } from './bottombar';
 import type { IndicatorManifest, IndicatorLoader } from './indicators';
 import type { VelaStorage } from './persist';
 import type { TopbarComposition } from './topbar-composition';
@@ -35,6 +36,9 @@ export interface VelaShellOptions {
     statusline?: boolean;
     watermark?: boolean;
     bottombar?: boolean;
+    /** The host application's name and version, shown at the left end of the bottom
+     *  bar. Omitted, that corner stays as it is — the library brands nothing itself. */
+    brand?: BottombarBrand;
     /** Declarative topbar composition: `{ left, right }` lists of the VISIBLE entries,
      *  in render order — built-in ids (`'symbol'`, `'timeframes'`, `'style'`,
      *  `'layout'`, `'indicators'`, `'actions'`, `'undo-redo'`, `'alerts'`, `'panels'`,

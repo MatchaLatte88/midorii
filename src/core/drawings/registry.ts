@@ -74,6 +74,7 @@ import { Shark } from './types/Shark';
 import { Cypher } from './types/Cypher';
 import { DatePriceRange } from './types/DatePriceRange';
 import { PositionTool } from './types/PositionTool';
+import { FairValueGap } from './types/FairValueGap';
 import { Magnifier } from './types/Magnifier';
 
 /** What a drawing type contributes to the toolbar + factory (renderer-neutral). */
@@ -929,6 +930,25 @@ registerDrawingType({
     icon: POSITION_ICON,
     defaultStyle: { lineColor: DEFAULT_DRAWING_COLOR, lineWidth: 1, lineStyle: 'solid' },
     create: (init) => new PositionTool(init),
+});
+
+// ── fair value gap ──
+// The three-bar imbalance itself: two edges with the untraded strip between them.
+const FVG_ICON = svg24(
+    '<rect x="3.5" y="8" width="17" height="8" rx="1" fill="currentColor" fill-opacity="0.18"/>' +
+        '<path d="M3.5 8h17M3.5 16h17"/><path d="M3.5 12h17" opacity="0.45" stroke-dasharray="2 3"/>',
+);
+
+registerDrawingType({
+    type: 'fvg',
+    group: 'measure',
+    label: 'Fair Value Gap',
+    icon: FVG_ICON,
+    // The edge color is overwritten on placement with the gap's own direction (bull/bear); this
+    // default only shows on a drawing built headlessly.
+    defaultStyle: { lineColor: DEFAULT_DRAWING_COLOR, lineWidth: 1, lineStyle: 'solid' },
+    placementHint: 'Click an imbalance to mark it — the box snaps to the gap',
+    create: (init) => new FairValueGap(init),
 });
 
 // ── magnifier (lower-timeframe inset) ──

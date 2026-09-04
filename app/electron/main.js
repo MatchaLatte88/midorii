@@ -10,7 +10,7 @@ import { TITLEBAR, TITLEBAR_HEIGHT } from './titlebar.js';
 app.setName('project-midori');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEV_URL = 'http://localhost:5300';
+const DEV_URL = 'http://localhost:5301';
 const isDev = !app.isPackaged;
 
 let win = null;

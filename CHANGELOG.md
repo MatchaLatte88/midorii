@@ -1,6 +1,64 @@
 # Changelog
 
-All notable changes to Vela, newest first.
+All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
+Vela's — the charting library Midorii is built on and forked from.
+
+## [v0.2.0]
+
+### Added
+
+- **Every market source, in one symbol picker.** Binance, Coinbase and
+  Hyperliquid are now charted live alongside the markets already downloaded to
+  this machine — thousands of pairs, perpetuals and spot markets, with the same
+  tools on all of them.
+- **Downloading market data from any of the three venues.** A new button in the
+  toolbar asks for a venue, a market and a date range, suggests the markets that
+  venue lists, and reports every archive month or page of candles as it lands.
+  It also says what a venue had nothing for, instead of quietly leaving a hole
+  in the history. A market already downloaded from one venue is never merged
+  with another venue's prints — those are two different markets.
+- **The app name and version in the status bar.** Bottom-left, next to the
+  range buttons. Clicking the version opens the release notes for the version
+  you are running.
+- **Any timeframe on downloaded data.** Local markets are no longer limited to
+  seven fixed resolutions: anything that is a whole number of minutes is
+  available, weeks open on Monday, and months follow the calendar.
+- **A fair value gap tool.** Click an imbalance and the box snaps to it: the
+  three-bar gap under the pointer, drawn from the bar that opened it to the bar
+  that filled it, or on to the live edge while it is still open. Zones are tinted
+  for the side they came from, carry an optional midpoint line, and stacked gaps
+  that run together read as one. A click that finds no imbalance marks nothing and
+  leaves the tool armed, so the next click can simply try again.
+
+### Changed
+
+- **The timeframe is yours to change during a replay.** It is no longer asked
+  for before a session starts and fixed for its whole length. Switch resolution
+  whenever you like: the clock, the account, every position and every resting
+  order carry across untouched, and a switch that lands part-way through a bar
+  shows that bar as far as it has actually got rather than skipping the minutes
+  in between. A session you put down comes back on the timeframe you left it on.
+- **The main window is the full chart workspace.** Symbol picker, timeframes,
+  drawing tools, indicators and the status bar, rather than a bare chart with a
+  single button on it. Replay now starts from its own toolbar button, and the
+  market you were last looking at is remembered.
+- **The long and short position reads like a trade ticket.** Its numbers now sit
+  inside the block, each against the level it belongs to and facing the entry, set
+  in a monospaced face so prices and percentages line up in a column. Target and
+  stop show their price beside the move to them, the direction and reward-to-risk
+  sit together as a heading, and risk and size follow underneath. The entry line
+  stays dashed whatever the two edges are set to, so the three levels never read
+  as one. Prices show by default rather than only on request.
+
+### Fixed
+
+- **Changing the timeframe no longer breaks a chart of local data.** Picking
+  `4h` from the chart's own timeframe menu used to fail outright, because the
+  chart and the local archive did not spell timeframes the same way. They now
+  understand each other in both directions.
+- **A bar at the left edge of the screen is the whole bar.** Asking for history
+  from the middle of an hour used to build that hour's candle out of only the
+  part that was asked for, drawing a bar that never traded.
 
 ## [v0.6.16]
 

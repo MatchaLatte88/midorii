@@ -142,17 +142,18 @@ describe('drawings/position tools', () => {
         expect(d.directionLabel()).toBe('SHORT');
     });
 
-    it('label toggles: showPrices appends levels; header/loss/size lines are separate strings', () => {
+    it('label toggles: showPrices carries the level prices; header/loss/size lines are separate strings', () => {
         const d = createDrawing('position', { paneId: 'price', anchors: [{ time: 0, price: 50 }, { time: 5 * HR, price: 40 }, { time: 10 * HR, price: 70 }] })! as PositionTool;
         expect(d.showText).toBe(true);
         expect(d.showLossSize).toBe(true);
-        expect(d.showPrices).toBe(false);
-        expect(d.headerLabel()).toBe('LONG  ·  R:R 2.00');
-        expect(d.targetLabel()).toBe('Target +40.00%');
-        expect(d.stopLabel()).toBe('Stop −20.00%');
-        d.applySettings({ showPrices: true });
-        expect(d.targetLabel()).toBe('Target +40.00%  @ 70.00');
-        expect(d.stopLabel()).toBe('Stop −20.00%  @ 40.00');
+        expect(d.showPrices).toBe(true); // the entry readout is part of the block's standard look
+        expect(d.headerLabel()).toBe('LONG   R:R 2.00');
+        expect(d.targetLabel()).toBe('TP  70.00   +40.00%');
+        expect(d.stopLabel()).toBe('SL  40.00   −20.00%');
+        expect(d.entryLabel()).toBe('Entry  50.00');
+        d.applySettings({ showPrices: false }); // percentages alone
+        expect(d.targetLabel()).toBe('TP  +40.00%');
+        expect(d.stopLabel()).toBe('SL  −20.00%');
         d.applySettings({ showText: false, showLossSize: false });
         expect(d.showText).toBe(false);
         expect(d.showLossSize).toBe(false);

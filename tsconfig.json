@@ -20,6 +20,6 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["src", "test", "app"],
+  "include": ["src", "test", "app", "shared"],
   "exclude": ["node_modules", "dist"]
 }
