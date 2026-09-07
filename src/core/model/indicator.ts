@@ -73,6 +73,16 @@ export interface IndicatorModel {
      */
     ownScale?: boolean;
     /**
+     * When false, the drawings this indicator emits do NOT expand its pane's autoscale — the
+     * scale is computed as if they were not there, and they are simply clipped like anything
+     * else off screen. The norm is the opposite (a box an indicator drew is content the pane
+     * has to show), so this is only for an indicator whose drawings are CONTEXT spread over
+     * the whole price history: fair value gaps stand until price fills them, and the oldest
+     * ones sit far enough below the market that folding them in squashes the candles into a
+     * band. Absent ⇒ they expand it.
+     */
+    autoscaleDrawings?: boolean;
+    /**
      * Chart time (epoch ms) of the execution's FIRST bar. Index-aligned payloads —
      * dense series point/bar arrays and `bar_index` drawing coordinates — count from
      * this bar, so a renderer aligns them to the chart via the offset of this time in

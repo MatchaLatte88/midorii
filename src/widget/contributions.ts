@@ -34,6 +34,13 @@ export interface WidgetContext {
      *  (Dialog/Menu/Tooltip) from an action; without an explicit host they portal to
      *  the body, OUTSIDE the theme variables. A multi-chart shell hands its own root. */
     host: HTMLElement;
+    /** The BUTTON this invocation came from, where it came from one — the topbar's own
+     *  projection of the action. An action whose job is to open a menu anchors it here
+     *  (`new Menu({ trigger })`, or `openAt` on its rect) so the list hangs off its own
+     *  button instead of guessing at a corner. Absent when the action was run from
+     *  anywhere else (a context menu, a keyboard route, a host calling `run` directly),
+     *  so treat it as a hint and never as the thing the action operates on. */
+    trigger?: HTMLElement;
     /** The widget's feedback pill (bottom-center, auto-hides). */
     toast(message: string, kind?: 'info' | 'success' | 'error'): void;
     /** Add a SCRIPT indicator to the active chart THROUGH THE SHELL — unlike the raw

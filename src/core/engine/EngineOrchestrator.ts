@@ -117,6 +117,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
     /** The maximized pane (mirror), or null when the split is normal. */
     private maximizedPaneId: string | null = null;
     private paneActionUnsub: Unsubscribe | null = null;
+    private priceLineUnsub: Unsubscribe | null = null;
     private readonly handles = new Map<string, IndicatorHandleImpl>();
     private readonly engines = new Map<string, ScriptingEngine>();
     private readonly defaultLanguage: string;
@@ -208,6 +209,15 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
         // pane's indicators; the rest are already applied by the renderer — this keeps the
         // `chart.panes` view + collapse/maximize mirror in sync).
         this.paneActionUnsub = this.renderer.onPaneAction?.((a) => this.handlePaneAction(a)) ?? null;
+        /* Price lines belong to whoever published them, so their interactions are only
+         * REPORTED here: the chart never moves a level on its own. */
+        this.priceLineUnsub = this.renderer.onPriceLineAction?.((a) => {
+            if (a.type === 'moved') this.events.emit('priceline:moved', { id: a.id, price: a.price });
+            else if (a.type === 'spawned') this.events.emit('priceline:spawned', { id: a.id, price: a.price });
+            else if (a.type === 'action') this.events.emit('priceline:action', { id: a.id, action: a.action });
+            else if (a.type === 'contextmenu') this.events.emit('priceline:contextmenu', { id: a.id });
+            else this.events.emit('priceline:dblclick', { id: a.id });
+        }) ?? null;
         // Chart-type SDK settings edited in the renderer's dialog (or replayed by
         // applyConfig on a persisted restore) → remember them AND forward to the
         // type's data engine. The cache matters: the engine may not exist yet (a
@@ -1448,6 +1458,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
         if (this.viewportTimer != null) clearTimeout(this.viewportTimer);
         this.viewportUnsub?.();
         this.paneActionUnsub?.();
+        this.priceLineUnsub?.();
         // native instances free their own caches/timers in stop()
         for (const record of this.registry.all()) {
             record.session?.stop();
@@ -1602,6 +1613,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
             paneHint: d.paneHint,
             native: { type: record.native!.type },
             ...(out.paneAxis != null ? { paneAxis: out.paneAxis } : {}),
+            ...(d.autoscaleDrawings === false ? { autoscaleDrawings: false } : {}),
             series: out.series ?? [],
             fills: out.fills ?? [],
             backgrounds: out.backgrounds ?? [],

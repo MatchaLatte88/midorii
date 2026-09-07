@@ -25,6 +25,11 @@ const { version } = JSON.parse(
  */
 export default defineConfig({
     root: 'app/renderer',
+    /* Relative asset URLs. The packaged app loads the build through loadFile(), so the page
+     * and everything it pulls in — the bundle, and the sweep's worker chunk — are fetched
+     * over file://, where an absolute /assets/… path resolves to the filesystem root and
+     * loads nothing. */
+    base: './',
     define: { __APP_VERSION__: JSON.stringify(version) },
     server: {
         port: 5301,

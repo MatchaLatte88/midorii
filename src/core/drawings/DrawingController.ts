@@ -180,6 +180,10 @@ export class DrawingController {
     }
 
     /** Push per-tool shortcut hints (pre-formatted display strings) to the toolbar flyouts. */
+    setContextMenu(on: boolean): void {
+        this.port?.setContextMenuHandled?.(on);
+    }
+
     setToolShortcuts(map: Readonly<Partial<Record<DrawingTypeKey, string>>>): void {
         this.port?.setToolShortcuts?.(map);
     }
@@ -505,6 +509,9 @@ export class DrawingController {
                 break;
             case 'settings':
                 this.events.emit('drawing:settings', { id: i.id });
+                break;
+            case 'context-menu':
+                this.events.emit('drawing:contextmenu', { id: i.id, x: i.x, y: i.y });
                 break;
             case 'favorite':
                 this.setFavorite(i.type, i.on);

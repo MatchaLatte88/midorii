@@ -76,8 +76,10 @@ export function themeTokens(t: VelaTheme): Record<string, string> {
         '--vela-separator-hover-band': withAlpha(t.textColor, 0.1),
         '--vela-separator-hover-line': withAlpha(t.textColor, 0.55),
         '--vela-scroll': withAlpha(t.textColor, 0.3),
-        '--vela-accent': ACCENT,
-        '--vela-accent-bright': ACCENT_BRIGHT,
+        // The brand's unless the theme states its own — see VelaTheme.accent. A theme that
+        // only changes lightness leaves both alone, so dark and light keep one accent.
+        '--vela-accent': t.accent ?? ACCENT,
+        '--vela-accent-bright': t.accentBright ?? ACCENT_BRIGHT,
         '--vela-highlight': HIGHLIGHT,
         // The inverse chip: a filled selected state (active tab, ticked checkbox). Its ink
         // must contrast the fill, so the pair flips together with the theme.

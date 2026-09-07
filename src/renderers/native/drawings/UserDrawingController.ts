@@ -127,6 +127,7 @@ export class UserDrawingController implements IDrawingsRendererPort {
     historyChords = true;
     private measureMode = false; // the ruler is armed (placing a measurement)
     private eraserMode = false; // click/drag over a drawing deletes it
+    private hostContextMenu = false; // host answers right-presses on drawings (off ⇒ chart menu)
     private erasing = false; // a button is held during eraser mode (so a drag erases multiple)
     // The inline on-chart text editor: its element, the id of the drawing it edits, the text it
     // opened with (so Escape can put it back), and the text the core currently holds (so an edit is
@@ -293,6 +294,11 @@ export class UserDrawingController implements IDrawingsRendererPort {
         this.toolbar.setFavorites(types);
     }
 
+    /** Core push: the host handles right-presses on drawings (see `DrawingsControl.setContextMenu`). */
+    setContextMenuHandled(on: boolean): void {
+        this.hostContextMenu = on;
+    }
+
     /** Core push: per-tool shortcut hints (display strings) shown in the toolbar flyouts. */
     setToolShortcuts(map: Readonly<Partial<Record<DrawingTypeKey, string>>>): void {
         this.toolbar.setShortcuts(map);
@@ -400,6 +406,21 @@ export class UserDrawingController implements IDrawingsRendererPort {
         if (!hit || hit.locked) return false;
         this.popup.close();
         this.emit({ kind: 'delete', ids: [hit.id] });
+        return true;
+    }
+
+    /**
+     * Right-press over a drawing: report it so the host can put its own menu at the cursor.
+     *
+     * Nothing is selected or mutated here — a context menu is a question, not an edit, and a
+     * right-press that lands on nothing must still reach the chart's own menu. `cx`/`cy` are
+     * the viewport coordinates of the press, which is what a menu anchors to.
+     */
+    contextAt(x: number, y: number, cx: number, cy: number): boolean {
+        if (!this.hostContextMenu) return false; // no host menu ⇒ the chart's own menu still owns the press
+        const hit = topDrawingAt(this.drawings, x, y, this.deps.projector(), HIT_TOLERANCE);
+        if (!hit) return false;
+        this.emit({ kind: 'context-menu', id: hit.id, x: cx, y: cy });
         return true;
     }
 
@@ -900,7 +921,11 @@ export class UserDrawingController implements IDrawingsRendererPort {
             sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             sctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
             this.painter.seriesLook = this.deps.seriesLook();
+            // Bodies only: what belongs over the candles is painted again on the top canvas,
+            // by `render`, which is also the only pass that knows what is hovered.
+            this.painter.overlays = false;
             this.painter.paintAll(sctx, drawings, proj, theme, EMPTY_TARGETS);
+            this.painter.overlays = true;
             const slices = out.get(paneId) ?? [];
             slices.push({ beforeZ, canvas });
             out.set(paneId, slices);
@@ -935,7 +960,9 @@ export class UserDrawingController implements IDrawingsRendererPort {
         // — buried under the candles they'd be unusable.
         this.painter.seriesLook = this.deps.seriesLook();
         this.painter.paintAll(ctx, this.drawings.filter((d) => !this.isInterleaved(d)), proj, this.deps.theme(), targets);
-        this.painter.paintHighlights(ctx, this.drawings.filter((d) => this.isInterleaved(d)), proj, handleIdsFor(targets));
+        const interleaved = this.drawings.filter((d) => this.isInterleaved(d));
+        this.painter.paintOverlays(ctx, interleaved, proj, this.deps.theme(), targets);
+        this.painter.paintHighlights(ctx, interleaved, proj, handleIdsFor(targets));
         this.layoutTextEditor();
         const ghost = this.interaction.ghost();
         if (ghost) this.painter.paintGhost(ctx, ghost, proj, this.deps.theme());

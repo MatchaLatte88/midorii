@@ -10,5 +10,16 @@ declare module '*.md?raw' {
     export default content;
 }
 
+/**
+ * Vite's `?worker` suffix: the module, bundled as a worker script, as a constructor.
+ *
+ * Declared here rather than pulled in with `vite/client`, which would bring the whole
+ * ambient environment along with it — this project's tsconfig lists no `types` on purpose.
+ */
+declare module '*?worker' {
+    const WorkerConstructor: new () => Worker;
+    export default WorkerConstructor;
+}
+
 /** The app version, stamped in from package.json at build time (see vite.config.ts). */
 declare const __APP_VERSION__: string;

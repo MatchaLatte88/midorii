@@ -14,7 +14,7 @@
  * Metadata lives beside it as <name>.meta.json so the catalog can list what
  * is on disk without opening the binary.
  */
-import { readFile, writeFile, rename, mkdir, readdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
@@ -209,6 +209,10 @@ export async function mergeBars(dataDir, symbol, bars, extraMeta = {}) {
 
   const existing = await readDataset(dataDir, symbol);
   const existingCount = existing ? existing.length / STRIDE : 0;
+  /* What the dataset already says about itself. Merging is not the moment to forget
+   * which venue it came from or how long its bars are — a caller that passes neither
+   * is adding bars to a dataset, not redefining it. */
+  const existingMeta = await readMeta(dataDir, symbol);
 
   // Index incoming bars by timestamp so duplicates collapse before the merge.
   const incoming = new Map();
@@ -283,6 +287,8 @@ export async function mergeBars(dataDir, symbol, bars, extraMeta = {}) {
     symbol,
     timeframe: BASE_TIMEFRAME,
     format: FORMAT_VERSION,
+    ...(existingMeta?.source ? { source: existingMeta.source } : {}),
+    ...(Number.isFinite(existingMeta?.baseMs) ? { baseMs: existingMeta.baseMs } : {}),
     count: total,
     first: total ? final[0] : null,
     last: total ? final[(total - 1) * STRIDE] : null,
@@ -324,7 +330,7 @@ export function lowerBound(data, target) {
  * Note: UTC bucketing is correct for 24/7 crypto. Session-based markets
  * (futures, equities) need session-aware boundaries — not implemented yet.
  */
-export function aggregate(data, from, to, tf, dropIncomplete = true) {
+export function aggregate(data, from, to, tf, dropIncomplete = true, baseMs = MINUTE_MS) {
   const spec = parseTimeframe(tf);
   const out = [];
   const count = data.length / STRIDE;
@@ -364,22 +370,43 @@ export function aggregate(data, from, to, tf, dropIncomplete = true) {
     }
   }
 
-  // The last bucket counts as closed only if data exists up to its final minute.
+  /* The last bucket counts as closed only if data exists up to its final base bar.
+   * `baseMs` rather than a minute: an imported dataset's base bar is whatever the file
+   * carried, and measuring an hourly dataset's last bucket against a minute would
+   * withhold every trailing bucket in it. */
   const lastTime = count ? data[(count - 1) * STRIDE] : 0;
   const reachesEnd = open >= 0
-    && Math.min(lastTime, to - 1) >= bucketEnd(open, spec) - timeframeMs(BASE_TIMEFRAME);
+    && Math.min(lastTime, to - 1) >= bucketEnd(open, spec) - baseMs;
   if (open >= 0 && (reachesEnd || !dropIncomplete)) flush();
 
   return out;
 }
 
-/** Reads a time range at the requested timeframe. */
+/**
+ * Reads a time range at the requested timeframe.
+ *
+ * Everything is aggregated up from the dataset's own base bar, which is a minute for
+ * anything downloaded and whatever the file carried for anything imported. Asking for a
+ * timeframe finer than that throws rather than returning the stored bars relabelled: an
+ * hourly dataset served as minutes would put four-figure candles on a 1m chart and hand
+ * a backtest sixty times the history it thinks it has.
+ */
 export async function readBars(dataDir, symbol, tf, from, to, dropIncomplete = true) {
   const data = await readDataset(dataDir, symbol);
   if (!data) throw new Error(`No local data for ${symbol}. Download or import it first.`);
-  // Both dialects spell the base bar (`1m` and Vela's bare `1`); either takes the
-  // straight read, which aggregating would only reproduce one bucket at a time.
-  if (timeframeMs(tf) === timeframeMs(BASE_TIMEFRAME)) {
+
+  const baseMs = await baseIntervalMs(dataDir, symbol);
+  const wanted = timeframeMs(tf);
+  if (wanted < baseMs) {
+    throw new Error(
+      `${symbol} is stored as ${describeMs(baseMs)} bars — "${tf}" is finer than that. `
+      + `Ask for ${describeMs(baseMs)} or longer, or import the finer data.`,
+    );
+  }
+
+  // The base bar itself takes the straight read, which aggregating would only
+  // reproduce one bucket at a time.
+  if (wanted === baseMs) {
     const out = [];
     const count = data.length / STRIDE;
     for (let i = lowerBound(data, from); i < count; i++) {
@@ -393,7 +420,48 @@ export async function readBars(dataDir, symbol, tf, from, to, dropIncomplete = t
     }
     return out;
   }
-  return aggregate(data, from, to, tf, dropIncomplete);
+  return aggregate(data, from, to, tf, dropIncomplete, baseMs);
+}
+
+/**
+ * How long one stored bar is.
+ *
+ * A download always writes minutes; an import writes whatever the file had, and records
+ * it as `baseMs`. A dataset stored before imports existed has no such field and is a
+ * minute dataset by definition.
+ */
+export async function baseIntervalMs(dataDir, symbol) {
+  const meta = await readMeta(dataDir, symbol);
+  return Number.isFinite(meta?.baseMs) && meta.baseMs > 0 ? meta.baseMs : MINUTE_MS;
+}
+
+/** A duration as the timeframe someone would type: 60000 reads as "1m", 7200000 as "2h".
+ *  The largest unit it divides evenly, so a bar length always reads the way a chart
+ *  spells it rather than as 120 minutes. */
+export function describeMs(ms) {
+  for (const [suffix, length] of [['d', DAY_MS], ['h', HOUR_MS], ['m', MINUTE_MS]]) {
+    if (ms >= length && ms % length === 0) return `${ms / length}${suffix}`;
+  }
+  return `${Math.round(ms / 1000)}s`;
+}
+
+/**
+ * Removes a dataset — the bars and the metadata beside them.
+ *
+ * The counterpart to importing. Both refusals the store can raise about a dataset (the
+ * wrong venue, the wrong bar length) end in "remove it first", and an instruction the
+ * app gives no way to follow is not an instruction. Removing what is not there is not an
+ * error, so a half-written pair cannot wedge the library.
+ */
+export async function deleteDataset(dataDir, symbol) {
+  let removed = false;
+  for (const file of [datasetPath(dataDir, symbol), metaPath(dataDir, symbol)]) {
+    if (existsSync(file)) {
+      await unlink(file);
+      removed = true;
+    }
+  }
+  return removed;
 }
 
 /** Every dataset on disk, for the library view. */
@@ -409,6 +477,8 @@ export async function listDatasets(dataDir) {
     meta.format ??= 1;
     // A v1 dataset predates buy volume entirely.
     meta.barsWithBuyVolume ??= 0;
+    // Everything stored before imports existed is a minute dataset.
+    meta.baseMs ??= MINUTE_MS;
     out.push(meta);
   }
   return out.sort((a, b) => a.symbol.localeCompare(b.symbol));

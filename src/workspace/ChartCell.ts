@@ -180,6 +180,14 @@ export interface CellDeps {
     onStateDirty(): void;
     /** The shell's toast surface (unresolved-symbol notices land there). */
     toast(message: string, kind: 'info' | 'success' | 'error', durationMs?: number): void;
+    /**
+     * Settings-dialog sections contributed by the APP around the workspace, appended after the
+     * cell's own. Read on every push rather than captured, because an app registers them once
+     * the shell is up — long after the first cell exists — and every later cell has to get
+     * them too. Rows are callback-based, so one registration serves every cell and every
+     * reopening of the dialog reads the live values.
+     */
+    appSettingsSections?(): ReadonlyArray<{ title: string; rows: readonly unknown[]; placement?: 'after-symbol' | 'end' | 'symbol'; id?: string }>;
 }
 
 /** One live manifest/external instance and, when it deviates from declaration
@@ -758,7 +766,14 @@ export class ChartCell {
         sections.push(advanced);
         if (this.sessionAvailableFlag) sections.push(sessionSection);
         sections.push(watermarkSection);
+        sections.push(...(this.deps.appSettingsSections?.() ?? []));
         chart.renderer.setSettingsSections(sections);
+    }
+
+    /** Re-contribute the sections — for an app that registered (or changed) its own after
+     *  this cell was built. */
+    refreshSettingsSections(): void {
+        this.pushSettingsSections();
     }
 
     /** Show/hide this cell's symbol watermark (persisted per cell). */

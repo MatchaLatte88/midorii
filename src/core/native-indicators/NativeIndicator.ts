@@ -99,6 +99,9 @@ export interface NativeIndicatorDescriptor {
     readonly overlay: boolean;
     /** Whether instances react to viewport changes (drives the orchestrator's viewport poke). */
     readonly reactsToViewport?: boolean;
+    /** Keep this type's drawings out of the pane's autoscale (see
+     *  {@link import('../model/indicator').IndicatorModel.autoscaleDrawings}). Absent ⇒ they expand it. */
+    readonly autoscaleDrawings?: boolean;
     /** Marks the type as beta — surfaced in the catalog so a host "add indicator" UI can badge it. */
     readonly beta?: boolean;
     /**

@@ -1,8 +1,9 @@
 // Symbol picker — a search dialog over the providers' eager symbol indexes
 // (`chart.data.symbols()`). Kit Dialog + a lightweight ranked filter; selection reports
 // the ticker upward (the widget rebuilds the chart on it).
-import type { SymbolDescriptor } from '../core/ports/DataProvider';
+import type { SymbolDescriptor, ProviderInfo } from '../core/ports/DataProvider';
 import { Dialog } from '../ui/components/dialog';
+import { Menu, type MenuItemDescriptor } from '../ui/components/menu';
 import { injectStyles } from '../ui/styles';
 import { iconEl } from '../ui/icons';
 import { tickerIconEl, baseOf } from './symbol-icon';
@@ -169,6 +170,25 @@ const CSS = `
 }
 .vela-sp-tab:hover { color: var(--vela-fg); }
 .vela-sp-tab[data-active] { background: var(--vela-selected-bg); color: var(--vela-selected-fg); }
+/* Provider filter — a menu trigger sitting at the search row's trailing edge. */
+.vela-sp-provider {
+    all: unset;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    padding: 0 8px 0 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--vela-fg-muted);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.vela-sp-provider .vela-icon { font-size: 13px; width: 13px; height: 13px; }
+.vela-sp-provider:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
+.vela-sp-provider[data-active] { background: var(--vela-selected-bg); color: var(--vela-selected-fg); }
 .vela-sp-list {
     min-height: 0;
     margin: var(--vela-space-2) var(--vela-space-4) var(--vela-space-4);
@@ -260,11 +280,16 @@ export class SymbolPicker {
     private readonly input: HTMLInputElement;
     private readonly list: HTMLElement;
     private source: () => readonly SymbolDescriptor[] = () => [];
+    private providersSource: () => readonly ProviderInfo[] = () => [];
     private rows: SymbolDescriptor[] = [];
     private highlighted = 0;
     private seed = '';
     private activeTab = 'All';
+    /** Registered provider name, or null for "All providers". */
+    private activeProvider: string | null = null;
     private tabs!: HTMLElement;
+    private readonly providerButton: HTMLButtonElement;
+    private readonly providerMenu: Menu;
     private visible = PAGE;
     /** The last filter pass returned fewer raw rows than asked — the pool is drained
      *  (checked BEFORE folding: folding shortens pages without meaning exhaustion). */
@@ -285,7 +310,27 @@ export class SymbolPicker {
         this.input.setAttribute('spellcheck', 'false');
         const searchRow = doc.createElement('div');
         searchRow.className = 'vela-sp-searchrow';
-        searchRow.append(iconEl('search', doc), this.input);
+        this.providerButton = doc.createElement('button');
+        this.providerButton.className = 'vela-sp-provider';
+        this.providerButton.type = 'button';
+        this.providerButton.setAttribute('aria-label', 'Filter by provider');
+        this.renderProviderButton();
+        searchRow.append(iconEl('search', doc), this.input, this.providerButton);
+        this.providerMenu = new Menu({
+            trigger: this.providerButton,
+            triggerId: 'vela-sp-provider',
+            host: opts.host,
+            placement: 'bottom-end',
+            items: this.providerItems(),
+            onOpenChange: (open) => {
+                if (open) this.providerMenu.setItems(this.providerItems());
+            },
+            onSelect: (id) => {
+                this.activeProvider = id === 'all' ? null : id;
+                this.renderProviderButton();
+                this.refresh();
+            },
+        });
         this.tabs = doc.createElement('div');
         this.tabs.className = 'vela-sp-tabs';
         const head = doc.createElement('div');
@@ -379,6 +424,11 @@ export class SymbolPicker {
         this.source = source;
     }
 
+    /** Wire the registered-provider list the filter menu offers (re-called on rebuild). */
+    setProviders(source: () => readonly ProviderInfo[]): void {
+        this.providersSource = source;
+    }
+
     open(initialQuery = ''): void {
         this.seed = initialQuery;
         this.dialog.show();
@@ -389,7 +439,26 @@ export class SymbolPicker {
     }
 
     destroy(): void {
+        this.providerMenu.destroy();
         this.dialog.destroy();
+    }
+
+    /** Menu items for the provider filter — "All providers" plus one row per registration. */
+    private providerItems(): MenuItemDescriptor[] {
+        const items: MenuItemDescriptor[] = [{ id: 'all', label: 'All providers', checked: this.activeProvider === null }];
+        for (const p of this.providersSource()) {
+            items.push({ id: p.name, label: p.displayName ?? p.name, checked: this.activeProvider === p.name });
+        }
+        return items;
+    }
+
+    /** Sync the trigger's label/state to the current filter. */
+    private renderProviderButton(): void {
+        const doc = this.providerButton.ownerDocument;
+        const current = this.activeProvider ? this.providersSource().find((p) => p.name === this.activeProvider) : undefined;
+        this.providerButton.replaceChildren(doc.createTextNode(current ? (current.displayName ?? current.name) : 'All'), iconEl('chevron-down', doc));
+        if (this.activeProvider) this.providerButton.dataset.active = '1';
+        else delete this.providerButton.dataset.active;
     }
 
     /** Route a row activation: a GROUP row loads its default member (the root itself is
@@ -470,10 +539,11 @@ export class SymbolPicker {
     private computeRows(): SymbolDescriptor[] {
         const TAB_TYPES: Record<string, string[]> = { Crypto: ['crypto'], Stocks: ['stock'], ETFs: ['etf'], Futures: ['futures', 'root'], Forex: ['forex'], Commodities: ['commodity'] };
         const all = this.pool();
-        const pool =
+        const byTab =
             this.activeTab === 'All'
                 ? all
                 : all.filter((s) => TAB_TYPES[this.activeTab]?.includes((s.type ?? '').toLowerCase()) || (this.activeTab === 'Crypto' && (s.type ?? '').toLowerCase() === 'futures'));
+        const pool = this.activeProvider ? byTab.filter((s) => s.provider === this.activeProvider) : byTab;
         // A registered ranking OWNS the empty-query head — the built-in majors pin
         // stands down and the pool's own order shows.
         const filtered = filterSymbols(pool, this.input.value, this.visible, symbolRanking() ? false : TOP_TICKERS);

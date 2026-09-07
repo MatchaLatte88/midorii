@@ -33,6 +33,8 @@ export type DrawingIntent =
     | { kind: 'delete'; ids: string[] }
     | { kind: 'reorder'; id: string; to: 'front' | 'back' }
     | { kind: 'settings'; id: string }
+    /** Right-press landed on a drawing; `x`/`y` are viewport coordinates for the host's menu. */
+    | { kind: 'context-menu'; id: string; x: number; y: number }
     | { kind: 'tool-finished'; type: DrawingTypeKey }
     | { kind: 'favorite'; type: DrawingTypeKey; on: boolean } // flyout star toggled
     // The renderer-local magnet / mode state changed (in-chart toolbar click, or a
@@ -76,6 +78,10 @@ export interface IDrawingsRendererPort {
      *  shown beside the tools in the toolbar flyouts. The host owns the keymap and the
      *  platform formatting; the renderer only displays. Optional. */
     setToolShortcuts?(map: Readonly<Partial<Record<DrawingTypeKey, string>>>): void;
+    /** Host takes over right-presses on drawings: report them as an intent and keep the
+     *  chart's own context menu shut for that press. Off ⇒ a right-press on a drawing is
+     *  nothing special and the chart menu opens as it always did. */
+    setContextMenuHandled?(on: boolean): void;
     /** Set the sticky magnet snap mode (off/weak/strong). Optional — a renderer without
      *  a magnet omits it; the in-chart toolbar reflects the pushed value. */
     setSnapMode?(mode: SnapMode): void;

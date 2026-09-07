@@ -1,8 +1,25 @@
+import { parseRgb, withAlpha } from '../../../core/color';
 import type { VelaTheme } from '../../../core/options';
 import type { CoordinateSystem } from '../core/CoordinateSystem';
+import { blobAccentColor } from '../core/chartConfig';
 import { percentScaleFor, type SceneGraph } from '../core/SceneGraph';
 import { paneAxisTicks, timeTicks } from '../chrome/ticks';
 import { tzOffsetMs } from '../chrome/tz';
+
+/**
+ * The two ambient blobs, as fractions of the data area — a proportional translation of
+ * the CSS `radial-gradient(ellipse <w> <h> at <x> <y>, …)` pair they came from, so a
+ * narrow pane and a wide one get the same look instead of the same pixel radii. Each
+ * center sits just OUTSIDE its corner: what shows is the shoulder of the wash bleeding
+ * in, never a circle floating in the plot.
+ */
+const BLOB_GEOMETRY = [
+    { cx: 0.12, cy: -0.08, rx: 0.78, ry: 1.0 },
+    { cx: 1.04, cy: 1.08, rx: 0.66, ry: 0.89 },
+] as const;
+
+/** Where the wash has faded to nothing, as a fraction of the radius (CSS: `transparent 65%`). */
+const BLOB_FADE_STOP = 0.65;
 
 /** Clip one time-band rectangle to its permitted horizontal paint interval. */
 export function clipHighlightRect(x1: number, x2: number, left: number, right: number): { x: number; width: number } | null {
@@ -58,6 +75,11 @@ export class BackdropRenderer {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
 
+        // Cosmetic, not data — painted BEFORE the bar gate below, so a chart with no bars
+        // yet (first load, an empty symbol) still shows the tinted surface rather than
+        // flashing flat background until the first candle lands.
+        this.drawBlobs(ctx, scene, coords, theme);
+
         // Same gate as the geometry backend: no grid before data reaches the view.
         const n = coords.barCount;
         if (n === 0) return;
@@ -66,6 +88,49 @@ export class BackdropRenderer {
 
         this.drawHighlights(ctx, scene, coords);
         this.drawGrid(ctx, scene, coords, theme, coords.width, gridAlpha);
+    }
+
+    /** The ambient corner washes, under everything else on this canvas. Confined to the DATA
+     *  area (`coords.width/height`): the axis gutters are repainted opaque by the chrome layer,
+     *  so a blob running under them would be covered anyway — and clipping there keeps the
+     *  geometry keyed to what is actually visible. */
+    private drawBlobs(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme): void {
+        const blobs = scene.style.blobs;
+        if (!blobs.topLeft.visible && !blobs.bottomRight.visible) return;
+        const w = coords.width;
+        const h = coords.height;
+        if (w <= 0 || h <= 0) return;
+        const order = ['topLeft', 'bottomRight'] as const;
+        for (let i = 0; i < BLOB_GEOMETRY.length; i++) {
+            const which = order[i]!;
+            const layer = blobs[which];
+            if (!layer.visible) continue;
+            const g = BLOB_GEOMETRY[i]!;
+            this.drawBlob(ctx, w, h, g.cx * w, g.cy * h, g.rx * w, g.ry * h, layer.color ?? blobAccentColor(theme, which));
+        }
+    }
+
+    /** One elliptical wash. `createRadialGradient` only makes circles, so the ellipse comes
+     *  from scaling the axes around the blob's center and painting a unit-radius gradient in
+     *  that space (the fill rect is mapped back through the same scale). The outer stop is the
+     *  SAME color at alpha 0, not `transparent` — canvas interpolates gradients in premultiplied
+     *  RGBA, and fading to `rgba(0,0,0,0)` would drag a gray cast through the falloff. */
+    private drawBlob(ctx: CanvasRenderingContext2D, w: number, h: number, cx: number, cy: number, rx: number, ry: number, color: string): void {
+        if (rx <= 0 || ry <= 0) return;
+        // An unparseable color (a named CSS color, `currentColor`) cannot be re-emitted at
+        // alpha 0 — withAlpha hands it back unchanged, which would make the "faded" stop
+        // opaque and flood the pane. Fall back to clear black there instead.
+        const clear = parseRgb(color) ? withAlpha(color, 0) : 'rgba(0,0,0,0)';
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(rx, ry);
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+        grad.addColorStop(0, color);
+        grad.addColorStop(BLOB_FADE_STOP, clear);
+        grad.addColorStop(1, clear);
+        ctx.fillStyle = grad;
+        ctx.fillRect(-cx / rx, -cy / ry, w / rx, h / ry);
+        ctx.restore();
     }
 
     /** Renderer-owned session highlight bands: full-height (all panes), behind the grid.

@@ -231,6 +231,8 @@ export class VelaWorkspace {
     private readonly events = new TypedEventBus<WorkspaceEventMap>();
     private readonly feed = new MultiProviderFeed();
     private readonly cellsById = new Map<string, ChartCell>();
+    /** App-contributed settings-dialog tabs — see {@link setAppSettingsSections}. */
+    private appSettingsSections: ReadonlyArray<{ title: string; rows: readonly unknown[]; placement?: 'after-symbol' | 'end' | 'symbol'; id?: string }> = [];
     private readonly pool = new Map<string, PooledCellState>();
     private readonly trackSizes = new Map<string, TrackSizes>(); // per layout id (splitter drags)
     private readonly splitters: SplitterLayer;
@@ -419,6 +421,7 @@ export class VelaWorkspace {
             },
         });
         this.symbolPicker.setSource(() => this.feed.symbols());
+        this.symbolPicker.setProviders(() => this.feed.providers());
         // The picker exists only while it has an entry point left: the deprecated
         // `indicatorPicker: false`, a composition without 'indicators', or an OVERRIDE
         // of the slot all remove every one of them (topbar button, mobile-bar item,
@@ -1181,6 +1184,20 @@ export class VelaWorkspace {
         this.splitters.layout(); // each cell's renderer follows its own ResizeObserver
     }
 
+    /**
+     * Contribute the app's own tabs to every cell's chart-settings dialog, replacing whatever
+     * was registered before.
+     *
+     * The workspace's own sections describe a chart; an app built on it has settings that are
+     * about neither one chart nor one indicator — how a position is drawn, say — and those
+     * belong in the same dialog rather than in a second one somewhere else. Rows carry `get`
+     * and `set`, so the app keeps the state and this never holds a stale copy of it.
+     */
+    setAppSettingsSections(sections: ReadonlyArray<{ title: string; rows: readonly unknown[]; placement?: 'after-symbol' | 'end' | 'symbol'; id?: string }>): void {
+        this.appSettingsSections = sections;
+        for (const cell of this.cellsById.values()) cell.refreshSettingsSections();
+    }
+
     /** Show a toast over the grid — the same surface the shell's own notices use
      *  (alerts, script errors) and the one contributions reach via `ctx.toast`. */
     toast(message: string, kind: 'info' | 'success' | 'error' = 'info', durationMs = 3000): void {
@@ -1478,6 +1495,7 @@ export class VelaWorkspace {
                 onIndicatorsChanged: (id) => this.onCellIndicatorsChanged(id),
                 onStatusPrefsChanged: (id) => this.propagateStylePrefs(id),
                 onStateDirty: () => this.markStateDirty(),
+                appSettingsSections: () => this.appSettingsSections,
                 manifestSettled: () => this.manifestSettled,
                 toast: (message, kind, durationMs) => this.toastHost.show(message, kind, durationMs),
             });
@@ -1593,7 +1611,15 @@ export class VelaWorkspace {
         chart.on('viewport:changed', (range) => this.propagateViewport(cell.id, range));
         // Style sync: any committed config edit (settings dialog, applyConfig) mirrors
         // this cell's Canvas + Scales-and-lines slice onto its same-group followers.
-        chart.renderer.onConfigChanged(() => this.propagateStylePrefs(cell.id));
+        chart.renderer.onConfigChanged(() => {
+            this.propagateStylePrefs(cell.id);
+            /* …and is saved. The cosmetics ARE part of the state document (`rendererConfig`
+             * per cell), but nothing here was asking for them to be written: a background,
+             * a grid or a candle colour edited in the settings dialog only survived a
+             * restart if some OTHER edit — a symbol, an indicator, a drawing — happened to
+             * mark the workspace dirty afterwards. */
+            this.markStateDirty();
+        });
         // A theme picked in ONE cell (its settings dialog's Canvas → Theme) re-skins the
         // WHOLE workspace — shared chrome plus every other cell.
         chart.on('theme:changed', (t) => this.setTheme(t));

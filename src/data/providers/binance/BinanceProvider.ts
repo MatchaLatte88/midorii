@@ -20,6 +20,8 @@ const FUTURES_WS = 'wss://fstream.binance.com';
 const STREAM_STALL_MS = 15_000;
 /** Reconnect backoff after an unexpected socket close. */
 const STREAM_RECONNECT_MS = 2_000;
+/** How often the trade-built forming candle re-syncs its open/volume from REST. */
+const LIVE_RESEED_MS = 5_000;
 
 
 /** One raw Binance kline row: `[openTime, open, high, low, close, volume, closeTime, …]`. */
@@ -111,9 +113,13 @@ function selectSubTf(targetMin: number): number | null {
  * Binance market-data provider, built from scratch on the public REST + WebSocket
  * APIs — no third-party market-data SDK. Serves spot and USDT-margined perpetual futures (`SYMBOL.P`),
  * paginates past the 1000-kline cap, falls back `api.binance.com → api.binance.us`,
- * and aggregates timeframes Binance doesn't serve natively (e.g. `45`, `180`). No API
- * key; live ticks stream from a native kline WebSocket (`subscribe`), with a poll
- * fallback for aggregated timeframes.
+ * and aggregates timeframes Binance doesn't serve natively (e.g. `45`, `180`) for
+ * HISTORY. No API key; a live minute-based timeframe streams from the raw `@trade`
+ * WebSocket (every executed trade — Binance's `@kline` stream is itself throttled to
+ * ~1-2s and would cap how live "live" can be), building the forming candle client-side
+ * with a periodic REST reseed for the authoritative open/volume. `D`/`W`/`M` stream
+ * from the native `@kline` socket instead (calendar-aligned, no fixed-bucket trick).
+ * Falls back to polling `getBars` if no WebSocket exists or the stream stalls.
  *
  *   import { BinanceProvider } from 'vela/providers/binance';
  *   chart.data.registerProvider('binance', new BinanceProvider());
@@ -212,17 +218,121 @@ export class BinanceProvider implements DataProvider {
     }
 
     subscribe(ticker: string, timeframe: string, onBar: (bar: OHLCV) => void): Unsubscribe {
+        if (typeof WebSocket === 'undefined') return this.pollBars(ticker, timeframe, onBar);
         const { apiSymbol, isFutures } = parseTicker(ticker);
-        const interval = TF_TO_INTERVAL[normalizeTf(timeframe)];
-        // Native interval + a WebSocket implementation ⇒ true streaming. Otherwise
-        // (aggregated timeframe, or no WebSocket) fall back to polling getBars.
-        if (interval && typeof WebSocket !== 'undefined') return this.streamKlines(ticker, timeframe, apiSymbol, isFutures, interval, onBar);
+        const tf = normalizeTf(timeframe);
+        // Any minute-based timeframe (native interval or not — `45`, `180` included)
+        // streams from raw trades: the fastest Binance offers, and bucket-aligning them
+        // client-side needs no calendar awareness the way D/W/M would.
+        const minutes = /^\d+$/.test(tf) ? parseInt(tf, 10) : null;
+        if (minutes != null) return this.streamTrades(ticker, timeframe, apiSymbol, isFutures, minutes, onBar);
+        const interval = TF_TO_INTERVAL[tf]; // D / W / M
+        if (interval) return this.streamKlines(ticker, timeframe, apiSymbol, isFutures, interval, onBar);
         return this.pollBars(ticker, timeframe, onBar);
     }
 
 
     // ── internals ────────────────────────────────────────────────────────
 
+
+    /**
+     * Build the forming candle from Binance's raw `@trade` stream — every executed
+     * trade, pushed as it happens (the `@kline` stream, by contrast, is throttled to
+     * roughly one update per 1-2s regardless of how active the market is). A periodic
+     * REST reseed fixes the authoritative open/volume and corrects any drift; a stall
+     * watchdog falls back to polling if the socket opens but never delivers a trade
+     * (an illiquid symbol, or a blocked stream); reconnects on an unexpected close
+     * until unsubscribed.
+     */
+    private streamTrades(
+        ticker: string, timeframe: string, apiSymbol: string, isFutures: boolean, tfMinutes: number, onBar: (bar: OHLCV) => void,
+    ): Unsubscribe {
+        const bucketMs = tfMinutes * 60_000;
+        const align = (ms: number): number => Math.floor(ms / bucketMs) * bucketMs;
+        let closed = false;
+        let ws: WebSocket | null = null;
+        let reconnect: ReturnType<typeof setTimeout> | null = null;
+        let stall: ReturnType<typeof setTimeout> | null = null;
+        let reseedTimer: ReturnType<typeof setInterval> | null = null;
+        let polling: Unsubscribe | null = null;
+        let current: OHLCV | null = null;
+
+        const clearStall = (): void => { if (stall) { clearTimeout(stall); stall = null; } };
+        const clearReseed = (): void => { if (reseedTimer) { clearInterval(reseedTimer); reseedTimer = null; } };
+        const emit = (): void => { if (current) onBar({ ...current }); };
+
+        // Pull the authoritative recent bar from REST; merge the forming one with the
+        // live extremes/volume accumulated from trades since (never let a reseed move
+        // the candle BACKWARD — a trade the reseed hasn't caught up to yet is still real).
+        const reseed = async (): Promise<void> => {
+            try {
+                const bars = await this.getBars(ticker, timeframe, { limit: 2 });
+                if (closed || bars.length === 0) return;
+                const last = bars[bars.length - 1]!;
+                current = current && current.time === last.time
+                    ? { ...last, high: Math.max(last.high, current.high), low: Math.min(last.low, current.low), close: current.close, volume: Math.max(last.volume ?? 0, current.volume ?? 0) }
+                    : { ...last };
+                emit();
+            } catch { /* transient — the next reseed/trade recovers */ }
+        };
+
+        const onTrade = (priceStr: string, qtyStr: string, tMs: number): void => {
+            const price = Number(priceStr);
+            const qty = Number(qtyStr);
+            if (!Number.isFinite(price)) return;
+            const barStart = align(tMs);
+            if (!current || barStart > current.time) {
+                current = { time: barStart, open: price, high: price, low: price, close: price, volume: Number.isFinite(qty) ? qty : 0 };
+                emit();
+                void reseed(); // fetch the authoritative open/volume for the new bar
+            } else if (barStart === current.time) {
+                current = { ...current, close: price, high: Math.max(current.high, price), low: Math.min(current.low, price), volume: (current.volume ?? 0) + (Number.isFinite(qty) ? qty : 0) };
+                emit();
+            } // a stale trade (barStart < current.time) is ignored
+        };
+
+        const fallToPolling = (): void => {
+            if (closed || polling) return;
+            clearStall();
+            clearReseed();
+            if (reconnect) { clearTimeout(reconnect); reconnect = null; }
+            try { ws?.close(); } catch { /* ignore */ }
+            ws = null;
+            console.warn(`[vela] Binance: ${ticker} ${timeframe} trade stream delivered no data; falling back to polling.`);
+            polling = this.pollBars(ticker, timeframe, onBar);
+        };
+
+        const open = async (): Promise<void> => {
+            if (closed) return;
+            const base = isFutures ? FUTURES_WS : await this.spotWsBase();
+            if (closed) return; // unsubscribed during the host probe
+            ws = new WebSocket(`${base}/ws/${apiSymbol.toLowerCase()}@trade`);
+            stall = setTimeout(fallToPolling, STREAM_STALL_MS); // watchdog: a trade must arrive
+            ws.onopen = () => {
+                void reseed(); // seed the forming bar immediately (don't wait for the first trade)
+                reseedTimer = setInterval(() => void reseed(), LIVE_RESEED_MS);
+            };
+            ws.onmessage = (ev: MessageEvent) => {
+                if (closed || polling) return;
+                try {
+                    const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '') as { p?: string; q?: string; T?: number };
+                    if (msg.p != null && msg.T != null) { clearStall(); onTrade(msg.p, msg.q ?? '0', msg.T); }
+                } catch { /* ignore non-JSON / control frames */ }
+            };
+            ws.onclose = () => { clearReseed(); if (!closed && !polling) reconnect = setTimeout(() => void open(), STREAM_RECONNECT_MS); };
+            ws.onerror = () => { try { ws?.close(); } catch { /* already closed → onclose reconnects */ } };
+        };
+        void open();
+
+        return () => {
+            closed = true;
+            clearStall();
+            clearReseed();
+            if (reconnect) clearTimeout(reconnect);
+            polling?.();
+            try { ws?.close(); } catch { /* ignore */ }
+        };
+    }
 
     /**
      * Open a Binance kline WebSocket (single-stream URL form — the stream is in the
@@ -233,7 +343,8 @@ export class BinanceProvider implements DataProvider {
      *
      * A stall watchdog falls the subscription back to polling if the socket opens but
      * never delivers a candle — so a blocked/silent stream (e.g. geo-restricted
-     * futures) still yields live updates instead of a silently-dead feed.
+     * futures) still yields live updates instead of a silently-dead feed. Used only for
+     * `D`/`W`/`M` — see {@link streamTrades} for every minute-based timeframe.
      */
     private streamKlines(
         ticker: string, timeframe: string, apiSymbol: string, isFutures: boolean, interval: string, onBar: (bar: OHLCV) => void,

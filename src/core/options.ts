@@ -87,6 +87,18 @@ export interface VelaTheme {
     upColor: string;
     downColor: string;
     fontFamily: string;
+    /**
+     * The chrome accent — selected entries, primary buttons, the active tab.
+     *
+     * Optional, and absent from both built-in themes: the brand accent is a constant
+     * (`core/palette`), and switching between dark and light is not a reason to change it.
+     * A theme states one only when it is a different LOOK rather than a different lightness
+     * — an app shipping a second palette of its own, which is the case this exists for.
+     */
+    accent?: string;
+    /** The higher-contrast partner of {@link accent}: a switch that is on, the underline
+     *  under the tab you are on. Falls back to the brand's own when a theme names neither. */
+    accentBright?: string;
 }
 
 export type ThemeName = 'dark' | 'light';

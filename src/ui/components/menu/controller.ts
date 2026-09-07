@@ -27,6 +27,14 @@ export interface MenuItemDescriptor {
      *  it reports through the menu's `onFavorite` WITHOUT selecting (or closing) the
      *  row — undefined rows carry no star at all. */
     favorite?: boolean;
+    /**
+     * A side action pinned at the row's right edge — an icon button that reports through
+     * the menu's `onTrailing` WITHOUT selecting the row (or closing the menu). The shape
+     * for "this entry, but configured": a settings gear beside the thing it configures,
+     * rather than a second row saying the same noun twice. `label` is its accessible
+     * name and tooltip. Rows without it carry none, and the column is not reserved.
+     */
+    trailing?: { icon: string; label: string };
     /** Nested entries — the row becomes a submenu trigger opening its own list to the side.
      *  A branch is not selectable itself: `onSelect` only ever reports leaf ids. */
     submenu?: readonly MenuItemDescriptor[];

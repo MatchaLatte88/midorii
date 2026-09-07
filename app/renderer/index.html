@@ -11,42 +11,61 @@
                 height: 100%;
                 background: #131722;
             }
-            #chart {
-                position: absolute;
-                inset: 0;
+            :root {
+                /* The app's own title bar (app-topbar) — mirrors TITLEBAR_HEIGHT in
+                   app/electron/titlebar.js, the last remaining native-frame concern. */
+                --app-topbar-h: 40px;
             }
-            #replay-root {
+            #app-topbar {
                 position: absolute;
-                inset: 0;
-            }
-
-            /* The OS window controls are painted over the top-right of the client
-               area (titleBarStyle 'hidden' + titleBarOverlay), so Vela's topbar
-               tools end up underneath them. Electron reports the strip left over
-               beside the controls as env(titlebar-area-*); reserving the
-               difference keeps them clear at any window width and DPI instead of
-               hardcoding a number that is right on one machine. The fallback
-               covers a build without the overlay (macOS/Linux), where the
-               controls sit at the left — which env(titlebar-area-x) accounts for. */
-            #chart .vela-widget-topbar,
-            #replay-root .vela-widget-topbar {
-                padding-right: calc(
-                    100% - env(titlebar-area-width, calc(100% - 140px)) - env(titlebar-area-x, 0px) + 10px
-                );
-                /* Without a native title bar the window has nothing to drag by;
-                   the topbar's empty background becomes that grip. */
+                top: 0;
+                left: 0;
+                right: 0;
+                height: var(--app-topbar-h);
+                /* Frameless window (titleBarStyle 'hidden', no overlay — see
+                   app/electron/main.js): this row IS the title bar, so it is the
+                   window's only drag handle. AppTopbar opts its own buttons back out. */
                 -webkit-app-region: drag;
             }
-            /* Every control inside opts back out, so dragging never swallows a click. */
-            #chart .vela-widget-topbar *,
-            #replay-root .vela-widget-topbar * {
-                -webkit-app-region: no-drag;
+            #chart,
+            #replay-root,
+            #backtest-root,
+            #analysis-root,
+            #strategies-root,
+            #settings-root,
+            #bot-root {
+                position: absolute;
+                top: var(--app-topbar-h);
+                right: 0;
+                bottom: 0;
+                left: 0;
+            }
+            .midorii-dummy-view {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: var(--vela-fg-muted, #868a96);
+                font: 13px/1.5 var(--vela-font, sans-serif);
+                letter-spacing: 0.02em;
+            }
+            /* `[hidden]` and `.midorii-dummy-view` are both author-stylesheet rules of
+               equal specificity — without this, `display: flex` above wins the cascade
+               by source order and all three dummy views render stacked regardless of
+               the `hidden` attribute that is supposed to keep only one tab's view showing. */
+            .midorii-dummy-view[hidden] {
+                display: none;
             }
         </style>
     </head>
     <body>
+        <div id="app-topbar"></div>
         <div id="chart"></div>
         <div id="replay-root" hidden></div>
+        <div id="backtest-root" hidden></div>
+        <div id="analysis-root" hidden></div>
+        <div id="strategies-root" hidden></div>
+        <div id="settings-root" hidden></div>
+        <div id="bot-root" class="midorii-dummy-view" hidden>Bot — coming soon</div>
         <script type="module" src="./main.ts"></script>
     </body>
 </html>

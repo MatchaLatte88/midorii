@@ -140,6 +140,9 @@ export class SceneGraph {
     /** VPVR-layer config pushed by the VPVR native indicator (null ⇒ layer off). Ephemeral. */
     vpvrLayer: VpvrLayerData | null = null;
     crosshair: { x: number; y: number } | null = null;
+    /** A price line being dragged, and where the cursor currently holds it. Transient like the
+     *  crosshair: the line itself keeps its published price until its owner moves it. */
+    priceLineDrag: { id: string; paneId: string; price: number } | null = null;
     /** How the base price series is drawn on the price pane (candles by default). */
     priceStyle: PriceStyle = 'candles';
     /** Price-series base painting for the ACTIVE style (see ChartTypeDefinition.basePainting). */

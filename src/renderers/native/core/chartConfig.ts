@@ -2,7 +2,7 @@ import type { LineStyle } from '../../../core/model/series';
 import { chartTypes, settingsRowValueKeys, type SettingsRowDescriptor } from '../../../chart-types/registry';
 import { withAlpha } from '../../../core/color';
 import { ACCENT, BEARISH, BULLISH, CHIP_PLATE, CROSSHAIR, SERIES_LINE, WARNING } from '../../../core/palette';
-import type { PriceStyle } from '../../../core/options';
+import type { PriceStyle, VelaTheme } from '../../../core/options';
 import type { ScaleMode } from './SceneGraph';
 
 /**
@@ -137,6 +137,41 @@ export const PREMARKET_SHADE = withAlpha(WARNING, 0.08);
 export const POSTMARKET_SHADE = withAlpha(ACCENT, 0.08);
 export const EXTENDED_SHADE = POSTMARKET_SHADE;
 
+/** Ambient background blobs: two large radial washes at opposite corners of the plot,
+ *  painted at the very bottom of the backdrop canvas — under the session bands, under
+ *  the grid, under everything. Purely cosmetic (they carry no data), so they are NOT
+ *  gated on the "wait for bars" check the grid uses: an empty chart shows them too.
+ *  Alpha belongs in the color itself, like the session washes. */
+export interface BlobLayer {
+    visible: boolean;
+    /** Alpha lives in the color itself — a blob IS its translucency.
+     *  `null` ⇒ inherit {@link blobAccentColor} (the theme's accent at this blob's strength). */
+    color: string | null;
+}
+
+export interface BlobStyle {
+    /** The wash bleeding in from beyond the top-left corner. */
+    topLeft: BlobLayer;
+    /** The wash bleeding in from beyond the bottom-right corner. */
+    bottomRight: BlobLayer;
+}
+
+/** Blob strengths — faint enough that candles and gridlines read unchanged over them,
+ *  the stronger one top-left (the corner the eye starts from). */
+export const BLOB_ALPHA_TOP_LEFT = 0.14;
+export const BLOB_ALPHA_BOTTOM_RIGHT = 0.11;
+
+/**
+ * The default color of one blob: the theme's own accent at that blob's strength, falling
+ * back to the brand accent for a theme that names none. A `null` color in the style store
+ * means exactly this — so switching the app's palette re-tints the blobs with it, the way
+ * the design they came from has them follow the active accent, and only a color the user
+ * actually picks pins them.
+ */
+export function blobAccentColor(theme: Pick<VelaTheme, 'accent'>, layer: keyof BlobStyle): string {
+    return withAlpha(theme.accent ?? ACCENT, layer === 'topLeft' ? BLOB_ALPHA_TOP_LEFT : BLOB_ALPHA_BOTTOM_RIGHT);
+}
+
 export interface ChartStyle {
     /** Per-chart-type settings (plugin SDK sections), keyed by type id then row key. */
     chartTypes: Record<string, Record<string, unknown>>;
@@ -155,6 +190,7 @@ export interface ChartStyle {
     area: AreaSeriesStyle;
     baseline: BaselineSeriesStyle;
     sessions: SessionShadeStyle;
+    blobs: BlobStyle;
 }
 
 /** A fresh live style store with every value at its "inherit / current behavior" default. */
@@ -190,6 +226,10 @@ export function defaultChartStyle(): ChartStyle {
             baselineLevel: BASELINE_LEVEL_DEFAULT,
         },
         sessions: { premarketColor: PREMARKET_SHADE, postmarketColor: POSTMARKET_SHADE, extendedColor: EXTENDED_SHADE },
+        blobs: {
+            topLeft: { visible: true, color: null },
+            bottomRight: { visible: true, color: null },
+        },
     };
 }
 
@@ -298,6 +338,12 @@ export interface ChartConfig {
         premarketColor: string;
         postmarketColor: string;
         extendedColor: string;
+    };
+    /** Ambient background blobs — the two corner washes under the grid, each with its
+     *  own on/off and color. */
+    blobs: {
+        topLeft: { visible: boolean; color: string };
+        bottomRight: { visible: boolean; color: string };
     };
     /** Draw-order keys — what paints in front of what. The candles' own key plus one per
      *  indicator id; user drawings persist their keys in the drawings document, in the same
@@ -533,6 +579,9 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
     const baseline = asObject(p.baseline);
     const series = asObject(p.series);
     const sessions = asObject(p.sessions);
+    const blobs = asObject(p.blobs);
+    const blobTL = asObject(blobs.topLeft);
+    const blobBR = asObject(blobs.bottomRight);
     const stacking = asObject(p.stacking);
     const stackSeries = asObject(stacking.series);
 
@@ -630,6 +679,16 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
             premarketColor: isColor(sessions.premarketColor) ? sessions.premarketColor : base.sessions.premarketColor,
             postmarketColor: isColor(sessions.postmarketColor) ? sessions.postmarketColor : base.sessions.postmarketColor,
             extendedColor: isColor(sessions.extendedColor) ? sessions.extendedColor : base.sessions.extendedColor,
+        },
+        blobs: {
+            topLeft: {
+                visible: isBool(blobTL.visible) ? blobTL.visible : base.blobs.topLeft.visible,
+                color: isColor(blobTL.color) ? blobTL.color : base.blobs.topLeft.color,
+            },
+            bottomRight: {
+                visible: isBool(blobBR.visible) ? blobBR.visible : base.blobs.bottomRight.visible,
+                color: isColor(blobBR.color) ? blobBR.color : base.blobs.bottomRight.color,
+            },
         },
         stacking: {
             candles: isNum(stacking.candles) ? stacking.candles : base.stacking.candles,

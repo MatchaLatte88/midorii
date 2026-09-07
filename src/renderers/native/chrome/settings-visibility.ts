@@ -195,6 +195,9 @@ export const BUILTIN_SETTINGS_IDS: readonly string[] = [
     'canvas.grid',
     'canvas.grid.vertical',
     'canvas.grid.horizontal',
+    'canvas.blobs',
+    'canvas.blobs.top-left',
+    'canvas.blobs.bottom-right',
     'canvas.theme',
 ];
 

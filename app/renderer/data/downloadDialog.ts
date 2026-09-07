@@ -1,4 +1,5 @@
 import { Dialog, Select, TextField } from '../../../src/ui';
+import { openCsvImportDialog } from './csvImportDialog';
 
 /**
  * Download market data into the local archive.
@@ -133,6 +134,24 @@ export async function openDownloadDialog(host: HTMLElement): Promise<string | nu
 
         const start = button('Download', true);
         const close = button('Close');
+        const fromFile = button('Import a file…');
+        fromFile.onclick = () => {
+            if (running) {
+                say('The download is still running — it will say when it is done.');
+                return;
+            }
+            /* Its own dialog on top of this one rather than a second panel in here: the
+             * questions a file raises (which column, which clock) have nothing to do with
+             * the ones a venue raises, and neither set belongs in the other's form. */
+            void openCsvImportDialog(host)
+                .then((symbol) => {
+                    if (symbol) {
+                        downloaded = symbol;
+                        say(`${symbol} is in the local archive.`, 'ok');
+                    }
+                })
+                .catch((err: unknown) => say(err instanceof Error ? err.message : String(err), 'error'));
+        };
         close.onclick = () => {
             // A download keeps running in the main process either way; closing
             // here would only hide the one thing that reports on it.
@@ -211,7 +230,7 @@ export async function openDownloadDialog(host: HTMLElement): Promise<string | nu
             },
             footer: (el) => {
                 el.style.cssText += ';display:flex;justify-content:flex-end;gap:8px';
-                el.append(close, start);
+                el.append(fromFile, close, start);
             },
         });
         dialog.show();

@@ -17,7 +17,7 @@ const HR = 3600_000;
 
 /** Bars from `[high, low]` pairs, one per hour from t=0. */
 function bars(rows: Array<[high: number, low: number]>): FvgBar[] {
-    return rows.map(([high, low], i) => ({ time: i * HR, high, low }));
+    return rows.map(([high, low], i) => ({ time: i * HR, high, low, close: (high + low) / 2 }));
 }
 
 /** Linear projector (x = time/HR, y = 1000 − price) serving `data` through barsInRange. */
@@ -66,12 +66,12 @@ describe('drawings/fvg detector', () => {
 
     it('closes a zone on the first LATER bar that crosses it, never on its own confirming bar', () => {
         // Bar 2 confirms the gap and its own low (120) sits at the top edge — that must not fill it.
-        const zones = detectFairValueGaps([...BULL_GAP, { time: 5 * HR, high: 135, low: 99 }]);
+        const zones = detectFairValueGaps([...BULL_GAP, { time: 5 * HR, high: 135, low: 99, close: 117 }], { show: 'all' });
         expect(zones[0]!.mitigatedIndex).toBe(5); // the bar that came back through the whole zone
     });
 
     it('a bar that only reaches INTO the zone leaves it open (a gap dies when it is fully crossed)', () => {
-        const zones = detectFairValueGaps([...BULL_GAP, { time: 5 * HR, high: 135, low: 110 }]);
+        const zones = detectFairValueGaps([...BULL_GAP, { time: 5 * HR, high: 135, low: 110, close: 122 }]);
         expect(zones[0]!.mitigatedIndex).toBeNull();
     });
 
@@ -80,7 +80,7 @@ describe('drawings/fvg detector', () => {
         // overlap, so the strip between them is empty and any merge setting joins them.
         const stacked = bars([[100, 90], [110, 95], [140, 120], [150, 125], [150, 130]]);
         expect(detectFairValueGaps(stacked)).toHaveLength(2); // mergeWick 0 → every gap on its own
-        const merged = detectFairValueGaps(stacked, { mergeWick: 1, sizeUnit: 'points' });
+        const merged = detectFairValueGaps(stacked, { mergeWick: 1, minSizeUnit: 'points' });
         expect(merged).toHaveLength(1);
         // The run spans both, starts where the first starts, and is confirmed where the last is.
         expect(merged[0]).toMatchObject({ bottom: 100, top: 125, startIndex: 0, index: 3 });
@@ -90,10 +90,10 @@ describe('drawings/fvg detector', () => {
         const early = bars([[100, 90], [130, 95], [140, 120]]);
         const late: FvgBar[] = [
             ...early,
-            ...[[100, 90], [130, 95], [140, 120]].map(([high, low], i) => ({ time: (100 + i) * HR, high: high!, low: low! })),
+            ...[[100, 90], [130, 95], [140, 120]].map(([high, low], i) => ({ time: (100 + i) * HR, high: high!, low: low!, close: (high! + low!) / 2 })),
         ];
         // Their bar spans do not overlap, so a generous merge setting still leaves two zones.
-        expect(detectFairValueGaps(late, { mergeWick: 100, sizeUnit: 'points' })).toHaveLength(2);
+        expect(detectFairValueGaps(late, { mergeWick: 100, minSizeUnit: 'points', show: 'all' })).toHaveLength(2);
     });
 });
 
@@ -127,7 +127,7 @@ describe('drawings/fvg pick', () => {
             { time: 0, price: 120 },
             { time: 4 * HR, price: 100 }, // still open → runs to the last bar loaded
         ]);
-        const filledBars = [...BULL_GAP, { time: 5 * HR, high: 135, low: 99 }];
+        const filledBars = [...BULL_GAP, { time: 5 * HR, high: 135, low: 99, close: 117 }];
         const filled = zoneAt(filledBars, { time: 0, price: 110 })!;
         expect(zoneAnchors(filled, filledBars)[1]!.time).toBe(5 * HR); // stops where it was filled
     });

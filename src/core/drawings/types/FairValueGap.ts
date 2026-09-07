@@ -4,164 +4,13 @@ import type { SettingsSchema } from '../schema';
 import { LINE_FIELDS } from '../schema';
 import { handleAt, pointInBox } from '../hittest';
 import { BEARISH, BULLISH } from '../../palette';
+import { detectFairValueGaps, type FvgBar, type FvgDetectOptions, type FvgZone } from '../../analysis/fvg';
 
-/**
- * A fair value gap (FVG, "imbalance") is a stretch of price the market moved through so fast
- * that no two-sided auction happened there. It is read off three consecutive bars:
- *
- *   bullish   bars[i].low  > bars[i-2].high   gap = [high(i-2), low(i)]
- *   bearish   bars[i].high < bars[i-2].low    gap = [high(i),  low(i-2)]
- *
- * The middle bar is the impulse; the gap is the part of its range the neighbours never traded
- * into. A gap is filled once price crosses the whole zone again — the bar that creates a zone
- * can never fill it, however far its own wick runs.
- *
- * The tool does not ask the user to drag a box around an imbalance — it asks the market where
- * the imbalance is, so the detector runs here rather than the shape being placed by hand.
- */
-
-/** The bar fields the detector reads. Nothing else about a bar matters to a gap. */
-export interface FvgBar {
-    time: number;
-    high: number;
-    low: number;
-}
-
-/** One detected gap. Indices are positions in the array that was passed in, so a zone must be
- *  turned into (time, price) anchors — see {@link zoneAnchors} — before anything holds on to it. */
-export interface FvgZone {
-    direction: 'bull' | 'bear';
-    top: number;
-    bottom: number;
-    /** Height in price — the tie-breaker when boxes overlap (the smallest one wins the click). */
-    size: number;
-    /** Where the zone begins on the chart (bar i-2). For drawing. */
-    startIndex: number;
-    /** The bar that confirms it (bar i). Nothing before this bar could know the zone exists. */
-    index: number;
-    /** The bar that filled it, or null while it is still open. */
-    mitigatedIndex: number | null;
-}
-
-/** How a size threshold is read: against the price level the zone sits at, or raw. */
-export type FvgSizeUnit = 'percent' | 'points';
-
-export interface FvgDetectOptions {
-    /** How wide a traded strip may be before it counts as a real separation between two stacked
-     *  gaps. Below it, neighbouring gaps of the same direction merge into one zone. 0 keeps every
-     *  gap separate. */
-    mergeWick?: number;
-    /** How to read {@link FvgDetectOptions.mergeWick}. */
-    sizeUnit?: FvgSizeUnit;
-}
-
-/**
- * Every three-bar gap in `bars`, stacked runs joined up, each closed on the first later bar that
- * crossed it. Ascending by confirming bar.
- */
-export function detectFairValueGaps(bars: readonly FvgBar[], opts: FvgDetectOptions = {}): FvgZone[] {
-    const zones = mergeGaps(findGaps(bars), opts.mergeWick ?? 0, opts.sizeUnit ?? 'percent');
-    applyMitigation(bars, zones);
-    return zones;
-}
-
-/** Every three-bar gap, in the order they formed, with no opinion about what happened next. */
-function findGaps(bars: readonly FvgBar[]): FvgZone[] {
-    const gaps: FvgZone[] = [];
-    for (let i = 2; i < bars.length; i += 1) {
-        const bar = bars[i]!;
-        const left = bars[i - 2]!;
-        let direction: 'bull' | 'bear';
-        let bottom: number;
-        let top: number;
-        if (bar.low > left.high) {
-            direction = 'bull';
-            bottom = left.high;
-            top = bar.low;
-        } else if (bar.high < left.low) {
-            direction = 'bear';
-            bottom = bar.high;
-            top = left.low;
-        } else continue;
-        gaps.push({ direction, top, bottom, size: top - bottom, startIndex: i - 2, index: i, mitigatedIndex: null });
-    }
-    return gaps;
-}
-
-/**
- * Joins runs of gaps separated only by strips too thin to count as a separation. Zones that do
- * not merge come back untouched.
- *
- * A run is per direction and has to be unbroken in TIME as well as in price: a gap can only
- * extend the run whose bars its own overlap. Two gaps that merely happen to sit at the same
- * prices are not one imbalance, they are two, months apart.
- */
-function mergeGaps(gaps: FvgZone[], mergeWick: number, unit: FvgSizeUnit): FvgZone[] {
-    if (!(mergeWick > 0)) return gaps;
-    const out: FvgZone[] = [];
-    const runs: { bull: FvgZone | null; bear: FvgZone | null } = { bull: null, bear: null };
-    for (const gap of gaps) {
-        const run = runs[gap.direction];
-        const strip = run === null ? null : stripBetween(run, gap);
-        const joins = run !== null && strip !== null && gap.startIndex <= run.index && !bigEnough(strip.top, strip.bottom, mergeWick, unit);
-        if (!joins) {
-            const fresh = { ...gap };
-            runs[gap.direction] = fresh;
-            out.push(fresh);
-            continue;
-        }
-        run.top = Math.max(run.top, gap.top);
-        run.bottom = Math.min(run.bottom, gap.bottom);
-        run.size = run.top - run.bottom;
-        if (gap.startIndex < run.startIndex) run.startIndex = gap.startIndex;
-        // Confirmation must be the LATEST of the run: nothing could know its extent earlier.
-        if (gap.index > run.index) run.index = gap.index;
-    }
-    // Runs of the two directions interleave, so extending one can leave the array out of order —
-    // and applyMitigation walks it expecting to meet zones in the order they were confirmed.
-    return out.sort((a, b) => a.index - b.index);
-}
-
-/** The traded strip between two zones — the stretch of price that lies between them and did
- *  therefore change hands. Empty when they overlap or touch. */
-function stripBetween(a: FvgZone, b: FvgZone): { top: number; bottom: number } {
-    if (a.bottom > b.top) return { top: a.bottom, bottom: b.top };
-    if (b.bottom > a.top) return { top: b.bottom, bottom: a.top };
-    // A percentage still needs a real price to measure against, so an empty strip sits at the
-    // edge the two share rather than at zero.
-    const price = Math.max(a.bottom, b.bottom);
-    return { top: price, bottom: price };
-}
-
-/** Whether a span clears a threshold, in whichever unit was asked for. */
-function bigEnough(top: number, bottom: number, minSize: number, unit: FvgSizeUnit): boolean {
-    const height = top - bottom;
-    if (unit === 'points') return height >= minSize;
-    const mid = (top + bottom) / 2;
-    if (!(mid > 0)) return false; // a percentage of nothing is not a filter that can be applied
-    return (height / mid) * 100 >= minSize;
-}
-
-/**
- * Walks the bars once and closes each zone on the first bar AFTER its own that crosses it
- * completely. Zones must be ordered by `index`, which {@link mergeGaps} guarantees.
- */
-function applyMitigation(bars: readonly FvgBar[], zones: FvgZone[]): void {
-    const open: FvgZone[] = [];
-    let next = 0;
-    for (let i = 0; i < bars.length; i += 1) {
-        const bar = bars[i]!;
-        // Closing runs before opening, which is what keeps a bar from filling the zone it creates.
-        for (let k = open.length - 1; k >= 0; k -= 1) {
-            const zone = open[k]!;
-            const crossed = zone.direction === 'bull' ? bar.low <= zone.bottom : bar.high >= zone.top;
-            if (!crossed) continue;
-            zone.mitigatedIndex = i;
-            open.splice(k, 1);
-        }
-        while (next < zones.length && zones[next]!.index <= i) open.push(zones[next++]!);
-    }
-}
+/* The detector itself lives in core/analysis, because the FVG indicator paints from the same
+ * one — two of them would put the tool and the indicator on different levels for the same
+ * market. Re-exported here so the drawings barrel keeps the surface it always had. */
+export { detectFairValueGaps };
+export type { FvgBar, FvgZone, FvgSizeUnit, FvgDetectOptions, FvgMitigation, FvgShow } from '../../analysis/fvg';
 
 /**
  * The fair value gap under a point, or null.
@@ -184,7 +33,9 @@ export function zoneAt(
 ): FvgZone | null {
     if (bars.length < 3) return null;
     let best: FvgZone | null = null;
-    for (const zone of detectFairValueGaps(bars, opts)) {
+    // 'all': a gap that is over is exactly the kind of thing someone annotates by hand, and
+    // zoneAnchors already ends its box where it was filled.
+    for (const zone of detectFairValueGaps(bars, { ...opts, show: 'all' })) {
         if (at.price < zone.bottom - priceTolerance) continue;
         if (at.price > zone.top + priceTolerance) continue;
         if (at.time < bars[zone.startIndex]!.time) continue;
@@ -275,7 +126,7 @@ export class FairValueGap extends Drawing {
         const from = proj.pxToPoint(-pad, 0, this.paneId).time;
         const to = proj.pxToPoint(proj.width + pad, 0, this.paneId).time;
         const raw = proj.barsInRange(from, to);
-        return raw.length >= 3 ? raw.map((b) => ({ time: b.time, high: b.high, low: b.low })) : null;
+        return raw.length >= 3 ? raw.map((b) => ({ time: b.time, high: b.high, low: b.low, close: b.close })) : null;
     }
 
     /** The pick tolerance in price: half the price span of the tolerance in pixels, at the click. */

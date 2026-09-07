@@ -21,6 +21,9 @@ export interface MenuOptions extends MenuControllerOptions {
     /** Star-toggle reports from items carrying `favorite` (the menu stays open — starring
      *  is a side action on a row, never a selection). */
     onFavorite?: (id: string, on: boolean) => void;
+    /** Presses on a row's `trailing` button. The menu CLOSES first — a side action that
+     *  opens something of its own (a dialog) must not leave a floating list over it. */
+    onTrailing?: (id: string) => void;
     /** Mark checked items with a leading ✓ instead of the selected-row background wash —
      *  the shape for pointer-anchored action menus (right-click context menus), where a
      *  washed row reads as hover state. A level holding checkable rows reserves the mark
@@ -40,6 +43,7 @@ interface SurfaceOptions {
     id?: string;
     minWidth?: string;
     onFavorite?: (id: string, on: boolean) => void;
+    onTrailing?: (id: string) => void;
     checkmarks?: boolean;
 }
 
@@ -58,6 +62,7 @@ class Surface {
     private readonly host: HTMLElement;
     private readonly onSelect: (id: string) => void;
     private readonly onFavorite?: (id: string, on: boolean) => void;
+    private readonly onTrailing?: (id: string) => void;
     private readonly checkmarks: boolean;
     private items: readonly MenuItemDescriptor[] = [];
     /** Branch item id → the surface it opens. */
@@ -71,6 +76,7 @@ class Surface {
         this.host = opts.host;
         this.onSelect = opts.onSelect;
         this.onFavorite = opts.onFavorite;
+        this.onTrailing = opts.onTrailing;
         this.checkmarks = opts.checkmarks === true;
 
         this.positioner = doc.createElement('div');
@@ -231,6 +237,26 @@ class Surface {
                 });
                 li.appendChild(star);
             }
+            if (item.trailing && this.onTrailing) {
+                const btn = iconEl(item.trailing.icon, doc);
+                btn.classList.add('vela-menu-rowbtn');
+                btn.removeAttribute('aria-hidden'); // iconEl hides decorative icons; this one is a control
+                btn.setAttribute('role', 'button');
+                btn.setAttribute('aria-label', item.trailing.label);
+                btn.title = item.trailing.label;
+                // Swallow the whole pointer sequence: the machine selects rows on click,
+                // and a press that starts on this button must never reach the row.
+                for (const ev of ['pointerdown', 'pointerup', 'mousedown', 'mouseup'] as const) {
+                    btn.addEventListener(ev, (e) => e.stopPropagation());
+                }
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    this.api.setOpen(false);
+                    this.onTrailing?.(item.id);
+                });
+                li.appendChild(btn);
+            }
             if (item.toggle) {
                 const sw = doc.createElement('span');
                 sw.className = 'vela-menu-switch' + (item.checked ? ' on' : '');
@@ -247,6 +273,7 @@ class Surface {
                     placement: 'right-start',
                     onSelect: this.onSelect,
                     onFavorite: this.onFavorite,
+                    onTrailing: this.onTrailing,
                     checkmarks: this.checkmarks,
                     id: `${this.mid}--${item.id}`,
                 });
@@ -276,6 +303,7 @@ export class Menu {
             id: opts.id,
             minWidth: opts.minWidth,
             onFavorite: opts.onFavorite,
+            onTrailing: opts.onTrailing,
             checkmarks: opts.checkmarks,
         });
         this.root.setItems(opts.items);

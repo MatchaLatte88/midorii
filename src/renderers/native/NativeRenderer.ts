@@ -16,6 +16,7 @@ import type {
     DataWindowOHLC,
     DataWindowGroup,
     DataWindowReadout,
+    PriceLineAction,
 } from '../../core/ports/IChartRenderer';
 import type { VelaTheme } from '../../core/options';
 import type { OHLCV } from '../../core/model/ohlcv';
@@ -35,6 +36,8 @@ import { NATIVE_CAPABILITIES, supportsWebGL2 } from './capabilities';
 import { WebGL2Backend } from './backend/WebGL2Backend';
 import { CoordinateSystem, type PaneBounds, type PriceScale } from './core/CoordinateSystem';
 import { Scheduler, InvalidateLevel, repaintsData, repaintsChrome } from './core/Scheduler';
+import type { PriceLine } from '../../core/model/scene';
+import { SPAWN_MIN_TRAVEL, type PriceLineHit } from './chrome/priceLineTags';
 import { Animator, easeToward } from './core/Animator';
 import { InputController } from './core/InputController';
 import { KeyboardController } from './core/KeyboardController';
@@ -58,7 +61,7 @@ import { computePaneScale, expandScaleByPixels, overlaySeriesRange } from './cor
 import { mergeTradeMarkersState, tradesPriceHints, type TradeMarkerHints } from '../shared/trade-markers';
 import { rescaleAround, shiftScale } from './core/manualScale';
 import { resizeSplit, type PaneSplit } from './core/paneResize';
-import { type ChartConfig, CHART_CONFIG_VERSION, factoryResetConfig, mergeConfig, BASELINE_TOP_LINE, BASELINE_BOTTOM_LINE, BASELINE_FILL_ALPHA, BASELINE_FILL_ALPHA_FAR, withAlpha, priceStyleIds, basePaintingOf, candleOverrideFor, effectiveCandlePaint } from './core/chartConfig';
+import { type ChartConfig, CHART_CONFIG_VERSION, factoryResetConfig, mergeConfig, BASELINE_TOP_LINE, BASELINE_BOTTOM_LINE, BASELINE_FILL_ALPHA, BASELINE_FILL_ALPHA_FAR, blobAccentColor, withAlpha, priceStyleIds, basePaintingOf, candleOverrideFor, effectiveCandlePaint } from './core/chartConfig';
 import { BackdropRenderer } from './backdrop/BackdropRenderer';
 import { VolumeRenderer, VOLUME_PANE_FILL_FRAC } from './volume/VolumeRenderer';
 import { rendererLayers, foldBaseModulation, type RendererLayerArgs, type RendererLayerDefinition, type RendererLayerInstance, type BasePaintingModulation } from './layers';
@@ -731,6 +734,10 @@ export class NativeRenderer implements IChartRenderer {
             })(),
             series: { style: this.scene.priceStyle, baseline: this.scene.baselineValue, spacing: this.coords.spacingScale },
             sessions: { premarketColor: s.sessions.premarketColor, postmarketColor: s.sessions.postmarketColor, extendedColor: s.sessions.extendedColor },
+            blobs: {
+                topLeft: { visible: s.blobs.topLeft.visible, color: s.blobs.topLeft.color ?? blobAccentColor(t, 'topLeft') },
+                bottomRight: { visible: s.blobs.bottomRight.visible, color: s.blobs.bottomRight.color ?? blobAccentColor(t, 'bottomRight') },
+            },
         };
     }
 
@@ -846,6 +853,17 @@ export class NativeRenderer implements IChartRenderer {
         };
         // session shading
         s.sessions = { premarketColor: next.sessions.premarketColor, postmarketColor: next.sessions.postmarketColor, extendedColor: next.sessions.extendedColor };
+        // ambient background blobs (backdrop canvas, under the grid)
+        s.blobs = {
+            topLeft: {
+                visible: next.blobs.topLeft.visible,
+                color: keepInherit(s.blobs.topLeft.color, next.blobs.topLeft.color, blobAccentColor(prevTheme, 'topLeft')),
+            },
+            bottomRight: {
+                visible: next.blobs.bottomRight.visible,
+                color: keepInherit(s.blobs.bottomRight.color, next.blobs.bottomRight.color, blobAccentColor(prevTheme, 'bottomRight')),
+            },
+        };
         // series
         this.setPriceStyle(next.series.style);
         // Re-read the active style's candle override: setPriceStyle no-ops when the style
@@ -1372,6 +1390,13 @@ export class NativeRenderer implements IChartRenderer {
             drawingsMeasureStart: (x, y, snap) => this.userDrawings?.beginMeasureAt(x, y, snap) ?? false,
             drawingsDeleteAt: (x, y) => this.userDrawings?.deleteAt(x, y) ?? false,
             drawingsCancelPlacement: () => this.userDrawings?.cancelPlacement() ?? false,
+            drawingsContextAt: (x, y, cx, cy) => this.userDrawings?.contextAt(x, y, cx, cy) ?? false,
+            priceLinesClaim: (x, y) => this.priceLinesClaim(x, y),
+            priceLinesPointerMove: (x, y) => this.priceLinesPointerMove(x, y),
+            priceLinesPointerUp: (x, y) => this.priceLinesPointerUp(x, y),
+            priceLinesCursor: (x, y) => this.priceLinesCursor(x, y),
+            priceLinesContextAt: (x, y) => this.priceLinesContextAt(x, y),
+            priceLinesDblClick: (x, y) => this.priceLinesDblClick(x, y),
             drawingsSnapMode: () => this.snapMode,
             drawingsPointerDown: (x, y, snap, shift) => this.userDrawings?.pointerDown(x, y, snap, shift),
             drawingsPointerMove: (x, y, snap, shift) => this.userDrawings?.pointerMove(x, y, snap, shift),
@@ -1880,6 +1905,136 @@ export class NativeRenderer implements IChartRenderer {
         this.layoutPanes();
         this.paneControls?.refresh();
         this.scheduler.invalidate(InvalidateLevel.Full);
+    }
+
+    /** A price line the pointer is holding, or a tag button it pressed (armed until release). */
+    /** The level being dragged. `spawn` ⇒ it is a NEW one being pulled out of `id`, so the
+     *  drop reports a spawn and `startY` is what the travel floor is measured from. */
+    private priceLineDrag: { id: string; paneId: string; price: number; spawn: boolean; startY: number } | null = null;
+    private priceLineArmed: { id: string } | null = null;
+    private readonly priceLineCbs = new Set<(a: PriceLineAction) => void>();
+
+    onPriceLineAction(cb: (a: PriceLineAction) => void): Unsubscribe {
+        this.priceLineCbs.add(cb);
+        return () => this.priceLineCbs.delete(cb);
+    }
+
+    private emitPriceLine(a: PriceLineAction): void {
+        for (const cb of this.priceLineCbs) cb(a);
+    }
+
+    /**
+     * The topmost price line the pointer is over, and what part of it.
+     *
+     * Last painted wins, which is the one on top — the same rule the eye uses. Lines in a
+     * collapsed or zero-height pane are not there to be hit.
+     */
+    private hitPriceLine(x: number, y: number): { line: PriceLine; paneId: string; kind: PriceLineHit } | null {
+        let found: { line: PriceLine; paneId: string; kind: PriceLineHit } | null = null;
+        for (const model of this.scene.indicators.values()) {
+            for (const pl of model.priceLines) {
+                const pane = this.scene.panes.get(pl.paneId);
+                if (!pane || pane.collapsed || pane.bounds.height <= 0) continue;
+                const lineY = this.coords.priceToY(pl.price, pane.scale, pane.bounds);
+                const kind = this.chrome.hitPriceLine(x, y, pl, lineY, this.coords.width, this.theme);
+                if (kind) found = { line: pl, paneId: pl.paneId, kind };
+            }
+        }
+        return found;
+    }
+
+    /** Press over a price line: a button arms, a draggable line (or its tag) starts moving. */
+    private priceLinesClaim(x: number, y: number): boolean {
+        const hit = this.hitPriceLine(x, y);
+        if (!hit) return false;
+        if (hit.kind === 'action') {
+            // Armed, not fired: a button that liquidates a position must be releasable
+            // somewhere else, the way every other button on the screen is.
+            this.priceLineArmed = { id: hit.line.id };
+            return true;
+        }
+        if (!hit.line.draggable && !hit.line.dragSpawns) return false;
+        /* A line that does both moves: pulling a new level out of a line you can also drag
+         * would leave no gesture for dragging it, and the owner asked for the drag. */
+        const spawn = !hit.line.draggable;
+        this.priceLineDrag = { id: hit.line.id, paneId: hit.paneId, price: hit.line.price, spawn, startY: y };
+        this.scene.priceLineDrag = this.priceLineDrag;
+        this.scheduler?.invalidate(InvalidateLevel.Chrome);
+        return true;
+    }
+
+    private priceLinesPointerMove(x: number, y: number): void {
+        const drag = this.priceLineDrag;
+        if (!drag) return;
+        const pane = this.scene.panes.get(drag.paneId);
+        if (!pane) return;
+        drag.price = this.coords.yToPrice(y, pane.scale, pane.bounds);
+        this.scene.priceLineDrag = { ...drag };
+        this.scheduler?.invalidate(InvalidateLevel.Chrome);
+    }
+
+    private priceLinesPointerUp(x: number, y: number): void {
+        const armed = this.priceLineArmed;
+        this.priceLineArmed = null;
+        if (armed) {
+            // Only if the release lands on the button too — a press that slid off is a cancel.
+            const hit = this.hitPriceLine(x, y);
+            if (hit && hit.kind === 'action' && hit.line.id === armed.id) {
+                this.emitPriceLine({ type: 'action', id: armed.id, action: 'close' });
+            }
+            return;
+        }
+        const drag = this.priceLineDrag;
+        this.priceLineDrag = null;
+        this.scene.priceLineDrag = null;
+        this.scheduler?.invalidate(InvalidateLevel.Chrome);
+        if (!drag) return;
+        if (!drag.spawn) {
+            this.emitPriceLine({ type: 'moved', id: drag.id, price: drag.price });
+            return;
+        }
+        /* A press that went nowhere is a click on the tag, not a level placed on top of the
+         * line it came from — see SPAWN_MIN_TRAVEL. Dropped silently: nothing was created, so
+         * there is nothing to report and nothing to explain. */
+        if (Math.abs(y - drag.startY) < SPAWN_MIN_TRAVEL) return;
+        this.emitPriceLine({ type: 'spawned', id: drag.id, price: drag.price });
+    }
+
+    /**
+     * Hover: the cursor for whatever the pointer is over on a price line, or null.
+     *
+     * A level that can be dragged says so with `ns-resize` — up and down is the only way it
+     * moves — and the button that closes the position says `pointer`, because it is a button.
+     * A line that is neither reports nothing and the cursor stays whatever the plot makes it.
+     */
+    private priceLinesCursor(x: number, y: number): string | null {
+        const hit = this.hitPriceLine(x, y);
+        if (!hit) return null;
+        if (hit.kind === 'action') return 'pointer';
+        if (hit.line.draggable || hit.line.dragSpawns) return 'ns-resize';
+        return hit.kind === 'tag' && hit.line.interactiveTag ? 'pointer' : null;
+    }
+
+    /** Right-press over an `interactiveTag` line's tag: claim it (suppressing the chart's
+     *  own context menu for this press) and report it — the price-line twin of
+     *  `drawingsContextAt`. Every other price line (not `interactiveTag`) is untouched: a
+     *  right-click over a position's entry/stop/target tag still opens the normal menu. */
+    private priceLinesContextAt(x: number, y: number): boolean {
+        const hit = this.hitPriceLine(x, y);
+        // The tag text AND its ✕ button both read as ONE bracket to look at — a right-click
+        // landing on either half should reopen it, not just the text half.
+        if (!hit || (hit.kind !== 'tag' && hit.kind !== 'action') || !hit.line.interactiveTag) return false;
+        this.emitPriceLine({ type: 'contextmenu', id: hit.line.id });
+        return true;
+    }
+
+    /** Double-click over an `interactiveTag` line's tag (or its ✕ button): claim it
+     *  (suppressing the data-area double-click) and report it. */
+    private priceLinesDblClick(x: number, y: number): boolean {
+        const hit = this.hitPriceLine(x, y);
+        if (!hit || (hit.kind !== 'tag' && hit.kind !== 'action') || !hit.line.interactiveTag) return false;
+        this.emitPriceLine({ type: 'dblclick', id: hit.line.id });
+        return true;
     }
 
     onPaneAction(cb: (a: PaneAction) => void): Unsubscribe {

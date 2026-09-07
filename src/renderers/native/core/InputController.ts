@@ -59,6 +59,24 @@ export interface InputControllerDeps {
      *  revert to the pointer. True when consumed — the companion contextmenu is then
      *  suppressed. */
     drawingsCancelPlacement?(): boolean;
+    /** Right-press over a drawing: report it for the host's own menu. `cx`/`cy` are viewport
+     *  coordinates. True when a drawing was hit — the chart's own menu is then suppressed. */
+    drawingsContextAt?(x: number, y: number, cx: number, cy: number): boolean;
+    /** Press over a draggable price line or its tag button: claims the whole gesture. */
+    priceLinesClaim?(x: number, y: number): boolean;
+    priceLinesPointerMove?(x: number, y: number): void;
+    priceLinesPointerUp?(x: number, y: number): void;
+    /** Cursor to show while hovering a price line the pointer can act on (`'ns-resize'` over a
+     *  draggable level, `'pointer'` over its button), or null. Without it a stop is a 1px line
+     *  with an invisible 6px grab zone — nothing tells anyone it can be taken hold of at all. */
+    priceLinesCursor?(x: number, y: number): string | null;
+    /** Right-press over an `interactiveTag` line's tag: report it for the host. True when
+     *  hit — the chart's own context menu is then suppressed for that press, the same way
+     *  `drawingsContextAt` suppresses it over a drawing. */
+    priceLinesContextAt?(x: number, y: number): boolean;
+    /** Double-click over an `interactiveTag` line's tag: report it for the host. True when
+     *  hit — the data-area double-click (view/scale reset) is then suppressed. */
+    priceLinesDblClick?(x: number, y: number): boolean;
     /** A claimed press began. `snap` = effective magnet mode; `shift` = additive (multi-) select. */
     drawingsPointerDown?(x: number, y: number, snap: SnapMode, shift: boolean): void;
     /** Pointer moved (forwarded for the placing ghost / drag preview). `snap` = effective magnet
@@ -111,7 +129,7 @@ const WHEEL_PRICE_DRAG_PX = 0.25;
  *  time axis, a sub-pane separator (drag to resize the panes above/below it), or one of
  *  the touch-only modes: a two-finger pinch, long-press crosshair inspection, or a
  *  long-press that opened an axis sheet (no further drag for that gesture). */
-type DragRegion = 'data' | 'price' | 'time' | 'separator' | 'drawing' | 'pinch' | 'crosshair' | 'axis-sheet';
+type DragRegion = 'data' | 'price' | 'time' | 'separator' | 'drawing' | 'priceline' | 'pinch' | 'crosshair' | 'axis-sheet';
 
 /**
  * The logical bar + its pixel that a wheel-zoom keeps pinned. `right` (the default)
@@ -364,6 +382,17 @@ export class InputController {
             // contextmenu companion suppress the host's chart menu for THIS press
             // only — a plain right-click still opens it.
             this.rightCancelled = this.deps.drawingsCancelPlacement?.() ?? false;
+            // Nothing to cancel, but an interactive price-line tag (or a drawing) under the
+            // cursor: that level's (or drawing's) own answer is the more specific one, so the
+            // chart's menu is suppressed the same way. Price lines are chrome painted over
+            // every drawing (see onDown's pan-claim order below), so they get first refusal.
+            if (!this.rightCancelled) {
+                const { x, y } = this.local(e);
+                this.rightCancelled = this.deps.priceLinesContextAt?.(x, y) ?? false;
+                if (!this.rightCancelled) {
+                    this.rightCancelled = this.deps.drawingsContextAt?.(x, y, e.clientX, e.clientY) ?? false;
+                }
+            }
             if (this.rightCancelled) e.preventDefault();
             return;
         }
@@ -386,6 +415,13 @@ export class InputController {
         this.moved = false;
         this.startX = x;
         this.startY = y;
+        /* Price lines go before the drawings: they are chrome, painted over every drawing and
+         * every candle, so what is on top has to be what answers the press. */
+        if (this.deps.priceLinesClaim?.(x, y)) {
+            this.region = 'priceline';
+            this.capture(e.pointerId);
+            return;
+        }
         // The drawings layer gets first refusal: when a tool is armed or the press is
         // over a drawing/handle it claims the WHOLE gesture (no pan/fling), atomically.
         if (this.deps.drawingsClaim?.(x, y)) {
@@ -534,6 +570,9 @@ export class InputController {
             } else if (this.region === 'drawing') {
                 if (Math.abs(x - this.startX) > slop || Math.abs(y - this.startY) > slop) this.moved = true;
                 this.deps.drawingsPointerMove?.(x, y, this.snapMode(e), e.shiftKey);
+            } else if (this.region === 'priceline') {
+                if (Math.abs(y - this.startY) > slop) this.moved = true;
+                this.deps.priceLinesPointerMove?.(x, y);
             } else {
                 const coords = this.deps.getCoords();
                 const vp = coords.getViewport();
@@ -556,11 +595,13 @@ export class InputController {
                 }
             }
         } else if (this.el) {
-            // Cursor affordance: a drawing under the cursor wins (pointer), else the
-            // draggable axis-strip cursors.
+            // Cursor affordance: a price line under the cursor wins, then a drawing (pointer),
+            // else the draggable axis-strip cursors. Price lines come first for the same reason
+            // they claim a press first — they are chrome, painted over every drawing.
+            const lineCursor = this.deps.priceLinesCursor?.(x, y);
             const drawCursor = this.deps.drawingsCursor?.(x, y);
             const r = this.regionAt(x, y);
-            this.el.style.cursor = drawCursor ?? (r === 'price' ? 'ns-resize' : r === 'time' ? 'ew-resize' : r === 'separator' ? 'row-resize' : '');
+            this.el.style.cursor = lineCursor ?? drawCursor ?? (r === 'price' ? 'ns-resize' : r === 'time' ? 'ew-resize' : r === 'separator' ? 'row-resize' : '');
             // Forward hover moves so the drawings layer can advance a placing ghost
             // (placing is click-based, so the cursor follow happens with no button down).
             this.deps.drawingsPointerMove?.(x, y, this.snapMode(e), e.shiftKey);
@@ -611,7 +652,9 @@ export class InputController {
         // a gesture that latched `moved` (a one-way 9–14px drag) already panned the
         // chart and must not double as a click/tap on release.
         const tapRelease = this.dragging && !this.moved && (!wasTouch || Math.hypot(x - this.startX, y - this.startY) <= TOUCH_TAP_SLOP);
-        if (this.dragging && this.region === 'drawing') {
+        if (this.dragging && this.region === 'priceline') {
+            this.deps.priceLinesPointerUp?.(x, y);
+        } else if (this.dragging && this.region === 'drawing') {
             this.deps.drawingsPointerUp?.(x, y, this.snapMode(e));
         } else if (tapRelease && this.region === 'data') {
             this.deps.onClick(x, y);
@@ -681,6 +724,9 @@ export class InputController {
 
     /** Shared double-click / double-tap routing, by the region under the point. */
     private doubleActivate(x: number, y: number): void {
+        // Price lines are chrome painted over everything else (see onDown), so an
+        // interactive tag's double-click is checked before a drawing's.
+        if (this.deps.priceLinesDblClick?.(x, y)) return;
         // A drawing double-click opens its settings — suppress the view/scale reset.
         if (this.deps.drawingsDblClick?.(x, y)) return;
         const region = this.regionAt(x, y);

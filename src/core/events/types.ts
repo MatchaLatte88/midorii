@@ -90,6 +90,33 @@ export interface VelaEventMap extends Record<string, unknown> {
   /** The user requested a drawing's settings popup. */
   "drawing:settings": { id: string };
   /**
+   * A drawing was right-clicked. `x`/`y` are viewport coordinates, so a host can anchor a
+   * menu at the cursor. Vela ships no menu of its own for this — it suppresses the chart's
+   * own context menu for that press and reports the drawing, leaving the entries to the
+   * host, which is the only side that knows what a given drawing means to it.
+   */
+  "drawing:contextmenu": { id: string; x: number; y: number };
+  /**
+   * A draggable price line was dropped at a new price. The line itself has NOT moved — the
+   * chart drew the drag as a preview and is now handing the result to whoever owns that level.
+   * Publish the line at its new price (or don't) and the preview resolves either way.
+   */
+  "priceline:moved": { id: string; price: number };
+  /**
+   * A NEW level was pulled out of a `dragSpawns` line and let go at this price. The line it
+   * came from has not changed and nothing has been created — the price is handed to that
+   * line's owner, which is the only side that knows what was just drawn out of it.
+   */
+  "priceline:spawned": { id: string; price: number };
+  /** A price line's tag button was pressed (see `PriceLine.action`). */
+  "priceline:action": { id: string; action: 'close' };
+  /** Right-pressed a price line's TAG — the chart's own context menu is suppressed for
+   *  that press (the `drawing:contextmenu` treatment, applied to price lines) so a host
+   *  can act on the level directly. */
+  "priceline:contextmenu": { id: string };
+  /** Double-clicked a price line's TAG — suppresses the data-area double-click. */
+  "priceline:dblclick": { id: string };
+  /**
    * A SCRIPT computed — the first run over the history, a live tick, a new bar, an input
    * edit, a viewport move, a market switch. The payload carries the run itself (title,
    * cause, the plots/variables/broker state at the computed bar), so a listener reads it

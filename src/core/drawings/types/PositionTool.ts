@@ -8,10 +8,47 @@ import { VALID, INVALID } from '../../palette';
 /** How the gear panel's stop/target inputs interpret their value. */
 export type PositionLevelMode = 'price' | 'points';
 
+/** How the two zones are filled: one flat wash, or a gradient that fades out at the entry. */
+export type PositionZoneStyle = 'solid' | 'gradient';
+
+/**
+ * How a host that trades this block carries its stop and target when the fill is NOT the drawn
+ * entry — i.e. a market order. `levels` keeps the prices as drawn, because they were drawn
+ * against something on the chart; `distance` keeps the drawn distances and measures them from
+ * wherever the order actually filled. Vela itself never places orders; this is the drawing
+ * saying which of the two readings its author meant.
+ */
+export type PositionBracketMode = 'levels' | 'distance';
+
+/**
+ * One painted readout, split into the three things it says: which level it is, the price that
+ * level sits at, and what that level is worth. The painter sets each part differently — the tag
+ * and the figure in the level's own colour, the price in the text colour — which is why they
+ * arrive as parts rather than as one string. An empty part is one a toggle switched off and is
+ * skipped, so the field closes up instead of leaving a gap.
+ */
+export interface PositionField {
+    tag: string;
+    value: string;
+    note: string;
+}
+
 /** Choices for the direction select (long ↔ short mirrors the levels across the entry). */
 export const DIRECTION_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
     { value: 'long', label: 'Long' },
     { value: 'short', label: 'Short' },
+];
+
+/** Choices for the zone fill select. */
+export const ZONE_STYLE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+    { value: 'solid', label: 'Solid' },
+    { value: 'gradient', label: 'Gradient' },
+];
+
+/** Choices for the stop/target carry select. */
+export const BRACKET_MODE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+    { value: 'levels', label: 'Drawn levels' },
+    { value: 'distance', label: 'Distance from fill' },
 ];
 
 /**
@@ -38,6 +75,7 @@ export class PositionTool extends Drawing {
     private static readonly DEFAULT_ACCOUNT_BALANCE = 10_000;
     private static readonly DEFAULT_PROFIT_COLOR = VALID;
     private static readonly DEFAULT_LOSS_COLOR = INVALID;
+    private static readonly DEFAULT_ZONE_STYLE: PositionZoneStyle = 'solid';
 
     // Declared with `!` so a field default never clobbers readProps (base constructor runs first).
     /** Percent of account balance risked on the stop (drives dollar loss + position size). */
@@ -60,6 +98,12 @@ export class PositionTool extends Drawing {
     profitColor!: string;
     /** Fill + line color of the risk zone. */
     lossColor!: string;
+    /** How both zones are filled — one flat wash, or a gradient strongest at its own level. */
+    zoneStyle!: PositionZoneStyle;
+    /** Keep the readouts off the chart until the block is under the cursor (or selected). */
+    textOnHover!: boolean;
+    /** How a host carries this block's stop and target onto an order that fills elsewhere. */
+    bracketMode!: PositionBracketMode;
 
     constructor(init: Partial<SerializedDrawing> & { paneId: string }) {
         super(init);
@@ -73,6 +117,9 @@ export class PositionTool extends Drawing {
         if (this.showStopLabel === undefined) this.showStopLabel = true;
         if (this.profitColor === undefined) this.profitColor = PositionTool.DEFAULT_PROFIT_COLOR;
         if (this.lossColor === undefined) this.lossColor = PositionTool.DEFAULT_LOSS_COLOR;
+        if (this.zoneStyle === undefined) this.zoneStyle = PositionTool.DEFAULT_ZONE_STYLE;
+        if (this.textOnHover === undefined) this.textOnHover = false;
+        if (this.bracketMode === undefined) this.bracketMode = 'levels';
     }
 
     /** `'LONG'` or `'SHORT'`, computed from geometry so it flips live as the drag crosses the
@@ -289,24 +336,46 @@ export class PositionTool extends Drawing {
         return `Loss $${formatMoney(this.dollarLoss())}  ·  Size ${formatQty(this.positionSize())}`;
     }
 
-    /** `TP  <price>   +x.xx%`; the price drops out when showPrices is off. */
-    targetLabel(): string {
+    /** `TP · <price> · +x.xx%` — what the trade is worth if it gets there. */
+    targetField(): PositionField {
         const p = this.prices();
-        const at = this.showPrices && p ? `${formatPrice(p.target)}   ` : '';
-        return `TP  ${at}+${this.rewardPct().toFixed(2)}%`;
+        return {
+            tag: 'TP',
+            value: this.showPrices && p ? formatPrice(p.target) : '',
+            note: `+${this.rewardPct().toFixed(2)}%`,
+        };
     }
 
-    /** `SL  <price>   −x.xx%`; the price drops out when showPrices is off. */
-    stopLabel(): string {
+    /** `SL · <price> · −x.xx%` — what it costs if it doesn't. */
+    stopField(): PositionField {
         const p = this.prices();
-        const at = this.showPrices && p ? `${formatPrice(p.stop)}   ` : '';
-        return `SL  ${at}−${this.riskPct().toFixed(2)}%`;
+        return {
+            tag: 'SL',
+            value: this.showPrices && p ? formatPrice(p.stop) : '',
+            note: `−${this.riskPct().toFixed(2)}%`,
+        };
     }
 
-    /** `Entry  <price>` — a price and nothing else, so it only appears with showPrices on. */
-    entryLabel(): string {
+    /** `LONG · <price> · R:R x.xx` — the field that rides the entry line itself. The direction
+     *  and the ratio answer to showHeader, the price to showPrices; with showHeader off the tag
+     *  falls back to the level's own name so the price is still labelled. */
+    entryField(): PositionField {
         const p = this.prices();
-        return `Entry  ${formatPrice(p ? p.entry : 0)}`;
+        return {
+            tag: this.showHeader ? this.directionLabel() : 'ENTRY',
+            value: this.showPrices && p ? formatPrice(p.entry) : '',
+            note: this.showHeader ? `R:R ${this.rr().toFixed(2)}` : '',
+        };
+    }
+
+    /** `RISK · $<loss> · Size <qty>` — the two numbers the stop decides, so the painter puts
+     *  this field on the stop's own line rather than somewhere in the middle of the block. */
+    riskField(): PositionField {
+        return {
+            tag: 'RISK',
+            value: `$${formatMoney(this.dollarLoss())}`,
+            note: `Size ${formatQty(this.positionSize())}`,
+        };
     }
 
     // ── stop/target input units (the gear panel's Price / Points dropdowns) ──
@@ -399,6 +468,9 @@ export class PositionTool extends Drawing {
                 { path: 'showTargetLabel', label: 'Show target label', kind: 'boolean', group: 'behavior' },
                 { path: 'showStopLabel', label: 'Show stop label', kind: 'boolean', group: 'behavior' },
                 { path: 'showPrices', label: 'Show level prices', kind: 'boolean', group: 'behavior' },
+                { path: 'textOnHover', label: 'Text on hover only', kind: 'boolean', group: 'behavior' },
+                { path: 'bracketMode', label: 'TP/SL from', kind: 'select', options: BRACKET_MODE_OPTIONS, group: 'behavior' },
+                { path: 'zoneStyle', label: 'Zone fill', kind: 'select', options: ZONE_STYLE_OPTIONS, group: 'fill' },
                 { path: 'profitColor', label: 'Profit zone', kind: 'color', group: 'fill' },
                 { path: 'lossColor', label: 'Loss zone', kind: 'color', group: 'fill' },
                 ...LINE_FIELDS.filter((f) => f.path !== 'style.lineColor'),
@@ -420,6 +492,9 @@ export class PositionTool extends Drawing {
             showStopLabel: this.showStopLabel,
             profitColor: this.profitColor,
             lossColor: this.lossColor,
+            zoneStyle: this.zoneStyle,
+            textOnHover: this.textOnHover,
+            bracketMode: this.bracketMode,
         };
     }
 
@@ -438,6 +513,9 @@ export class PositionTool extends Drawing {
         if (typeof props.showStopLabel === 'boolean') this.showStopLabel = props.showStopLabel;
         if (typeof props.profitColor === 'string') this.profitColor = props.profitColor;
         if (typeof props.lossColor === 'string') this.lossColor = props.lossColor;
+        if (props.zoneStyle === 'solid' || props.zoneStyle === 'gradient') this.zoneStyle = props.zoneStyle;
+        if (typeof props.textOnHover === 'boolean') this.textOnHover = props.textOnHover;
+        if (props.bracketMode === 'levels' || props.bracketMode === 'distance') this.bracketMode = props.bracketMode;
     }
 }
 

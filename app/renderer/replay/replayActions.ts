@@ -43,10 +43,17 @@ function onActiveChart(ctx: { chart: unknown }): boolean {
     return active != null && active.ws.chart === ctx.chart;
 }
 
-/** Whether a chart belongs to the running replay — the gate the other way round,
- *  for actions that make sense everywhere EXCEPT inside a session. */
-export function isReplayChart(chart: unknown): boolean {
-    return active != null && active.ws.chart === chart;
+/**
+ * Whether this context is the running replay's — the gate the other way round, for actions
+ * that make sense everywhere EXCEPT inside a session.
+ *
+ * Takes the CONTEXT, not the chart, so `active` is tested first: a shell evaluates every
+ * `when()` while it builds its topbar, which is before it has an active cell, and reading
+ * `ctx.chart` at that moment throws. Short-circuiting past it is what `onActiveChart`
+ * above already does, for the same reason.
+ */
+export function isReplayContext(ctx: { readonly chart: unknown }): boolean {
+    return active != null && active.ws.chart === ctx.chart;
 }
 
 function registerControls(): void {
@@ -124,7 +131,7 @@ function registerControls(): void {
         run: (ctx) => {
             if (!active) return;
             armOrderTool(active.ws.chart);
-            ctx.toast('Click the entry, drag to the target');
+            ctx.toast('Click the entry, drag to the target — then right-click the block to order');
         },
     });
 

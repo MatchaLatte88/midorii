@@ -197,6 +197,27 @@ export interface VisibleRange {
 }
 
 /** A user-initiated pane action reported by the renderer (hover buttons / double-clicks). */
+/**
+ * What the user did to a price line.
+ *
+ * `moved` is a REQUEST: the chart drew the drag and is handing over where it was dropped —
+ * whoever owns that level (an account, an order book) decides whether it goes there. `action`
+ * is the tag's button.
+ */
+export type PriceLineAction =
+    | { type: 'moved'; id: string; price: number }
+    /** A new level was dragged OUT of the line `id` (see `PriceLine.dragSpawns`). */
+    | { type: 'spawned'; id: string; price: number }
+    | { type: 'action'; id: string; action: 'close' }
+    /** Right-pressed the line's TAG (not just anywhere on the line) — the chart's own
+     *  context menu is suppressed for this press, the same way `drawingsContextAt`
+     *  suppresses it over a drawing, so a host can show ITS OWN menu (or act directly)
+     *  for the level instead. */
+    | { type: 'contextmenu'; id: string }
+    /** Double-clicked the line's TAG — suppresses the data-area double-click (view/scale
+     *  reset), the same way a drawing's double-click does. */
+    | { type: 'dblclick'; id: string };
+
 export type PaneAction =
     | { type: 'move'; paneId: string; dir: 'up' | 'down' }
     | { type: 'remove'; paneId: string }
@@ -292,6 +313,9 @@ export interface IChartRenderer {
      * `chart.panes` view in sync. Present iff `capabilities.paneManagement`.
      */
     onPaneAction?(cb: (action: PaneAction) => void): Unsubscribe;
+    /** Price-line interaction: a line was dropped, a new level was dragged out of one, or a
+     *  tag button was pressed. */
+    onPriceLineAction?(cb: (action: PriceLineAction) => void): Unsubscribe;
     /**
      * The renderer reports a user request to move/merge an indicator to another pane, made
      * from its own in-chart UI (the legend "Move to" menu or a legend-row drag). Core routes

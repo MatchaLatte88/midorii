@@ -2,6 +2,7 @@ import type { VelaTheme } from '../../../core/options';
 import type { IndicatorModel } from '../../../core/model/indicator';
 import type { OHLCV } from '../../../core/model/ohlcv';
 import type { LineStyle } from '../../../core/model/series';
+import type { PriceLine } from '../../../core/model/scene';
 import type { CoordinateSystem } from '../core/CoordinateSystem';
 import type { SceneGraph, PaneNode } from '../core/SceneGraph';
 import { percentScaleFor } from '../core/SceneGraph';
@@ -12,6 +13,7 @@ import { renderTradeMarkers } from '../../shared/trade-markers';
 import type { TradeExecution } from '../../../core/model/trades';
 import { paneAxisTicks, formatAxisValue, timeTicks } from './ticks';
 import { axisColumnX, PANE_SEPARATOR_PX } from './axisLayout';
+import { priceLineActionRect, priceLineHitAt, priceLineTagRect, TAG_PAD, TAG_RADIUS, type PriceLineHit } from './priceLineTags';
 import { parseColor } from '../backend/gl/color';
 import { DARK_THEME } from '../../../core/theme';
 import { tzOffsetMs } from './tz';
@@ -57,8 +59,10 @@ export class ChromeRenderer {
      */
     paneDrawingsRange(ownModels: IndicatorModel[], scene: SceneGraph, isPricePane: boolean, vr: { from: number; to: number }): { min: number; max: number } | null {
         let dr: { min: number; max: number } | null = null;
-        for (const m of ownModels) dr = unionRange(dr, this.drawingsRange(modelDrawingSet(m, false), vr, scene.offsetOf(m.id)));
-        if (isPricePane) for (const m of scene.indicators.values()) dr = unionRange(dr, this.drawingsRange(modelDrawingSet(m, true), vr, scene.offsetOf(m.id)));
+        // An indicator may opt its drawings out of the scale entirely — see IndicatorModel.
+        const folds = (m: IndicatorModel): boolean => m.autoscaleDrawings !== false;
+        for (const m of ownModels) if (folds(m)) dr = unionRange(dr, this.drawingsRange(modelDrawingSet(m, false), vr, scene.offsetOf(m.id)));
+        if (isPricePane) for (const m of scene.indicators.values()) if (folds(m)) dr = unionRange(dr, this.drawingsRange(modelDrawingSet(m, true), vr, scene.offsetOf(m.id)));
         return dr;
     }
 
@@ -121,6 +125,7 @@ export class ChromeRenderer {
         this.drawMergedScaleColumns(ctx, scene, coords, dataW);
         this.drawPaneSeparators(ctx, scene, theme, fullW, panes);
         this.drawPriceLineAndCountdown(ctx, scene, coords, theme, dataW, pricePane);
+        this.drawPriceLineTags(ctx, scene, coords, theme, dataW, panes);
         this.drawTimeAxis(ctx, scene, coords, theme, dataW, dataH, fullH);
     }
 
@@ -324,6 +329,142 @@ export class ChromeRenderer {
     }
 
     /**
+     * Tags for the price lines that carry a title: a chip riding each line at the right edge of
+     * the plot, and optionally a chip of its own price against the axis.
+     *
+     * A price line is usually a level someone is watching — a stop, a target, an order resting
+     * somewhere — and a level nobody can read the meaning of is a line. The chip is filled in
+     * the line's own colour so the two are obviously the same thing, and the text takes
+     * whichever of black/white survives that fill.
+     *
+     * Drawn in the chrome pass rather than with the line itself: these ride OVER the candles
+     * and over every indicator, which is the only place a level's own numbers are legible.
+     */
+    private drawPriceLineTags(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, dataW: number, panes: readonly PaneNode[]): void {
+        ctx.font = this.tagFont(theme);
+        ctx.textBaseline = 'middle';
+        for (const model of scene.indicators.values()) {
+            for (const pl of model.priceLines) {
+                if (!pl.title && !pl.axisTag && !pl.action) continue;
+                const pane = panes.find((p) => p.id === pl.paneId);
+                if (!pane || pane.collapsed || pane.bounds.height <= 0) continue;
+                const y = coords.priceToY(pl.price, pane.scale, pane.bounds);
+                if (y < pane.bounds.top || y > pane.bounds.top + pane.bounds.height) continue;
+                const color = pl.color ?? theme.textColor;
+                const ink = tagTextColor(color, theme.background);
+                if (pl.title) {
+                    const tag = pl.titleColor ?? color;
+                    const r = priceLineTagRect(ctx, pl.title, !!pl.action, dataW, y);
+                    ctx.fillStyle = tag;
+                    roundRect(ctx, r.x, r.y, r.width, r.height, TAG_RADIUS);
+                    ctx.fill();
+                    ctx.fillStyle = tagTextColor(tag, theme.background);
+                    ctx.textAlign = 'left';
+                    ctx.fillText(pl.title, r.x + TAG_PAD, y);
+                    ctx.textAlign = 'start';
+                }
+                if (pl.action === 'close') {
+                    const b = priceLineActionRect(dataW, y);
+                    const cx = b.x + b.width / 2;
+                    /* An outlined ring in the down colour, whatever the line is: this button
+                     * flattens a position, and the one control that ends a trade should not
+                     * change appearance with the trade's mood — a green "close" on a winner is
+                     * the same irreversible press as a red one on a loser. */
+                    ctx.fillStyle = theme.background;
+                    ctx.beginPath();
+                    ctx.arc(cx, y, b.width / 2 - 1, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = theme.downColor;
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    // The glyph is drawn, not typed: an ✕ from the font sits differently in
+                    // every family, and this one has to look centred in a 9px circle.
+                    ctx.strokeStyle = theme.downColor;
+                    ctx.lineWidth = 1.5;
+                    const arm = b.width / 2 - 6;
+                    ctx.beginPath();
+                    ctx.moveTo(cx - arm, y - arm);
+                    ctx.lineTo(cx + arm, y + arm);
+                    ctx.moveTo(cx + arm, y - arm);
+                    ctx.lineTo(cx - arm, y + arm);
+                    ctx.stroke();
+                }
+                if (pl.axisTag) {
+                    const text = formatAxisValue(pane.scale, pane.bounds.height, pl.price, percentScaleFor(scene, pane), scene.priceMintick);
+                    const w = ctx.measureText(text).width + 8;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(dataW + 1, y - 8, w, 16);
+                    ctx.fillStyle = ink;
+                    ctx.textAlign = 'center';
+                    ctx.fillText(text, dataW + 1 + w / 2, y);
+                    ctx.textAlign = 'start';
+                }
+            }
+        }
+        this.drawPriceLineDrag(ctx, scene, coords, theme, dataW, panes);
+        ctx.textBaseline = 'alphabetic';
+    }
+
+    /** The font the tags are set in — one definition, so measuring and painting agree. */
+    private tagFont(theme: VelaTheme): string {
+        return `11px ${theme.fontFamily}`;
+    }
+
+    /**
+     * The line being dragged, drawn where the cursor is holding it.
+     *
+     * The published line stays where it is: until its owner accepts the drop, the level HAS not
+     * moved, and drawing only the new position would claim otherwise. So both are on screen —
+     * the old one where the stop still is, this one where it would go.
+     */
+    private drawPriceLineDrag(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, dataW: number, panes: readonly PaneNode[]): void {
+        const drag = scene.priceLineDrag;
+        if (!drag) return;
+        const pane = panes.find((p) => p.id === drag.paneId);
+        if (!pane || pane.bounds.height <= 0) return;
+        const line = this.findPriceLine(scene, drag.id);
+        if (!line) return;
+        const y = Math.round(coords.priceToY(drag.price, pane.scale, pane.bounds)) + 0.5;
+        const color = line.color ?? theme.textColor;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = line.width ?? 1;
+        setDash(ctx, 'solid');
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(dataW, y);
+        ctx.stroke();
+        const text = formatAxisValue(pane.scale, pane.bounds.height, drag.price, percentScaleFor(scene, pane), scene.priceMintick);
+        const w = ctx.measureText(text).width + 8;
+        ctx.fillStyle = color;
+        ctx.fillRect(dataW + 1, y - 8, w, 16);
+        ctx.fillStyle = tagTextColor(color, theme.background);
+        ctx.textAlign = 'center';
+        ctx.fillText(text, dataW + 1 + w / 2, y);
+        ctx.restore();
+        ctx.textAlign = 'start';
+    }
+
+    /** One price line by id, across every mounted model. */
+    private findPriceLine(scene: SceneGraph, id: string): PriceLine | null {
+        for (const model of scene.indicators.values()) {
+            for (const pl of model.priceLines) if (pl.id === id) return pl;
+        }
+        return null;
+    }
+
+    /**
+     * What the pointer has hold of on a price line, measured with the font the tag is PAINTED
+     * in — which is why this lives here and not in the input layer.
+     */
+    hitPriceLine(x: number, y: number, line: PriceLine, lineY: number, dataW: number, theme: VelaTheme): PriceLineHit | null {
+        const ctx = this.ctx;
+        if (!ctx) return null;
+        ctx.font = this.tagFont(theme);
+        return priceLineHitAt(x, y, line, lineY, dataW, ctx);
+    }
+
+    /**
      * The color of the latest price element for the active chart style — matches how the
      * series itself is drawn: candle/bar body up-down, the line/area line color, or the
      * baseline side (above/below the baseline price).
@@ -392,6 +533,18 @@ function unionRange(a: { min: number; max: number } | null, b: { min: number; ma
     if (!a) return b;
     if (!b) return a;
     return { min: Math.min(a.min, b.min), max: Math.max(a.max, b.max) };
+}
+
+/** Begin a rounded-rectangle path (arcTo-based, no `ctx.roundRect` dependency). */
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
 }
 
 function setDash(ctx: CanvasRenderingContext2D, style: LineStyle): void {

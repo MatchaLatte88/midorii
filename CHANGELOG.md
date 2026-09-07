@@ -3,6 +3,334 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
+## [v0.3.0]
+
+### Added
+
+- **Ambient blobs behind the chart.** The plot surface is no longer one flat colour. Two
+  large, very faint washes bleed in from opposite corners — top-left and bottom-right — the
+  same ambient glow katsumii.com puts behind its pages, translated onto the chart. They sit
+  at the very bottom of the canvas pile, under the session bands and under the grid, so
+  nothing about reading a candle changes; and they are drawn, not layered in CSS, so a
+  screenshot of the chart contains them too. Each blob has its own switch and its own colour
+  under Settings → Canvas → Ambient blobs, and the colour picker's opacity slider is the
+  intensity control, because a blob is nothing but its translucency. Left alone they follow
+  the accent of whichever colour style is on — Midorii's blue, Katsumii's sky — and the
+  moment a colour is picked, that blob stops following and stays where it was put.
+
+- **Intraday Session Momentum, a new strategy.** Bets the last window of a trading day on what
+  that day did earlier — the early move followed, the window just before the close faded, a
+  position only when the two agree. It implements Shen, Urquhart & Wang (2022), who carried the
+  equity intraday-momentum finding into a market that never closes, and it comes with the
+  measurement rather than the promise: on BTCUSDT 5m from 2022 to 2025 the published *direction*
+  reproduces and its *size* does not. Both signals agreeing hits 54.0% of the time and pays 0.86
+  basis points a trade, against 9 basis points of round-trip taker cost — negative in every one
+  of the four years, and no window length or day boundary tried rescues it. That is the whole
+  point of having built it: the strategy exists so the claim could be checked instead of
+  repeated, and it stays so the check can be repeated. Two findings did hold up and are worth
+  reusing: cutting the trading day at the CME close beats cutting it at UTC midnight, and the
+  early window predicts nothing unless it ends mid-morning New York — 10:00 was the only one of
+  six windows tried with positive predictability, which is the paper's own claim that what makes
+  a window informative is where the flow is, not what the clock says. Every boundary is
+  therefore a setting: where the day is cut, where the early window ends, how long the traded
+  and late windows are, and which of the two signals has to speak. There is no stop by default,
+  because the researched strategy has none and exits on the clock; switching one on moves sizing
+  from the leverage ceiling back to the usual risk-per-trade rule.
+
+- **Relative Volume ORB, a new strategy.** Opening Range Breakout named for the one ingredient
+  that separates it from every other variant of the pattern. The break of a session's first
+  minutes, taken only in the direction those minutes closed: a range that closed lower is traded
+  short however far price later breaks above it, and one that closed where it opened is not
+  traded at all. The
+  order rests as a stop at the range edge, the stop-loss sits a fraction of the daily ATR from
+  the price it actually filled at — so a gap straight through the trigger does not quietly widen
+  the risk the size was solved for — and the position comes off at the session close rather than
+  being carried overnight. Which of the many published ORB variants this is was not a coin toss:
+  it follows Zarattini, Barbon & Aziz (2024), the one study that states every rule and also
+  reports what the same rules do without its key filter — 3.2% a year over eight years on
+  everything that met the liquidity screens, against 41.6% on the subset whose opening range
+  drew unusual volume. The rules did almost nothing; trading them only on unusually active
+  openings did nearly all of it. So the relative-volume floor is a first-class setting, measured
+  against the same instrument's own recent openings, and it is the first thing worth sweeping.
+  What that paper's portfolio also did — rank the whole US market each morning and trade the
+  top 20 — needs a universe, and a run here sees one instrument, so it is left out rather than
+  approximated under a second name. The opening range length, the ATR stop width and the number
+  of days behind both averages are settings; a reward-to-risk target can be switched on, and is
+  off by default because the research finds a target costs more on the days that trend than it
+  saves on the rest. Sessions are the US cash open, read on a New York clock, or the UTC day for
+  a market that never closes.
+
+- **Silver Bullet setups on the chart.** A new indicator marks the whole setup where it
+  happens: a high or a low run and given back, the gap the reversal left behind, the close that
+  undid the last candle opposing it, and the retest that follows — inside the London, New York
+  morning or New York afternoon hour, read on a New York clock so the windows follow the US
+  clock change instead of drifting an hour off it twice a year. Each one is drawn as the run-up
+  in its own direction colour and, once price came back, the trade it became: the risk zone
+  under the entry, the reward zone above it, ending on the bar that reached the stop or the
+  target. A setup is marked the moment the structure shifts, before anyone can know whether
+  price returns to the gap, so the chart shows what could have been acted on rather than only
+  what worked out; the ones price never came back to can be shown as well, as the level an
+  order sat waiting at. Which hours count, how much of the setup has to fall inside one, the
+  smallest gap worth trading, how long the retest may take and the reward-to-risk are all
+  settings.
+
+- **A Strategies tab.** The library of what this app can trade on its own, and what each one
+  is set to. It exists to hold one line: an indicator describes the market and stops there —
+  it draws a gap, a sweep, a session, and a person decides what to do about it — while a
+  strategy commits to where it gets in, where it is wrong, where it takes profit and how much
+  is at stake, as rules rather than as judgement. Only the second kind can be backtested,
+  swept, or one day traded by a bot, and only the second kind is on this screen. `Silver
+  Bullet` states its own in full: the five conditions that make a setup, a limit order resting
+  at the gap edge (never a market order on the setup bar, which would pay a price nobody could
+  get), the stop beyond the wick that took the liquidity, the target measured from the fill at
+  the reward-to-risk asked for, and a size derived from the risk and the distance to the stop
+  rather than typed in. It reads the same detector the Silver Bullet indicator paints with, so
+  the chart and a run can never disagree about the same market. Everything settable is settable
+  here — risk and size first, then what counts as a setup — and what is saved is what the
+  strategy IS: the Backtest tab starts from it, may override it for one run, and stores what it
+  actually ran with, so neither screen can quietly rewrite the other's history.
+
+- **Market data from a file.** `Import a file…` in the download dialog, and `Import CSV…` on the
+  Backtest tab, read an OHLC export into the local library and put it on the same shelf a
+  download lands on — chartable, replayable, backtestable, indistinguishable afterwards. What a
+  file means is worked out and then SHOWN rather than assumed: the delimiter, whether the first
+  row names the columns, which column is the close, whether `03/04` is March or April, and what
+  clock the timestamps are on. Every one of those is a control, and under them the first bars
+  are previewed exactly as they will be stored, in UTC — because a New York export read as UTC
+  or a day-first file read month-first imports perfectly cleanly and is wrong about every bar,
+  and the preview is the only place that shows. Several files at once are read as one series,
+  so an export split into eleven parts is one import. Timestamps may be epoch seconds,
+  milliseconds or microseconds, ISO, or written out; European decimal commas and quoted fields
+  are handled; a row that cannot be read is counted and reported instead of silently dropped.
+  A dataset whose bars are not minutes now says so and is aggregated from its own bar length,
+  and asking it for something finer is refused rather than answered with the stored bars under
+  a label they have not earned.
+
+- **Backtest straight off a venue.** `Market data` on the Backtest tab now offers Binance,
+  Coinbase and Hyperliquid beside the local library. Pick one, name the market, and whatever
+  the chosen range is missing is fetched before the run starts — and kept, so a second run over
+  the same stretch costs nothing, the chart can be pointed at exactly what was tested, and the
+  run stays reproducible after the venue has rewritten its own history. Only the ends of a
+  range are fetched: what is already on this machine is not downloaded twice.
+
+- **Parameter sweeps.** The Backtest tab has a second mode. Give any numeric setting a range
+  instead of a value — from, to, step — and every combination is run and ranked, by expectancy
+  per trade, net profit, profit factor or return. It is built to resist the thing a sweep is
+  otherwise a machine for: the range is split, every combination is ranked on the earlier
+  stretch only, and the best and worst few are re-run on the later one, which had no say in
+  choosing them, with both numbers side by side. Combinations that barely traded are set aside
+  rather than ranked, since four trades can top any measure by luck, and the worst rows are
+  shown next to the best — four combinations within a hair of each other mean the setting was
+  never what drove the result. The count and the number of detections it needs are shown before
+  it starts, a progress bar and a Stop button while it runs, and `Use` on any row takes those
+  settings back to the form to be run in full. It runs on its own thread, so the app keeps
+  drawing through a sweep that takes an hour, and it detects once per set of detector settings
+  rather than once per combination — which is what makes sweeping the risk or the reward-to-risk
+  a matter of seconds.
+
+- **The settings behind a result.** Every stored run already carried the settings it was made
+  with; the Analysis tab now shows them, as the questions the form asked rather than as the
+  object that stores them. A finished sweep is filed on a shelf of its own beside the runs, with
+  its ranges, its ranking and everything it held fixed, and reads back on the same screen.
+
+- **A Backtest tab.** Pick a strategy, a market — already on this machine, imported from a
+  file, or fetched from a venue as the run needs it — a timeframe and a stretch of history, say
+  what one trade may risk and where its target sits, and run it. The result
+  comes back on the same figures the Analysis tab reports — the balance curve against the
+  balance it started with, net and return, win rate, profit factor, expectancy, the worst
+  drawdown and every trade in a list — and any run that took a trade is filed in the library
+  straight away, beside the replays and paper accounts it is worth comparing against. Fills
+  follow the rules a replay already keeps: an order never fills on the bar that created it, and
+  switching on minute-accurate fills replays the minutes inside each bar, so a bar that reaches
+  both the stop and the target is settled by the order they actually happened in rather than by
+  the pessimistic guess. `Silver Bullet` is the first strategy on the list — it rests a limit
+  order at the gap edge its setup points to, cancels it when price never comes back inside the
+  window, and exits at the reward-to-risk you asked for.
+
+- **Price alerts.** Right-click the chart and `Add Alert` sets one on the level under the
+  cursor, opening a small popup to fine-tune it — the exact price, crossing up/down/either,
+  a note, once or repeating, on or off. A dashed line marks the level on the chart (its own ✕
+  takes the alert off), and a new `Alerts` panel lists every one across every symbol, editable
+  and deletable in place. Watched against the live feed regardless of what the chart currently
+  shows — set one on ETH while looking at BTC and it still fires — and a fired alert pops a
+  native Windows notification even with the app minimized, clicking it brings the window back.
+  Only symbols with a live feed carry alerts (the local archive has none). Unrelated to the
+  topbar's own alerts bell, which is a script's own `alert()` log, not a price watch.
+
+- **A mark where every order filled.** Each execution — in a replay, a backtest and a paper
+  account alike — now leaves a small cross on the candle it happened on: its upright stroke
+  standing on the time it filled, its crossbar lying on the price it filled at, green for a
+  buy and red for a sell. A mid-bar fill sits mid-bar, and the marks stay after the trade
+  closes, so a chart scrolled back still shows what was done on it rather than only what is
+  still open. They are the size they are at every zoom, and `Settings → Trading → Executions`
+  takes them off in one click.
+
+- **An Analysis tab.** A top-level view of every account this app has traded, on two shelves,
+  because they answer different questions. `Accounts` is the paper account — the one still
+  running, and the ones filed away when it was started over — read to ask how it is going;
+  `Sessions` is everything that was played or computed to an end, a backtest and a hand-played
+  replay side by side, read to ask whether a way of trading worked. Either one opens in full:
+  the balance curve against the balance it started with, net and return, win rate, profit
+  factor, expectancy and the worst drawdown, then the breakdown the summary does not answer —
+  which side the money came from, the best and worst single trade, how long a trade is held,
+  the longest run of wins and of losses, and the average result in R over the trades that
+  carried a stop. Every figure a run reports is the one it stored when it finished; nothing
+  here computes a second opinion. The running paper account is read off the account itself
+  rather than off its last write, so the tab and the chart never disagree about it. A shelf
+  can be cleared as well as read: a session or a sweep is deleted from the list it sits in,
+  without opening it first, and the row asks a second time before it goes.
+- **A Settings tab.** The gear beside the light/dark switch opens a screen of its own for
+  everything about the program that is a choice rather than a result, on a rail of pages:
+  `General` is which view the app opens on and which version it is, `Customization` is the
+  theme and how an open trade is drawn — the entry, the stop and the target, the risk and
+  reward areas, the marks left where orders actually filled — and `Trading` is what a paper
+  account starts with, what it is charged, and how much of it one trade may lose. What is
+  changed here changes everywhere at once: a colour picked on this screen redraws a position
+  on a chart that is already open, and the theme is the same switch the top bar has. The
+  paper account is the one thing with a Save button, because saving it can cost something —
+  the balance and the costs are fixed when an account is created, so changing one files the
+  account on the Analysis shelf and starts a fresh one, and the button says so before it does
+  it. Everything the account already had is still reachable from the chart's Trade menu; this
+  is a second door to the same settings, not a second copy of them. The chart's own look —
+  candles, grid, crosshair, scales — stays behind the chart's own gear, because a replay and
+  the live chart are allowed to differ about it.
+- **A second colour style.** The app can now be worn in more than one palette, picked under
+  Settings → Customization. `Midorii` is what it has always looked like — neutral graphite
+  and the blue accent — and `Katsumii` is a second one after katsumii.com: near-black navy
+  with a cyan accent in the dark, slate paper with a deep sky one in the light. A style is
+  the palette and dark/light are that palette at two lightnesses, so the switch in the title
+  bar goes on doing exactly what it did, within whichever style is on. It reaches everything
+  at once — the chart, its panels, every dialog, a running replay, and the window's own
+  paint colour, which used to be a fixed pair and now follows the palette that is actually
+  on screen. What a style never changes is the candles: green is up and red is down in every
+  one of them, because a palette is what surrounds a chart, not what it is saying.
+- **Paper trading on the live chart.** The chart now has a Trade menu, top right, and everything
+  about trading is behind it. `Just Watching` is where it starts and where it goes back to: no
+  account card, no ticket, no dock, no levels — a chart, and nothing else. Pick `Paper trading`
+  and the whole of the replay's trading surface arrives on the live chart instead: the account
+  card and the Buy/Sell panel on the plot, the ticket beside it, the positions and orders under
+  it, a drawn block right-clicked into an order, and a stop dragged where it belongs. The gear
+  beside the entry sets what the account is — its size, its commission, spread and slippage,
+  whether a second entry stands beside the first — and how a trade is sized. The first three of
+  those are baked into an account when it is created, so changing one starts a new account, and
+  the button says so before it does it. More brokers will join the list; the entry is the same
+  shape, and what changes underneath is only where the orders go.
+- **The paper account keeps its books.** An account meant to run for months now behaves
+  like one. It lives on disk beside the replay sessions and the run library rather than in
+  browser storage, written atomically — weeks of trades and an equity curve do not belong in
+  a five-megabyte quota shared with everything else the app remembers. It carries its own
+  history with it: every closed trade, the curve of what it has been worth, the peak it
+  reached and the deepest hole it sat in. The drawdown is measured on every tick rather than
+  on the points that happen to be stored, because a loss that happened between two samples
+  still happened; the curve itself is sampled — a point whenever money settles, kept forever,
+  and a mark every so often in between — and thins its marks rather than growing without
+  limit, so a year-old account still knows every trade it took. The dock reads it back: what
+  the account has made, its return, how many trades, how many won, the worst drawdown and
+  what it has paid in fees, with every closed round trip listed underneath.
+- **Reset files the account instead of deleting it.** Starting over used to mean throwing the
+  history away. Now a finished paper account goes to the run library first — the same shelf a
+  backtest and a hand-played replay land on, labelled as what it was — and only then does a
+  fresh one open. A reset that cannot file the account does not happen at all: nothing is
+  cleared until the result is stored. An account that never traded is not filed, because
+  there is nothing to compare.
+- **A paper account that survives being closed.** The account, and the moment it stands at, are
+  kept — so is which mode the chart was left in. On the way back the gap is fetched and played
+  through the same book, at the finest resolution one request can cover it in: a stop the market
+  went through overnight fills where it would have, and the account says so, rather than greeting
+  its owner still open at a price it never reached. Every price is offered to the book exactly
+  once, live and on the way back, which is the one property that keeps a paper fill honest — a
+  streaming feed re-sends the same forming bar on every tick, and an account that took each of
+  those at face value would fill on a spike that had already been and gone. The Broker holds one
+  instrument, so the account is bound to the market it trades: it follows the chart while it holds
+  nothing, and stays where its money is once it does.
+- **Ranges — where the market stopped going anywhere.** Every indicator on the chart so far
+  found a *move*; none of them said where price was simply standing still, which is where most
+  of the day goes. A run of bars that trades back and forth instead of travelling is now drawn
+  as a box, with its two edges, the equilibrium the range gets traded back to, and the mark on
+  the bar that finally closed beyond an edge. One still running carries its levels on past the
+  last bar, dashed, because they are still live. What counts as a range is not a percentage:
+  the span is measured against how far this market normally covers in the same number of bars,
+  so one setting means the same thing on a 1m chart and on a 4h one — and an hourly range does
+  not turn up on the minute chart. Length, how narrow, how far back the volatility is read,
+  how many times price must return to each edge, how close counts as reaching one, and how far
+  a bar must close past it are all yours to set.
+- **Buy and Sell on the chart itself.** A small panel under the account card takes a size and
+  sends it at market — the control you reach for when the move is already happening and every
+  extra field is one you are reading while it runs. The stop and the target are optional and
+  are given as a risk rather than as levels: say what the trade may lose and how far the target
+  is in stops, and both distances follow from the size. They attach to the actual fill, so a
+  risk of 50 costs 50 whatever the fill turns out to be. Leave them empty and the order goes
+  out bare, which is a thing people do on purpose. The size steps at whatever precision was
+  typed, so it serves a whole contract and a tenth of a millionth of a coin equally.
+- **A ticket beside the chart.** Getting into a trade no longer means drawing one first. A
+  panel by the plot takes an order the other way round: market, limit or stop, a stop loss and
+  a target, and a size that follows from them — you say where the trade is wrong and what that
+  may cost, and the size is worked out the way a strategy's is, so a trade taken by hand and a
+  trade taken by a bot are the same size for the same stop. Beside the size it shows what the
+  position would carry, what the stop would cost in cash and as a share of the account, and how
+  far the target is in stops. A size the leverage ceiling decided rather than the risk says so
+  in red: that is a stop too tight for the risk, not a trade that is fine. Buy and Sell grey out
+  with the reason on them rather than in silence — a buy limit above the market, a stop on the
+  winning side, a size nobody set. The panel folds away to a rail when the chart needs the room,
+  and the risk settings on it are the same ones a block traded from the chart is sized by.
+- **A position's levels, on the chart.** An open position now draws its stop and its target as
+  labelled levels: what each is worth in money and in R, measured against what the trade risked
+  when it opened, so moving a stop never restates what one R was. Both can be dragged — the
+  chart shows the drag as a preview and the account decides, so a stop dropped on the winning
+  side is refused and snaps back rather than quietly becoming a target. The entry line carries a
+  close button, and every level puts its price on the axis while it moves. The entry's own tag
+  is coloured by what the position is currently worth, while the line and its price stay
+  neutral — the level has not moved, only the money on it has.
+- **Fair value gaps as an indicator.** The imbalances the drawing tool snaps to can now be
+  shown across the whole chart at once: every three-bar gap as a box, tinted for the side it
+  came from, running on to the right edge until price fills it. What counts as filled is yours
+  to set — first touch, the midpoint, fully crossed, or a close beyond it — as is whether
+  filled zones stay on the chart, how thin a gap may be to still count, how many bars wide the
+  boxes are drawn, and whether gaps stacked on top of each other read as one imbalance. Under
+  the midpoint rule each open zone also carries its midline. The zones never pull the price
+  axis around: a gap still standing far below the market stays where it is instead of zooming
+  the chart out to reach it. Add it from the indicators dialog, twice if you want two readings
+  side by side.
+- **The run library, readable at last.** Every session played to the end was already
+  stored with its trades and its figures, and nothing could open one again. Now the
+  toolbar has a shelf: the list gives each run its market, when it ran, how many trades
+  it took, its win rate, its worst drawdown and what it made. Opening one shows the whole
+  account — net, return, drawdown, final equity, the win/loss split, profit factor and
+  expectancy — over its balance curve, with every round trip underneath, in cash and in R.
+  Write a note on a run and it stays with it; delete one and it is gone. Backtests will
+  land on the same shelf.
+- **The account, on the chart, while a session runs.** Trading a replay used to be trading
+  blind: every figure was in the engine and on none of the screens. A card by the price axis
+  now carries the four that matter — what the account is worth and how that compares to the
+  balance it started with, the profit on what is open and how much of it you are holding, what
+  every stop in the market would cost together if all of them filled, and the settled cash
+  behind it. A position with no stop is counted beside the risk rather than folded into it as
+  a zero: its risk is not small, it is undecided. The card never takes a click, so it can sit
+  over live bars without getting in the way of the chart.
+- **Managing a trade while it is on.** Under the chart there is now a book of what is open
+  and what is waiting, and every control the engine always had is on it: move the stop or the
+  target by typing over them, put the stop at break-even, let it follow price at a distance,
+  take half off, turn the position round, or close it outright. A resting order can finally be
+  cancelled — placing one and then being unable to take it back was the sharpest edge in a
+  session. Break-even greys out when the trade has not moved far enough to come out flat, with
+  the engine's own reason on the button rather than a shrug. A position's own stop and target
+  stay off the order list: they belong to the position that already shows them, and cancelling
+  protection from two places is how a position ends up looking protected when it is not.
+
+### Fixed
+
+- **Chart settings survive a restart.** Everything in the settings dialog — the background,
+  the grid, the crosshair, candle colours, the scales — was applied to the chart and then
+  forgotten: the cosmetics were part of the saved document, but nothing asked for that document
+  to be written when they changed. An edit only outlived the session if some other change — a
+  symbol, an indicator, a drawing — happened to save the workspace afterwards.
+- **The app's own toolbar buttons are back.** Downloading market data, starting a replay
+  and now the run library are added to the toolbar after it has already been built, and
+  nothing asked it to build itself again — so all three were simply absent from it.
+- **Dialogs have their surface back.** The download dialog and the release notes open
+  beside the chart rather than inside it, which is where the theme lives — so they drew as
+  bare text straight over the candles, with no panel behind them.
+
 ## [v0.2.0]
 
 ### Added

@@ -105,6 +105,21 @@ export const MENU_CSS = `
 .vela-menu-item[data-highlighted] .vela-menu-star { opacity: 0.55; }
 .vela-menu-item .vela-menu-star:hover { opacity: 1; background: var(--vela-hover-strong); }
 .vela-menu-item .vela-menu-star.vela-fav { opacity: 0.95; color: var(--vela-highlight); }
+/* Row side action (rows carrying \`trailing\`): the star's affordance, minus the state —
+   it is a button, not a toggle, so it stays visible enough to be found and brightens on
+   the row's own hover. */
+.vela-menu-item .vela-menu-rowbtn {
+    order: 98;
+    margin: -3px -5px -3px 6px;
+    padding: 3px 5px;
+    box-sizing: content-box;
+    border-radius: var(--vela-radius-sm);
+    color: var(--vela-fg-muted);
+    opacity: 0.55;
+    transition: opacity 0.1s ease, background 0.1s ease;
+}
+.vela-menu-item[data-highlighted] .vela-menu-rowbtn { opacity: 0.8; }
+.vela-menu-item .vela-menu-rowbtn:hover { opacity: 1; background: var(--vela-hover-strong); }
 .vela-menu-sep { height: 1px; margin: 4px 6px; background: var(--vela-border); }
 /* Submenu trigger row: a right-aligned chevron, and it stays highlighted while its own
    list is open so the path you came down remains readable. */

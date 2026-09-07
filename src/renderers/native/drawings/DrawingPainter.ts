@@ -1,4 +1,4 @@
-import type { Drawing, Projector, DrawingStyle } from '../../../core/drawings';
+import type { Drawing, Projector, DrawingStyle, PositionField } from '../../../core/drawings';
 import { SegmentDrawing, FibRatios, RadialFib, FibSpiral, GannSquare, GANN_SQUARE_ARCS, DedekindTessellation, MachFigure, MeasureBox, PositionTool, FairValueGap, FVG_MIDPOINT_DASH, PatternDrawing, CalloutBase, Callout, Comment, PriceNote, Signpost, Note, PriceLabel, ArrowMark, GlyphStamp, RegressionChannel, AnchoredVwap, FixedRangeVolumeProfile, Magnifier, magnifierTimeframeLabel, lineSegmentIntersection, effectiveFillColor, VALID_FILL, INVALID_FILL, DEFAULT_DRAWING_COLOR } from '../../../core/drawings';
 import type { VelaTheme } from '../../../core/options';
 import { contrastColor, dashPattern, extendEndpoints, namedFontSize, labelLineHeight, TEXT_FRAME_INSET, TEXT_FRAME_RISE, uprightLineAngle } from '../../shared/drawing-geometry';
@@ -24,6 +24,28 @@ const TEXT_FRAME_ALPHA = { selected: 0.3, hovered: 0.12 };
 /** The position tool's readouts are columns of numbers stacked against one left edge, so they
  *  set in mono: proportional digits would leave every price and percentage ragged. */
 const MONO_FONT = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+/** Position zones: one flat wash, or a gradient that starts here at its own level and fades to
+ *  nothing at the entry. The gradient peaks higher than the flat wash because only its outer
+ *  edge ever reaches that value. */
+const ZONE_FLAT_ALPHA = 0.13;
+const ZONE_GRADIENT_ALPHA = 0.3;
+/** The position tool's readout fields: a dark plate so the numbers survive whatever candles sit
+ *  under them, hairlined in the level's own colour so the field is tied to its line by more than
+ *  position alone. INSET holds them off the block's edges, EDGE off the line they belong to. */
+const FIELD_PAD_X = 7;
+const FIELD_PAD_Y = 3;
+const FIELD_GAP = 6;
+const FIELD_INSET = 6;
+const FIELD_EDGE = 4;
+/** Two fields share a line only with this much clear air between them; any less and they read
+ *  as one run-on field, so the second one takes the row above instead. */
+const FIELD_SPLIT_GAP = 18;
+/** The fields ride one step below the drawing text default: they annotate a block that is often
+ *  only a few candles tall, where 'normal' covers the very bars the levels are read against. */
+const FIELD_TEXT_SIZE = 'small';
+const FIELD_RADIUS = 4;
+
+const FIELD_BORDER_ALPHA = 0.55;
 
 /**
  * Paints user drawings onto the L1.5 canvas. The caller has already applied the DPR
@@ -56,6 +78,14 @@ export function handleIdsFor(targets: PaintTargets): ReadonlySet<string> {
 export class DrawingPainter {
     /** The current `paintAll` call's interaction state, visible to the per-type painters. */
     private targets: PaintTargets = {};
+    /**
+     * Whether this pass paints the parts that belong OVER the series.
+     *
+     * Off while building the interleave layers — those sit under the candles, and a readout
+     * down there is unreadable and cannot know about hover either (they are built on data
+     * frames, with no interaction state). `paintOverlays` brings them back on the top canvas.
+     */
+    overlays = true;
 
     /** The chart's active series LOOK — style + resolved series colors — pushed by the
      *  controller before each paint. The magnifier's inset mirrors both: candles/bars/line/
@@ -86,6 +116,25 @@ export class DrawingPainter {
         }
         this.targets = {};
         this.paintHighlights(ctx, drawings, proj, handleIdsFor(targets));
+    }
+
+    /** The over-the-series parts of drawings whose BODY was painted elsewhere — today the
+     *  position tool's readouts. Same reason as the handles below: a block sent behind the
+     *  candles still has to be read, and this pass is also the only one that sees hover. */
+    paintOverlays(
+        ctx: CanvasRenderingContext2D,
+        drawings: readonly Drawing[],
+        proj: Projector,
+        theme: VelaTheme,
+        targets: PaintTargets = {},
+    ): void {
+        this.targets = targets;
+        for (const d of drawings) {
+            if (d.visible && d instanceof PositionTool) {
+                this.paintClipped(ctx, d, proj, () => this.paintPositionFields(ctx, d, proj, theme));
+            }
+        }
+        this.targets = {};
     }
 
     /** Selection handles alone, for drawings whose body was painted elsewhere: the ones sent
@@ -693,28 +742,41 @@ export class DrawingPainter {
     }
 
     /** Paint a position tool: a reward zone (entry↔target) + risk zone (entry↔stop) in the
-     *  tool's own zone colors, the three level lines, and the TP / SL / entry / direction+R:R
-     *  readouts (styled by `text`, hidden wholesale by showText).
+     *  tool's own zone colors, the three level lines, and the TP / entry / SL readouts (styled
+     *  by `text`, hidden wholesale by showText).
      *
-     *  Everything is written INSIDE the block, left-aligned against its own line and facing the
-     *  entry: nothing hangs off the edges, so a label can neither be clipped by the pane nor
-     *  covered by anything the block itself draws. Colour follows meaning rather than direction —
-     *  the stop side takes the loss colour and the target side the profit colour — so a short
-     *  reads the same way round as a long. */
+     *  Each readout is a filled pill riding the RIGHT end of the line it belongs to, the way a
+     *  broker's ticket labels a level: the number it states is that line's price, so it sits on
+     *  the line rather than somewhere inside the block. It hangs just past the block's right
+     *  edge; where the pane runs out it flips inside instead of being clipped. Colour follows
+     *  meaning rather than direction — the stop side takes the loss colour and the target side
+     *  the profit colour — so a short reads the same way round as a long. */
     private paintPosition(ctx: CanvasRenderingContext2D, d: PositionTool, proj: Projector, theme: VelaTheme): void {
         const L = d.layout(proj);
         if (!L) return;
         const { x1, x2, ey, sy, ty } = L;
         const w = x2 - x1;
-        const zone = (yA: number, yB: number, color: string): void => {
+        /* A zone belongs to its OUTER level — that is the price it is about — so a gradient is
+         * strongest there and fades to nothing at the entry, where the two zones meet and any
+         * colour would only muddy the other one. */
+        const zone = (yOuter: number, color: string): void => {
+            const h = Math.abs(yOuter - ey);
+            if (h <= 0) return;
             ctx.save();
-            ctx.globalAlpha = 0.13 * ctx.globalAlpha;
-            ctx.fillStyle = color;
-            ctx.fillRect(x1, Math.min(yA, yB), w, Math.abs(yB - yA));
+            if (d.zoneStyle === 'gradient') {
+                const g = ctx.createLinearGradient(0, yOuter, 0, ey);
+                g.addColorStop(0, withAlpha(color, ZONE_GRADIENT_ALPHA));
+                g.addColorStop(1, withAlpha(color, 0));
+                ctx.fillStyle = g;
+            } else {
+                ctx.globalAlpha = ZONE_FLAT_ALPHA * ctx.globalAlpha;
+                ctx.fillStyle = color;
+            }
+            ctx.fillRect(x1, Math.min(yOuter, ey), w, h);
             ctx.restore();
         };
-        zone(ey, ty, d.profitColor); // reward
-        zone(ey, sy, d.lossColor); // risk
+        zone(ty, d.profitColor); // reward
+        zone(sy, d.lossColor); // risk
         const line = (y: number, color: string, dashed = false): void =>
             this.stroke(ctx, { ...d.style, lineColor: color, ...(dashed ? { lineStyle: 'dashed' as const } : {}) }, () => {
                 ctx.moveTo(x1, y);
@@ -725,28 +787,109 @@ export class DrawingPainter {
         // The entry is the one level nobody trades against — it is where the trade starts, not a
         // price it stops at — so it stays dashed whatever the two edges are set to.
         line(ey, d.style.lineColor, true);
+        if (this.overlays) this.paintPositionFields(ctx, d, proj, theme);
+    }
+
+    /**
+     * The position tool's readouts, as a separate pass.
+     *
+     * They are the one part of the block that must never end up under the series: a block sent
+     * behind the candles still has to be READ, and a number with a wick through it is not. So
+     * when the body paints into an interleave layer, this stays behind and is drawn again on
+     * the top canvas — the same reason the handles come back up there. It is also the only pass
+     * that knows about hover, since the interleave layers are built on data frames and carry no
+     * interaction state at all.
+     */
+    private paintPositionFields(ctx: CanvasRenderingContext2D, d: PositionTool, proj: Projector, theme: VelaTheme): void {
+        const L = d.layout(proj);
+        if (!L) return;
+        const { x1, x2, ey, sy, ty } = L;
+        const w = x2 - x1;
         if (!d.showText) return;
-        const fs = namedFontSize(d.text?.size ?? 'normal');
-        const ink = d.text?.color ?? theme.textColor;
-        ctx.font = `${fs}px ${MONO_FONT}`;
-        ctx.textAlign = 'left';
-        // Which way the target lies decides which side of each line is "inwards".
-        const targetAbove = ty < ey;
-        const label = (y: number, side: 'above' | 'below', text: string, color: string): void => {
-            ctx.fillStyle = color;
-            ctx.textBaseline = side === 'above' ? 'bottom' : 'top';
-            ctx.fillText(text, x1 + 5, side === 'above' ? y - 3 : y + 3);
+        /* A block small enough to sit inside a handful of candles is one whose readouts cover
+         * those candles, so they can be asked to stay out of the way until the block is the one
+         * being read — under the cursor, or picked up. */
+        const t = this.targets;
+        if (d.textOnHover && d.id !== t.hovered && d.id !== t.dragged && t.selected?.has(d.id) !== true) return;
+        const fs = namedFontSize(d.text?.size ?? FIELD_TEXT_SIZE);
+        const tagFont = `600 ${fs}px ${MONO_FONT}`;
+        const bodyFont = `${fs}px ${MONO_FONT}`;
+        const valueInk = d.text?.color ?? theme.textColor;
+        const fh = fs + FIELD_PAD_Y * 2;
+        const widthOf = (f: PositionField): number => {
+            ctx.font = tagFont;
+            let acc = ctx.measureText(f.tag).width;
+            ctx.font = bodyFont;
+            for (const part of [f.value, f.note]) if (part !== '') acc += FIELD_GAP + ctx.measureText(part).width;
+            return acc + FIELD_PAD_X * 2;
         };
-        if (d.showTargetLabel) label(ty, targetAbove ? 'below' : 'above', d.targetLabel(), d.profitColor);
-        if (d.showStopLabel) label(sy, targetAbove ? 'above' : 'below', d.stopLabel(), d.lossColor);
-        if (d.showPrices) label(ey, targetAbove ? 'above' : 'below', d.entryLabel(), ink);
-        // Direction and reward-to-risk go into the RISK zone, right against the entry line; the
-        // loss/size readout stacks one row further into it.
-        const inward = targetAbove ? 'below' : 'above';
-        if (d.showHeader) label(ey, inward, d.headerLabel(), ink);
+        const drawField = (f: PositionField, accent: string, top: number, side: 'left' | 'right'): void => {
+            const bw = widthOf(f);
+            // Right-aligned fields share one edge; a field wider than the block starts at the
+            // left inset and overhangs, which reads better than a number sliced off.
+            const x = side === 'left' ? x1 + FIELD_INSET : Math.max(x1 + FIELD_INSET, x2 - FIELD_INSET - bw);
+            ctx.save();
+            ctx.setLineDash([]);
+            roundRect(ctx, x, top, bw, fh, FIELD_RADIUS);
+            /* The chart's own background, forced opaque: the field reads as a window punched
+             * through the candles rather than a tinted plate laid over them, and nothing of what
+             * runs underneath comes through to break up the digits. */
+            ctx.fillStyle = withAlpha(theme.background, 1);
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = withAlpha(accent, FIELD_BORDER_ALPHA);
+            ctx.stroke();
+            ctx.restore();
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            const mid = top + fh / 2 + 0.5;
+            let cx = x + FIELD_PAD_X;
+            ctx.font = tagFont;
+            ctx.fillStyle = accent;
+            ctx.fillText(f.tag, cx, mid);
+            cx += ctx.measureText(f.tag).width;
+            ctx.font = bodyFont;
+            if (f.value !== '') {
+                cx += FIELD_GAP;
+                ctx.fillStyle = valueInk;
+                ctx.fillText(f.value, cx, mid);
+                cx += ctx.measureText(f.value).width;
+            }
+            if (f.note !== '') {
+                cx += FIELD_GAP;
+                ctx.fillStyle = accent;
+                ctx.fillText(f.note, cx, mid);
+            }
+        };
+        /* Each field lies INSIDE the zone its level opens — the target's inside the reward, the
+         * stop's inside the risk — so it never covers the line it is about and a short reads the
+         * same way round as a long. The entry has no zone of its own: its field rides the line.
+         *
+         * A zone too shallow to hold its field without running into the entry's turns the field
+         * out through its own line instead: outside the block it is still against the level it
+         * belongs to, where stacking it inward would put it on top of the entry's readout. */
+        const inward = (from: number): number => Math.sign(ey - from) || 1;
+        const beside = (lineY: number, dir: number): number => (dir > 0 ? lineY + FIELD_EDGE : lineY - FIELD_EDGE - fh);
+        const room = FIELD_EDGE + fh + fh / 2;
+        const sited = (lineY: number): number => beside(lineY, Math.abs(ey - lineY) >= room ? inward(lineY) : -inward(lineY));
+        const entryInk = d.style.lineColor ?? theme.textColor;
+        if (d.showTargetLabel) drawField(d.targetField(), d.profitColor, sited(ty), 'right');
+        const stopTop = sited(sy);
+        if (d.showStopLabel) drawField(d.stopField(), d.lossColor, stopTop, 'right');
+        if (d.showHeader || d.showPrices) drawField(d.entryField(), entryInk, ey - fh / 2, 'right');
         if (d.showLossSize) {
-            const step = Math.round(fs * 1.35) * (targetAbove ? 1 : -1);
-            label(ey + (d.showHeader ? step : 0), inward, d.lossSizeLabel(), ink);
+            /* The money and the size are what the STOP costs, so they belong on the stop's line,
+             * at the opposite edge. Three ways that can go, in order of preference: beside the
+             * stop field; one row deeper into the risk zone; or — on a zone too shallow to hold a
+             * second row without landing on the entry — just outside the block, below the stop
+             * line. It stays with its line either way, and never lands on another field. */
+            const risk = d.riskField();
+            const together = widthOf(risk) + (d.showStopLabel ? widthOf(d.stopField()) + FIELD_SPLIT_GAP : 0) + FIELD_INSET * 2;
+            const stacks = Math.abs(ey - sy) >= fh * 2 + FIELD_EDGE * 2 + 6;
+            const top = together <= w ? stopTop
+                : stacks ? stopTop + inward(sy) * (fh + 4)
+                    : stopTop + -inward(sy) * (fh + 4);
+            drawField(risk, d.lossColor, top, 'left');
         }
         ctx.textBaseline = 'alphabetic';
     }

@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect } from 'vitest';
 import { NativeRenderer } from '../src/renderers/native/NativeRenderer';
 import { registerChartType, unregisterChartType } from '../src/chart-types/registry';
 import { CHART_CONFIG_VERSION, defaultChartStyle, factoryResetConfig, mergeConfig, type ChartConfig } from '../src/renderers/native/core/chartConfig';
+import type { SceneGraph } from '../src/renderers/native/core/SceneGraph';
 
 /** A known-good baseline config for the pure mergeConfig tests. */
 function baseConfig(): ChartConfig {
@@ -99,6 +100,27 @@ describe('mergeConfig — validating reducer (item 15)', () => {
     });
 });
 
+describe('mergeConfig — ambient blobs', () => {
+    it('applies a per-blob partial patch and leaves the other blob alone', () => {
+        const base = baseConfig();
+        const out = mergeConfig(base, { blobs: { topLeft: { color: '#ff0000' } } });
+        expect(out.blobs.topLeft).toEqual({ visible: base.blobs.topLeft.visible, color: '#ff0000' });
+        expect(out.blobs.bottomRight).toEqual(base.blobs.bottomRight);
+    });
+
+    it('turns one blob off without touching its color', () => {
+        const base = baseConfig();
+        const out = mergeConfig(base, { blobs: { bottomRight: { visible: false } } });
+        expect(out.blobs.bottomRight).toEqual({ visible: false, color: base.blobs.bottomRight.color });
+    });
+
+    it('drops malformed blob fields', () => {
+        const base = baseConfig();
+        const out = mergeConfig(base, { blobs: { topLeft: { visible: 'yes', color: 42 }, bottomRight: 'nope' } });
+        expect(out.blobs).toEqual(base.blobs);
+    });
+});
+
 describe('defaultChartStyle', () => {
     it('reproduces current rendering (inherit defaults, no borders, visible wicks)', () => {
         const s = defaultChartStyle();
@@ -112,6 +134,12 @@ describe('defaultChartStyle', () => {
         expect(s.crosshair).toEqual({ color: '#9aa0ad', width: 1, style: 'dashed', opacity: 0.4, labelBackground: '#595959' });
         expect(s.candle.borderVisible).toBe(false);
         expect(s.candle.wickVisible).toBe(true);
+        // Ambient blobs ship ON with no color of their own: they inherit the theme accent,
+        // so switching the app's palette re-tints them.
+        expect(s.blobs).toEqual({
+            topLeft: { visible: true, color: null },
+            bottomRight: { visible: true, color: null },
+        });
     });
 });
 
@@ -131,11 +159,45 @@ describe('NativeRenderer.getConfig — defaults resolve to concrete values', () 
         expect(cfg.candles.borderUpColor).toBe('#089981'); // inherits the body color
         expect(cfg.candles.wickDownColor).toBe('#f23645');
         expect(cfg.series).toEqual({ style: 'candles', baseline: null, spacing: 1 });
+        // Resolved from the brand accent, which the built-in themes do not override.
+        expect(cfg.blobs).toEqual({
+            topLeft: { visible: true, color: 'rgba(41,98,255,0.14)' },
+            bottomRight: { visible: true, color: 'rgba(41,98,255,0.11)' },
+        });
     });
 
     it('is fully JSON-serializable (round-trips through stringify/parse)', () => {
         const cfg = new NativeRenderer().getConfig();
         expect(JSON.parse(JSON.stringify(cfg))).toEqual(cfg);
+    });
+});
+
+describe('NativeRenderer — ambient blobs keep inheriting the theme accent', () => {
+    /** The live style store behind the resolved document — `null` there means "inherit". */
+    const liveBlobs = (r: NativeRenderer) => (r as unknown as { scene: SceneGraph }).scene.style.blobs;
+
+    it('survives an unrelated config edit without pinning the resolved accent', () => {
+        // getConfig() resolves the sentinel to a concrete color and mergeConfig runs over
+        // THAT, so writing the merged value straight back would silently pin the current
+        // palette — after which a style switch could no longer re-tint the blobs.
+        const r = new NativeRenderer();
+        r.applyConfig({ layout: { fontSize: 13 } }); // never names a blob color
+        expect(liveBlobs(r).topLeft.color).toBeNull();
+        expect(liveBlobs(r).bottomRight.color).toBeNull();
+    });
+
+    it('keeps inheriting when only the visibility is toggled', () => {
+        const r = new NativeRenderer();
+        r.applyConfig({ blobs: { topLeft: { visible: false } } });
+        expect(liveBlobs(r).topLeft).toEqual({ visible: false, color: null });
+    });
+
+    it('pins a color the user actually picks, and only that one', () => {
+        const r = new NativeRenderer();
+        r.applyConfig({ blobs: { topLeft: { color: '#ff000022' } } });
+        expect(liveBlobs(r).topLeft.color).toBe('#ff000022');
+        expect(liveBlobs(r).bottomRight.color).toBeNull(); // untouched, still inheriting
+        expect(r.getConfig().blobs.topLeft.color).toBe('#ff000022');
     });
 });
 

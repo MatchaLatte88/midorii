@@ -222,18 +222,21 @@ function makeFakeWS() {
 describe('BinanceProvider.subscribe', () => {
     afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
-    it('streams klines via WebSocket for a native interval (perp → fstream, .P stripped)', async () => {
+    it('streams raw trades via WebSocket for a minute-based timeframe (perp → fstream, .P stripped)', async () => {
         const FakeWS = makeFakeWS();
         vi.stubGlobal('WebSocket', FakeWS);
+        // The reseed-on-open fetches /klines for the authoritative open/volume; an
+        // empty result is fine here — the trade below is what the test cares about.
+        vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as unknown as Response)));
         const bars: OHLCV[] = [];
         const unsub = new BinanceProvider().subscribe('BTCUSDT.P', '1h', (b) => bars.push(b));
         await vi.waitFor(() => expect(FakeWS.instances.length).toBe(1));
         const ws = FakeWS.instances[0]!;
         expect(ws.url).toContain('fstream.binance.com');
-        expect(ws.url).toContain('btcusdt@kline_1h');
+        expect(ws.url).toContain('btcusdt@trade');
         expect(ws.url).not.toContain('btcusdt.p'); // .P stripped for the stream name
-        ws._msg({ e: 'kline', s: 'BTCUSDT', k: { t: 1000, o: '10', h: '12', l: '9', c: '11', v: '3', x: false } });
-        expect(bars).toEqual([{ time: 1000, open: 10, high: 12, low: 9, close: 11, volume: 3 }]);
+        ws._msg({ e: 'trade', s: 'BTCUSDT', p: '11', q: '3', T: 1_000 });
+        expect(bars).toEqual([{ time: 0, open: 11, high: 11, low: 11, close: 11, volume: 3 }]); // 1000ms floors into the [0, 1h) bucket
         unsub();
         expect(ws.readyState).toBe(3); // closed on unsubscribe
     });
@@ -245,17 +248,33 @@ describe('BinanceProvider.subscribe', () => {
         vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
             const url = input.toString();
             if (url.includes('/ping')) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as unknown as Response);
+            if (url.includes('/klines')) return Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as unknown as Response);
             return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) } as unknown as Response);
         }));
         const unsub = new BinanceProvider().subscribe('BTCUSDT', '1h', () => {});
         await vi.waitFor(() => expect(FakeWS.instances.length).toBe(1));
         expect(FakeWS.instances[0]!.url).toContain('stream.binance.com:9443');
-        expect(FakeWS.instances[0]!.url).toContain('btcusdt@kline_1h');
+        expect(FakeWS.instances[0]!.url).toContain('btcusdt@trade');
         unsub();
     });
 
-    it('falls back to polling getBars for an aggregated (non-native) timeframe', async () => {
+    it('streams trades for an aggregated timeframe too — no kline interval exists for it, but bucketing raw trades needs none', async () => {
+        const FakeWS = makeFakeWS();
+        vi.stubGlobal('WebSocket', FakeWS);
+        vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as unknown as Response)));
+        const bars: OHLCV[] = [];
+        const unsub = new BinanceProvider().subscribe('BTCUSDT', '45', (b) => bars.push(b));
+        await vi.waitFor(() => expect(FakeWS.instances.length).toBe(1));
+        const ws = FakeWS.instances[0]!;
+        expect(ws.url).toContain('btcusdt@trade');
+        ws._msg({ e: 'trade', s: 'BTCUSDT', p: '20', q: '1', T: 46 * MIN });
+        expect(bars).toEqual([{ time: 45 * MIN, open: 20, high: 20, low: 20, close: 20, volume: 1 }]); // floors into [45m, 90m)
+        unsub();
+    });
+
+    it('falls back to polling getBars when no WebSocket exists in the environment', async () => {
         vi.useFakeTimers();
+        vi.stubGlobal('WebSocket', undefined); // Node's own global — absent in some hosts, stubbed out here
         const rows = [0, 15, 30].map((m) => [m * MIN, '1', '1', '1', '1', '1', m * MIN + 15 * MIN - 1]);
         vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
             const url = input.toString();

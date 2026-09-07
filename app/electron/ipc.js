@@ -4,16 +4,27 @@
  * Electron serializes a thrown Error back to the caller as a rejected promise,
  * so a failed download surfaces in the UI instead of vanishing into a log.
  *
- * Scope so far: market data and replay persistence. Drawings, backtest, sweep
- * and ui:set-theme come back once their own modules are ported.
+ * Scope so far: market data (downloaded, imported from a file, or fetched on demand
+ * for a backtest), replay and backtest persistence, the run library, the sweep shelf,
+ * the app theme and the custom title bar's window controls. Drawings come back once
+ * their own module is ported.
  */
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { open, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
+import { capitalConfigured, capitalMarketInfo, capitalMarkets, capitalPrices, capitalSubscribe } from './data/capital.js';
+import { CSV_TIME_ZONES, dominantInterval, missingFields, parseMarketCsv, sniffCsv } from './data/csv.js';
 import { DEFAULT_SOURCE, listSources, sourceOf } from './data/providers/index.js';
-import { listDatasets, mergeBars, parseTimeframe, readBars, readMeta } from './data/store/barStore.js';
-import { condenseEquity, saveRun } from './data/store/runStore.js';
+import { deleteDataset, describeMs, listDatasets, mergeBars, parseTimeframe, readBars, readMeta } from './data/store/barStore.js';
+import { annotateSweep, deleteSweep, listSweeps, loadSweep, saveSweep } from './data/store/sweepStore.js';
+import { clearStrategySettings, loadStrategySettings, saveStrategySettings } from './data/store/strategyStore.js';
+import { annotateRun, condenseEquity, deleteRun, listRuns, loadRun, saveRun } from './data/store/runStore.js';
+import { clearAccount, loadAccount, saveAccount } from './data/store/paperStore.js';
 import { deleteSession, listSessions, loadSession, saveSession } from './data/store/sessionStore.js';
+import { loadAlerts, saveAlerts } from './data/store/alertStore.js';
+import { applyTitleBarTheme } from './titlebar.js';
 
 /** Datasets live outside the app bundle so an update never touches them. */
 export function dataDir() {
@@ -23,6 +34,28 @@ export function dataDir() {
 /** Results outlive the data they were computed from, so they live apart too. */
 export function runsDir() {
   return path.join(app.getPath('userData'), 'backtests');
+}
+
+/**
+ * Parameter sweeps.
+ *
+ * Their own folder rather than the run library, for the reason sweepStore gives: a run
+ * is one account that can be opened and read trade by trade, a sweep is a few thousand
+ * rows of summary with no account behind any of them.
+ */
+export function sweepsDir() {
+  return path.join(app.getPath('userData'), 'sweeps');
+}
+
+/**
+ * What each strategy is set to.
+ *
+ * Configuration, not results: it belongs to the strategy rather than to any one run, which
+ * is why it sits beside the run library instead of in it. A backtest starts from these and
+ * stores what it actually ran with.
+ */
+export function strategiesDir() {
+  return path.join(app.getPath('userData'), 'strategies');
 }
 
 /**
@@ -36,11 +69,172 @@ export function sessionsDir() {
   return path.join(app.getPath('userData'), 'replay-sessions');
 }
 
+/**
+ * The paper account.
+ *
+ * Its own folder rather than a file among the sessions: a session is one
+ * afternoon and there are many, this is one account that runs for months. It
+ * also outlives the market data it traded on, which is why nothing here lives
+ * under `market-data`.
+ */
+export function paperDir() {
+  return path.join(app.getPath('userData'), 'paper-account');
+}
+
+/**
+ * Price alerts — set from the chart, checked against the live feed regardless of which
+ * symbol is on screen, so they need somewhere durable of their own rather than riding
+ * the workspace document (which is per-chart and does not persist across a symbol switch).
+ */
+export function alertsDir() {
+  return path.join(app.getPath('userData'), 'alerts');
+}
+
+/**
+ * The ways a person can trade a run by hand, and what the library calls each.
+ *
+ * Both go through `replay:save` because both end up on the same shelf as a backtest —
+ * that is what makes the three comparable — but they are not the same thing and the
+ * stored run has to say which it was.
+ */
+const HAND_TRADED = {
+  replay: { strategy: 'replay', strategyName: 'Manual replay' },
+  paper: { strategy: 'paper', strategyName: 'Paper trading' },
+};
+
 function requireString(value, name) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`${name} is required`);
   }
   return value.trim();
+}
+
+/**
+ * A symbol that is safe to build a file name out of.
+ *
+ * An imported symbol is typed by hand, and the bar store spells its files
+ * `<symbol>-1m.bin` — a name carrying a slash or a pair of dots would write outside the
+ * data folder. Refused rather than sanitised: a dataset silently renamed is a dataset
+ * nobody can find again.
+ */
+function requireSymbol(value) {
+  const symbol = requireString(value, 'symbol').toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(symbol)) {
+    throw new Error(
+      `"${symbol}" cannot be a dataset name. Use letters, digits, dot, dash or underscore `
+      + `— up to 32 characters, starting with a letter or a digit.`,
+    );
+  }
+  return symbol;
+}
+
+/**
+ * Fetches a range from a venue and merges it into the store.
+ *
+ * Shared by the explicit download and by the backtest's fetch-on-demand, so both refuse
+ * the same way and both report progress on the same channel.
+ *
+ * A dataset belongs to the venue that created it: BTCUSDT on one venue and BTCUSDT on
+ * another are different markets with different prints, and merging them would produce a
+ * chart of a market that does not exist. The refusal is loud rather than clever — the
+ * user picks a different source, or deletes the dataset first.
+ */
+async function downloadInto(event, venue, symbol, fromDate, toDate) {
+  const existing = await readMeta(dataDir(), symbol);
+  if (existing?.source && existing.source !== venue.id) {
+    throw new Error(
+      `${symbol} was downloaded from ${existing.source}. Two venues' prints are two `
+      + `different markets and must not be merged — download it under a different `
+      + `name, or remove the existing dataset first.`,
+    );
+  }
+
+  const sender = BrowserWindow.fromWebContents(event.sender);
+  const progress = (p) => sender?.webContents.send('data:download-progress', {
+    symbol, source: venue.id, ...p,
+  });
+
+  const { bars, missing } = await venue.module.downloadRange(symbol, fromDate, toDate, '1m', progress);
+  if (bars.length === 0) {
+    throw new Error(
+      `${venue.label} returned no bars for ${symbol} between ${fromDate.toISOString().slice(0, 10)} `
+      + `and ${toDate.toISOString().slice(0, 10)}. Check the spelling — ${venue.label} writes `
+      + `this market as e.g. ${venue.example}.`,
+    );
+  }
+
+  const result = await mergeBars(dataDir(), symbol, bars, { source: venue.id });
+  return { ...result, missing, source: venue.id };
+}
+
+/** How much of a file the picker reads to work out its shape. Enough for the header and
+ *  a few dozen rows; a market CSV can be sixty megabytes and none of that is needed to
+ *  decide which column is the close. */
+const CSV_HEAD_BYTES = 64 * 1024;
+
+/**
+ * What the import dialog needs to show a file: its size, everything the sniffer believes
+ * about it, and the first few rows parsed under exactly the settings the import will use.
+ *
+ * That last part is what makes the dialog worth having. A date style or a time zone is
+ * impossible to check by reading a column of `12/26/2022 18:01` — it is only visible in
+ * what those characters turn INTO, so the preview is produced by the same parser the
+ * import runs, rather than by a second, friendlier one that could disagree with it.
+ *
+ * Only the head is read. Its last line is usually cut in half, so it is dropped rather
+ * than shown as a row with three columns — a truncated sample would make the delimiter
+ * look wrong on a file that is fine.
+ */
+async function inspectCsv(file, settings = {}) {
+  const info = await stat(file);
+  const handle = await open(file, 'r');
+  let head;
+  try {
+    const buffer = Buffer.alloc(Math.min(CSV_HEAD_BYTES, Math.max(info.size, 1)));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    head = buffer.subarray(0, bytesRead).toString('utf8');
+    if (bytesRead < info.size) {
+      const cut = head.lastIndexOf('\n');
+      if (cut > 0) head = head.slice(0, cut + 1);
+    }
+  } finally {
+    await handle.close();
+  }
+
+  const sniffed = sniffCsv(head, { delimiter: settings.delimiter, hasHeader: settings.hasHeader });
+  const mapping = settings.mapping ?? sniffed.mapping;
+  const dateStyle = settings.dateStyle ?? sniffed.dateStyle;
+  const timeZone = settings.timeZone ?? 'UTC';
+
+  /* A preview that cannot be produced is not a failure of the file — it is what the
+   * dialog exists to show. The message goes back beside the empty preview so the reason
+   * is on screen instead of in a rejected promise. */
+  let preview = [];
+  let previewError = null;
+  try {
+    const parsed = parseMarketCsv(head, {
+      delimiter: sniffed.delimiter, hasHeader: sniffed.hasHeader, mapping, dateStyle, timeZone,
+    });
+    preview = parsed.bars.slice(0, 5);
+  } catch (err) {
+    previewError = err instanceof Error ? err.message : String(err);
+  }
+
+  return {
+    file,
+    name: path.basename(file),
+    bytes: info.size,
+    /** The clocks a written-out timestamp can be on. Sent with the file so the dialog
+     *  has one round trip, not two. */
+    timeZones: CSV_TIME_ZONES,
+    ...sniffed,
+    mapping,
+    dateStyle,
+    timeZone,
+    missing: missingFields(mapping),
+    preview,
+    previewError,
+  };
 }
 
 /* Anything the store can bucket exactly, in either dialect — Vela's canonical
@@ -85,24 +279,196 @@ export function registerIpc() {
     }
     if (fromDate >= toDate) throw new Error('The start date must be before the end date');
 
-    const existing = await readMeta(dataDir(), sym);
-    if (existing?.source && existing.source !== venue.id) {
+    return downloadInto(event, venue, sym, fromDate, toDate);
+  });
+
+  /* Everything a backtest needs for one range, fetched only where the archive does not
+   * already have it.
+   *
+   * The other half of "run this strategy on Binance data": the tab asks for a market and
+   * a stretch of history, and whatever is missing at either end is downloaded before the
+   * run starts. Downloading rather than streaming past the engine on purpose — the bars
+   * are worth keeping. A second run over the same range costs nothing, the chart can be
+   * pointed at exactly what was tested, and the run stays reproducible after the venue
+   * has rewritten its own history.
+   *
+   * Only the ends are filled. A hole in the middle of a stored range cannot be seen from
+   * the metadata (which carries the first and last bar, not the gaps), and probing for
+   * one would mean reading the whole dataset on every run. A venue that was missing a
+   * month reports it under `missing` when the range is first fetched.
+   */
+  ipcMain.handle('data:ensure', async (event, request) => {
+    const { symbol, from, to, source = DEFAULT_SOURCE } = request ?? {};
+    const sym = requireString(symbol, 'symbol').toUpperCase();
+    const venue = sourceOf(requireString(source, 'source'));
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      throw new Error('from and to must be timestamps in milliseconds');
+    }
+    if (from >= to) throw new Error('The range has to end after it starts');
+
+    const before = await readMeta(dataDir(), sym);
+    const gaps = [];
+    if (!before || before.first == null || before.last == null) {
+      gaps.push([from, to]);
+    } else {
+      if (from < before.first) gaps.push([from, Math.min(to, before.first)]);
+      if (to > before.last) gaps.push([Math.max(from, before.last), to]);
+    }
+
+    const missing = [];
+    let added = 0;
+    for (const [gapFrom, gapTo] of gaps) {
+      const result = await downloadInto(event, venue, sym, new Date(gapFrom), new Date(gapTo));
+      added += result.added;
+      missing.push(...result.missing);
+    }
+
+    const meta = await readMeta(dataDir(), sym);
+    return {
+      symbol: sym,
+      source: venue.id,
+      /** How many bars this call had to fetch — zero when the archive already had it. */
+      added,
+      total: meta?.count ?? 0,
+      first: meta?.first ?? null,
+      last: meta?.last ?? null,
+      missing,
+    };
+  });
+
+  /* ─── Importing a CSV ────────────────────────────────────────────────── *
+   *
+   * The other way bars get in. A file from a data vendor or a broker knows nothing about
+   * this app, so it arrives in two steps: the picker reads its head and reports what it
+   * believes about it, and the import runs under whatever the dialog came back with.
+   *
+   * Splitting it is the whole point. A day-first file read as month-first produces a
+   * dataset that looks entirely normal and is wrong about every date after the twelfth
+   * of a month — so the reading is shown and confirmed before a million rows are parsed
+   * under it, rather than discovered later on a chart that makes no sense.
+   */
+
+  /* Several files at once, because a large export usually arrives as one. The NQ set
+   * this was built against is eleven parts of a single series, each with its own header
+   * row — importing those one at a time is eleven passes through the same dialog to
+   * answer the same questions. The first file is the one inspected; the rest are read
+   * under whatever it settles on, and any row that disagrees is counted as skipped
+   * rather than guessed at. */
+  ipcMain.handle('data:pick-csv', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: 'Import market data',
+      buttonLabel: 'Read',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Market data', extensions: ['csv', 'txt', 'tsv'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (canceled || filePaths.length === 0) return null;
+
+    // Sorted, so `part_002` follows `part_001` however the picker handed them over.
+    const files = [...filePaths].sort((a, b) => a.localeCompare(b));
+    return { ...await inspectCsv(files[0]), files };
+  });
+
+  /** Re-reads a file the picker already returned, under whatever the dialog has
+   *  corrected so far — the delimiter, the columns, the date style, the clock. */
+  ipcMain.handle('data:inspect-csv', (_e, request) => {
+    const { file, ...settings } = request ?? {};
+    return inspectCsv(requireString(file, 'file'), settings);
+  });
+
+  ipcMain.handle('data:import-csv', async (_e, request) => {
+    const {
+      file, files, symbol, delimiter, hasHeader, mapping, dateStyle, timeZone = 'UTC',
+    } = request ?? {};
+
+    const sources = (Array.isArray(files) && files.length > 0 ? files : [file])
+      .map((f) => requireString(f, 'file'));
+    const sym = requireSymbol(symbol);
+    if (!mapping || typeof mapping !== 'object') throw new Error('The columns are not mapped');
+
+    /* Every part read under the same settings, then treated as one series. The bar length
+     * is decided over the whole thing rather than per file: a part that happens to start
+     * after a weekend would otherwise report a three-day bar. */
+    const bars = [];
+    let skipped = 0;
+    let rows = 0;
+    let firstError = null;
+
+    for (const source of sources) {
+      const text = await readFile(source, 'utf8');
+      const part = parseMarketCsv(text, { delimiter, hasHeader, mapping, dateStyle, timeZone });
+      bars.push(...part.bars);
+      skipped += part.skipped;
+      rows += part.rows;
+      firstError ??= part.firstError;
+    }
+
+    bars.sort((a, b) => a.time - b.time);
+    const parsed = { bars, skipped, rows, firstError, intervalMs: dominantInterval(bars) };
+
+    if (!parsed.intervalMs) {
       throw new Error(
-        `${sym} was downloaded from ${existing.source}. Two venues' prints are two `
-        + `different markets and must not be merged — download it under a different `
-        + `name, or remove the existing dataset first.`,
+        'The timestamps in this file do not settle on one bar length. The store buckets '
+        + 'every timeframe up from a fixed base bar, which an irregular series has none of.',
       );
     }
 
-    const sender = BrowserWindow.fromWebContents(event.sender);
-    const progress = (p) => sender?.webContents.send('data:download-progress', {
-      symbol: sym, source: venue.id, ...p,
+    /* A dataset is one market recorded one way. Adding a file to something downloaded
+     * from a venue, or to an import with a different bar length, produces a series whose
+     * bars mean two different things — refused rather than merged. */
+    const existing = await readMeta(dataDir(), sym);
+    if (existing) {
+      if (existing.source && existing.source !== 'csv') {
+        throw new Error(
+          `${sym} already holds data downloaded from ${existing.source}. Import this file `
+          + `under a different name, or remove that dataset first.`,
+        );
+      }
+      const existingBase = Number.isFinite(existing.baseMs) ? existing.baseMs : 60_000;
+      if (existingBase !== parsed.intervalMs) {
+        throw new Error(
+          `${sym} is stored as ${describeMs(existingBase)} bars and this file holds `
+          + `${describeMs(parsed.intervalMs)} bars. Import it under a different name.`,
+        );
+      }
+    }
+
+    const merged = await mergeBars(dataDir(), sym, parsed.bars, {
+      source: 'csv',
+      baseMs: parsed.intervalMs,
+      /* What one stored bar actually is. Everything downloaded is a minute and says so;
+       * an import says what the file carried, so the library never claims an hourly
+       * dataset is minute data. */
+      timeframe: describeMs(parsed.intervalMs),
+      importedFrom: sources.length === 1
+        ? path.basename(sources[0])
+        : `${path.basename(sources[0])} + ${sources.length - 1} more`,
+      importedAt: new Date().toISOString(),
     });
 
-    const { bars, missing } = await venue.module.downloadRange(sym, fromDate, toDate, '1m', progress);
-    const result = await mergeBars(dataDir(), sym, bars, { source: venue.id });
-    return { ...result, missing, source: venue.id };
+    return {
+      ...merged,
+      symbol: sym,
+      timeframe: describeMs(parsed.intervalMs),
+      intervalMs: parsed.intervalMs,
+      /** Rows that could not be read as a bar. A handful is a footer or a blank price;
+       *  half the file is the wrong delimiter, and the caller has to be able to tell. */
+      skipped: parsed.skipped,
+      rows: parsed.rows,
+      firstError: parsed.firstError,
+      files: sources.length,
+    };
   });
+
+  /* What every "remove that dataset first" refusal in here points at. Deliberately
+   * unguarded by a confirmation of its own: the renderer arms its own button, and a
+   * handler that asked again would be a second dialog nobody can see the first of. */
+  ipcMain.handle('data:delete', (_e, symbol) => (
+    deleteDataset(dataDir(), requireSymbol(symbol))
+  ));
 
   ipcMain.handle('data:bars', async (_e, { symbol, timeframe, from, to, dropIncomplete = false }) => {
     requireString(symbol, 'symbol');
@@ -126,7 +492,7 @@ export function registerIpc() {
    * results page, comparable against each other.
    */
   ipcMain.handle('replay:save', async (_e, request) => {
-    const { symbol, timeframe, note = '', ...result } = request ?? {};
+    const { symbol, timeframe, note = '', source = 'replay', ...result } = request ?? {};
 
     requireString(symbol, 'symbol');
     requireTimeframe(timeframe);
@@ -140,15 +506,69 @@ export function registerIpc() {
       throw new Error('replay:save: the session has no range');
     }
 
+    /* What actually traded it. The library is read to compare one way of trading
+     * against another, so a run that says how it was produced is the whole point of
+     * having a label — and a paper account filed as "Manual replay" would be the one
+     * row in it nobody could trust. A fixed vocabulary rather than a free string: the
+     * label goes into the index every list reads. */
+    const hand = HAND_TRADED[source];
+    if (!hand) throw new Error(`replay:save: unknown source "${source}"`);
+
     return saveRun(runsDir(), {
       ...result,
-      strategy: 'replay',
-      strategyName: 'Manual replay',
+      ...hand,
       /* Deliberately empty. A replay has no settings that held for the whole
        * session — the risk on each trade was decided at the moment it was
        * taken — and storing one of them would be a claim the session cannot
        * support. The trades carry what actually happened. */
       params: {},
+      symbol,
+      timeframe,
+      note: typeof note === 'string' ? note.slice(0, 2000) : '',
+    });
+  });
+
+  /* A backtest is run in the renderer, not here.
+   *
+   * Not for the reason a replay is — nobody is clicking — but because the detectors a
+   * strategy is built on live in the chart core, in TypeScript, and this process runs
+   * plain JavaScript straight off disk. Importing them here is not possible without a
+   * build step for the main process, and duplicating them is how the chart and the
+   * backtest end up disagreeing about the same market.
+   *
+   * So the renderer already has the bars it fetched through `data:bars`, runs the loop
+   * on them, and sends the finished result here for the same shelf a replay lands on.
+   */
+  ipcMain.handle('backtest:save', async (_e, request) => {
+    const {
+      strategy, strategyName, params = {}, symbol, timeframe, note = '', ...result
+    } = request ?? {};
+
+    requireString(strategy, 'strategy');
+    requireString(strategyName, 'strategyName');
+    requireString(symbol, 'symbol');
+    requireTimeframe(timeframe);
+
+    /* The hand-traded labels are a fixed vocabulary and belong to `replay:save`. A
+     * backtest filed as "Manual replay" would be the one row in the library nobody
+     * could trust. */
+    if (HAND_TRADED[strategy]) {
+      throw new Error(`backtest:save: "${strategy}" is reserved for hand-traded runs`);
+    }
+    if (!result.stats || !Array.isArray(result.trades)) {
+      throw new Error('backtest:save: the run has no result to store');
+    }
+    if (!Number.isFinite(result.from) || !Number.isFinite(result.to)) {
+      throw new Error('backtest:save: the run has no range');
+    }
+
+    return saveRun(runsDir(), {
+      ...result,
+      strategy,
+      strategyName,
+      /* The resolved settings, not the ones the form held: a stored run has to say what
+       * it actually ran with, including every default that was filled in. */
+      params,
       symbol,
       timeframe,
       note: typeof note === 'string' ? note.slice(0, 2000) : '',
@@ -200,4 +620,193 @@ export function registerIpc() {
   ipcMain.handle('replay:deleteSession', (_e, id) => (
     deleteSession(sessionsDir(), requireString(id, 'id'))
   ));
+
+  /* The run library — one shelf for everything that finished, whoever traded
+   * it. `replay:save` above puts sessions on it; a backtest will put its runs
+   * on the same one. Reading is separate from writing because the reader is a
+   * different screen and outlives any one session.
+   *
+   * The list is summaries only (that is what the index holds); the full run,
+   * with its trades and equity curve, is fetched for the one being looked at.
+   */
+  ipcMain.handle('runs:list', () => listRuns(runsDir()));
+
+  ipcMain.handle('runs:load', (_e, id) => loadRun(runsDir(), requireString(id, 'id')));
+
+  ipcMain.handle('runs:delete', (_e, id) => deleteRun(runsDir(), requireString(id, 'id')));
+
+  ipcMain.handle('runs:annotate', (_e, id, note) => (
+    annotateRun(runsDir(), requireString(id, 'id'), typeof note === 'string' ? note : '')
+  ));
+
+  /* ─── Strategy settings ─────────────────────────────────────────────── *
+   *
+   * The values live here; what they MEAN lives in the renderer, where the schema is. So
+   * nothing is validated on the way in beyond its shape — a build that renames a parameter
+   * would otherwise be met with a file it refuses to read, and the renderer resolves what
+   * it reads against the current schema anyway.
+   */
+  ipcMain.handle('strategies:load', () => loadStrategySettings(strategiesDir()));
+
+  ipcMain.handle('strategies:save', (_e, id, params) => (
+    saveStrategySettings(strategiesDir(), requireString(id, 'id'), params)
+  ));
+
+  ipcMain.handle('strategies:reset', (_e, id) => (
+    clearStrategySettings(strategiesDir(), requireString(id, 'id'))
+  ));
+
+  /* ─── Parameter sweeps ──────────────────────────────────────────────── *
+   *
+   * Their own shelf, next to the runs rather than on them. A sweep is a ranking of a few
+   * thousand settings, none of which has an account behind it; a run is one account with
+   * its trades. Both are read to answer "did this way of trading work", which is why
+   * they sit side by side on the Analysis screen — and why they are not the same list.
+   *
+   * Like a backtest, a sweep is computed in the renderer, where the detectors live. Only
+   * the finished ranking crosses the bridge.
+   */
+  ipcMain.handle('sweep:save', async (_e, request) => {
+    const { strategy, strategyName, symbol, timeframe, note = '', ...sweep } = request ?? {};
+
+    requireString(strategy, 'strategy');
+    requireString(strategyName, 'strategyName');
+    requireString(symbol, 'symbol');
+    requireTimeframe(timeframe);
+    if (!Number.isFinite(sweep.from) || !Number.isFinite(sweep.to)) {
+      throw new Error('sweep:save: the sweep has no range');
+    }
+
+    return saveSweep(sweepsDir(), {
+      ...sweep,
+      strategy,
+      strategyName,
+      symbol,
+      timeframe,
+      note: typeof note === 'string' ? note.slice(0, 2000) : '',
+    });
+  });
+
+  ipcMain.handle('sweep:list', () => listSweeps(sweepsDir()));
+
+  ipcMain.handle('sweep:load', (_e, id) => loadSweep(sweepsDir(), requireString(id, 'id')));
+
+  ipcMain.handle('sweep:delete', (_e, id) => deleteSweep(sweepsDir(), requireString(id, 'id')));
+
+  ipcMain.handle('sweep:annotate', (_e, id, note) => (
+    annotateSweep(sweepsDir(), requireString(id, 'id'), typeof note === 'string' ? note : '')
+  ));
+
+  /* ─── The paper account ─────────────────────────────────────────────── *
+   *
+   * One record, read once when the mode is switched on and written whenever
+   * the account moves — a few times a minute for as long as it runs. It is a
+   * working account rather than a result, so it stays out of the run library
+   * until it is finished; `replay:save` above is where a finished one goes,
+   * which is how starting over does not mean throwing weeks away.
+   */
+  ipcMain.handle('paper:load', () => loadAccount(paperDir()));
+
+  ipcMain.handle('paper:save', (_e, account) => {
+    const { symbol, session } = account ?? {};
+    requireString(symbol, 'symbol');
+    if (!session || !session.broker) {
+      throw new Error('paper:save: this is not an account snapshot');
+    }
+    return saveAccount(paperDir(), { symbol, session });
+  });
+
+  ipcMain.handle('paper:clear', () => clearAccount(paperDir()));
+
+  /* ─── Price alerts ───────────────────────────────────────────────────── *
+   *
+   * One flat list, read once at startup and rewritten whenever it changes — an alert
+   * is either pending or fired-and-done, there is no history to browse, so the whole
+   * list round-trips instead of a per-alert CRUD surface.
+   */
+  ipcMain.handle('alerts:load', () => loadAlerts(alertsDir()));
+
+  ipcMain.handle('alerts:save', (_e, alerts) => {
+    if (!Array.isArray(alerts)) throw new Error('alerts:save: expected an array');
+    return saveAlerts(alertsDir(), alerts);
+  });
+
+  /* ─── App theme + the custom title bar ─────────────────────────────── */
+
+  /* Purely cosmetic: the renderer already re-themes itself (chart, chrome,
+   * dialogs) on its own. This just keeps the OS window's paint colour from
+   * flashing the old theme's colour on the next resize. */
+  ipcMain.handle('ui:set-theme', (event, theme, background) => {
+    if (theme !== 'light' && theme !== 'dark') throw new Error(`Unknown theme "${theme}"`);
+    return applyTitleBarTheme(BrowserWindow.fromWebContents(event.sender), theme, background);
+  });
+
+  /* The title bar is drawn by the renderer (app-topbar) — these are what its
+   * own minimize/maximize/close buttons call, since a renderer cannot touch
+   * a BrowserWindow directly. */
+  ipcMain.on('window:minimize', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+
+  ipcMain.on('window:toggle-maximize', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
+
+  ipcMain.on('window:close', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+
+  /* A triggered price alert calls this from its notification's click handler — the
+   * window may be minimized (or merely behind others), and a renderer cannot restore
+   * or focus its own BrowserWindow directly. */
+  ipcMain.on('window:restore', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+
+  ipcMain.handle('window:is-maximized', (event) => (
+    BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
+  ));
+
+  /* ─── Capital.com (forex/CFD live data) ─────────────────────────────── */
+
+  /* The session itself (login, keepalive, the WebSocket) lives in
+   * data/capital.js, entirely in this process — see that file for why. This is
+   * just the thin bridge CapitalProvider (app/renderer/providers) calls through.
+   */
+  ipcMain.handle('capital:configured', () => capitalConfigured());
+
+  ipcMain.handle('capital:markets', (_e, searchTerm) => capitalMarkets(searchTerm || undefined));
+
+  ipcMain.handle('capital:market-info', (_e, epic) => capitalMarketInfo(requireString(epic, 'epic')));
+
+  ipcMain.handle('capital:prices', (_e, { epic, resolution, from, to, limit } = {}) => (
+    capitalPrices(requireString(epic, 'epic'), requireString(resolution, 'resolution'), { from, to, limit })
+  ));
+
+  /* One subscription per call, keyed by an opaque id the renderer hands back to
+   * unsubscribe — capitalSubscribe itself shares the underlying WS slot when the
+   * same epic/resolution is already subscribed elsewhere. */
+  const capitalSubs = new Map();
+
+  ipcMain.handle('capital:subscribe', async (event, { epic, resolution } = {}) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = await capitalSubscribe(requireString(epic, 'epic'), requireString(resolution, 'resolution'), (bar) => {
+      if (!sender.isDestroyed()) sender.send('capital:ohlc', { subscriptionId: id, bar });
+    });
+    capitalSubs.set(id, unsubscribe);
+    return id;
+  });
+
+  ipcMain.handle('capital:unsubscribe', (_e, id) => {
+    capitalSubs.get(id)?.();
+    capitalSubs.delete(id);
+  });
 }

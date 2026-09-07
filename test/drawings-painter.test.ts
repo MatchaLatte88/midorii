@@ -50,7 +50,7 @@ function recordingCtx() {
     return { ctx: ctx as unknown as CanvasRenderingContext2D, arcs: () => arcs, lines: () => lines };
 }
 
-const theme = { textColor: '#fff', fontFamily: 'sans-serif' } as unknown as VelaTheme;
+const theme = { textColor: '#fff', background: '#131722', fontFamily: 'sans-serif' } as unknown as VelaTheme;
 const hline = (id: string, price: number) => createDrawing('hline', { id, paneId: 'price', anchors: [{ time: 10, price }] })!;
 
 describe('DrawingPainter.paintAll handle highlighting', () => {
@@ -254,5 +254,186 @@ describe('DrawingPainter trendline label follows the line', () => {
         };
         new DrawingPainter().paintAll(ctx, [d], fakeProjector(), theme);
         expect(rotated).toBe(0);
+    });
+});
+
+describe('DrawingPainter position tool readouts', () => {
+    /** A roomy projector: y = 500 − price·5, so the zones are tall enough to hold a field. */
+    const roomy = (width = 600): Projector => ({
+        xOf: (t) => t,
+        yOf: (price, paneId) => (paneId === 'price' ? 500 - price * 5 : null),
+        pxToPoint: (x, y) => ({ time: x, price: (500 - y) / 5 }),
+        paneIdAtY: () => 'price',
+        width,
+        height: 500,
+    });
+
+    /** entry 50 → y 250, stop 40 → y 300, target 80 → y 100; the block spans x 10…400. */
+    const position = (zoneStyle: 'solid' | 'gradient' = 'solid') => {
+        const d = createDrawing('position', {
+            id: 'p',
+            paneId: 'price',
+            anchors: [{ time: 10, price: 50 }, { time: 400, price: 40 }, { time: 400, price: 80 }],
+        })!;
+        d.applySettings({ zoneStyle });
+        return d;
+    };
+
+    /** Records every `fillText` with its position and the color it was written in, plus the
+     *  rounded-rect plates (their first arcTo corner) and any gradient stops. */
+    function fieldCtx() {
+        const base = recordingCtx();
+        const texts: Array<{ text: string; x: number; y: number; color: string }> = [];
+        const stops: string[] = [];
+        const plates: string[] = [];
+        const ctx = base.ctx as unknown as Record<string, unknown>;
+        let fill = '';
+        Object.defineProperty(ctx, 'fillStyle', { get: () => fill, set: (v: unknown) => { fill = typeof v === 'string' ? v : '[gradient]'; } });
+        ctx.fillText = (text: string, x: number, y: number) => { texts.push({ text, x, y, color: fill }); };
+        ctx.fill = () => { plates.push(fill); };
+        ctx.measureText = (str: string) => ({ width: str.length * 6 });
+        ctx.createLinearGradient = (_x0: number, y0: number, _x1: number, y1: number) => {
+            stops.push(`${y0}->${y1}`);
+            return { addColorStop: (o: number, c: string) => { stops.push(`${o} ${c}`); } };
+        };
+        return { ctx: base.ctx, texts, stops, plates };
+    }
+
+    const paint = (width?: number, zoneStyle?: 'solid' | 'gradient') => {
+        const h = fieldCtx();
+        new DrawingPainter().paintAll(h.ctx, [position(zoneStyle)], roomy(width), theme);
+        return h;
+    };
+    const seg = (texts: Array<{ text: string; x: number; y: number; color: string }>, t: string) => texts.find((v) => v.text === t)!;
+
+    it('lays each field inside the zone its level opens, never over the line itself', () => {
+        const { texts } = paint();
+        // Reward zone runs y 100 (target) → 250 (entry): the TP field sits inside it.
+        expect(seg(texts, 'TP').y).toBeGreaterThan(100);
+        expect(seg(texts, 'TP').y).toBeLessThan(250);
+        // Risk zone runs y 250 (entry) → 300 (stop): the SL field sits inside that one.
+        expect(seg(texts, 'SL').y).toBeGreaterThan(250);
+        expect(seg(texts, 'SL').y).toBeLessThan(300);
+        // The entry has no zone of its own — its field rides the line, centred on it.
+        expect(seg(texts, 'LONG').y).toBe(250.5);
+    });
+
+    it('states the level in its own color and the price in the text color', () => {
+        const { texts } = paint();
+        expect(seg(texts, 'TP').color).toBe(seg(texts, '+60.00%').color); // tag and figure: profit color
+        expect(seg(texts, 'TP').color).not.toBe(seg(texts, '80.00').color); // the price is not
+        expect(seg(texts, '80.00').color).toBe(theme.textColor);
+        expect(seg(texts, 'SL').color).toBe(seg(texts, '−20.00%').color);
+        expect(seg(texts, 'SL').color).not.toBe(seg(texts, 'TP').color); // loss color ≠ profit color
+    });
+
+    it('puts the risk field on the stop line, opposite the stop field', () => {
+        const { texts } = paint();
+        expect(seg(texts, 'RISK').y).toBe(seg(texts, 'SL').y); // same row
+        expect(seg(texts, 'RISK').x).toBeLessThan(seg(texts, 'SL').x); // left edge vs right edge
+        expect(seg(texts, 'RISK').x).toBe(23); // x1 10 + inset 6 + padding 7
+    });
+
+    it('drops the risk field a row when it cannot sit beside the stop field', () => {
+        const h = fieldCtx();
+        const narrow = createDrawing('position', {
+            id: 'p',
+            paneId: 'price',
+            anchors: [{ time: 10, price: 50 }, { time: 120, price: 40 }, { time: 120, price: 80 }],
+        })!;
+        new DrawingPainter().paintAll(h.ctx, [narrow], roomy(), theme);
+        const rows = h.texts;
+        expect(seg(rows, 'RISK').y).toBeLessThan(seg(rows, 'SL').y); // moved toward the entry
+    });
+
+    it('puts the risk field outside the block when the risk zone is too shallow for a row', () => {
+        const h = fieldCtx();
+        // entry 50 → y 250, stop 47 → y 265: fifteen pixels of risk zone, no room to stack.
+        const flat = createDrawing('position', {
+            id: 'p',
+            paneId: 'price',
+            anchors: [{ time: 10, price: 50 }, { time: 120, price: 47 }, { time: 120, price: 80 }],
+        })!;
+        new DrawingPainter().paintAll(h.ctx, [flat], roomy(), theme);
+        // Below the stop line (y 265) rather than stacked up onto the entry field at y 250.
+        expect(seg(h.texts, 'RISK').y).toBeGreaterThan(265);
+        expect(seg(h.texts, 'RISK').y).toBeGreaterThan(seg(h.texts, 'SL').y);
+    });
+
+    it('backs every field with a fully opaque plate', () => {
+        const h = fieldCtx();
+        new DrawingPainter().paintAll(h.ctx, [position()], roomy(), theme);
+        // A field sits ON the candles it annotates: any alpha below 1 lets a bright wick break
+        // up 12px digits, which is exactly what the plate is there to prevent.
+        expect(h.plates.filter((c) => c.startsWith('rgba(')).every((c) => c.endsWith(',1)'))).toBe(true);
+    });
+
+    it('turns a field out through its own line when its zone is too shallow for it', () => {
+        const h = fieldCtx();
+        // entry 50 → y 250, target 53 → y 235: fifteen pixels of reward zone.
+        const flat = createDrawing('position', {
+            id: 'p',
+            paneId: 'price',
+            anchors: [{ time: 10, price: 50 }, { time: 400, price: 20 }, { time: 400, price: 53 }],
+        })!;
+        new DrawingPainter().paintAll(h.ctx, [flat], roomy(), theme);
+        // Above the target line (y 235), not stacked down onto the entry field at y 250.
+        expect(seg(h.texts, 'TP').y).toBeLessThan(235);
+    });
+
+    it('leaves the readouts to the overlay pass when the body paints into the series stack', () => {
+        // A block whose z sits inside the series stack paints its body on an interleave layer,
+        // which is BELOW the candles and is built on data frames — no interaction state, so no
+        // hover. Both reasons the readouts must not be painted down there.
+        const painter = new DrawingPainter();
+        const body = fieldCtx();
+        painter.overlays = false;
+        painter.paintAll(body.ctx, [position()], roomy(), theme);
+        painter.overlays = true;
+        expect(body.texts).toEqual([]); // zones and lines only
+
+        const top = fieldCtx();
+        painter.paintOverlays(top.ctx, [position()], roomy(), theme);
+        expect(top.texts.map((v) => v.text)).toContain('LONG');
+    });
+
+    it('honours hover in the overlay pass, which is the only one that sees it', () => {
+        const shy = position();
+        shy.applySettings({ textOnHover: true });
+        const painter = new DrawingPainter();
+        const cold = fieldCtx();
+        painter.paintOverlays(cold.ctx, [shy], roomy(), theme);
+        expect(cold.texts).toEqual([]);
+        const warm = fieldCtx();
+        painter.paintOverlays(warm.ctx, [shy], roomy(), theme, { hovered: 'p' });
+        expect(warm.texts.map((v) => v.text)).toContain('LONG');
+    });
+
+    it('holds the readouts back until the block is read, when asked to', () => {
+        const shy = position();
+        shy.applySettings({ textOnHover: true });
+        const painter = new DrawingPainter();
+        const cold = fieldCtx();
+        painter.paintAll(cold.ctx, [shy], roomy(), theme);
+        expect(cold.texts).toEqual([]); // the zones still paint — the numbers don't
+
+        for (const targets of [{ hovered: 'p' }, { dragged: 'p' }, { selected: new Set(['p']) }]) {
+            const warm = fieldCtx();
+            painter.paintAll(warm.ctx, [shy], roomy(), theme, targets);
+            expect(warm.texts.map((v) => v.text)).toContain('LONG');
+        }
+    });
+
+    it('fades a gradient zone out at the entry, where the two zones meet', () => {
+        const { stops } = paint(600, 'gradient');
+        // Reward: target y100 → entry y250. Risk: stop y300 → entry y250. Both end transparent.
+        expect(stops).toEqual([
+            '100->250', '0 rgba(14,203,129,0.3)', '1 rgba(14,203,129,0)',
+            '300->250', '0 rgba(246,70,93,0.3)', '1 rgba(246,70,93,0)',
+        ]);
+    });
+
+    it('draws no gradient when the zones are solid', () => {
+        expect(paint().stops).toEqual([]);
     });
 });

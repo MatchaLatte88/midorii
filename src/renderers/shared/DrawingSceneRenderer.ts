@@ -414,7 +414,17 @@ export class DrawingSceneRenderer {
             if (right < 0 || left > W || bottom < 0 || top > H) continue;
 
             if (bx.bgColor) {
-                ctx.fillStyle = bx.bgColor;
+                /* A zero-height box has no axis to run a gradient along, and
+                 * `createLinearGradient` with equal endpoints paints nothing at all — so a
+                 * flat fill covers that case rather than the box silently vanishing. */
+                if (bx.bgColorTo && h > 0) {
+                    const g = ctx.createLinearGradient(0, top, 0, bottom);
+                    g.addColorStop(0, bx.bgColor);
+                    g.addColorStop(1, bx.bgColorTo);
+                    ctx.fillStyle = g;
+                } else {
+                    ctx.fillStyle = bx.bgColor;
+                }
                 ctx.fillRect(left, top, w, h);
             }
             if (bx.borderColor && bx.borderWidth > 0) {

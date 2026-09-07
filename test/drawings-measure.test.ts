@@ -148,12 +148,18 @@ describe('drawings/position tools', () => {
         expect(d.showLossSize).toBe(true);
         expect(d.showPrices).toBe(true); // the entry readout is part of the block's standard look
         expect(d.headerLabel()).toBe('LONG   R:R 2.00');
-        expect(d.targetLabel()).toBe('TP  70.00   +40.00%');
-        expect(d.stopLabel()).toBe('SL  40.00   −20.00%');
-        expect(d.entryLabel()).toBe('Entry  50.00');
+        expect(d.targetField()).toEqual({ tag: 'TP', value: '70.00', note: '+40.00%' });
+        expect(d.stopField()).toEqual({ tag: 'SL', value: '40.00', note: '−20.00%' });
+        expect(d.entryField()).toEqual({ tag: 'LONG', value: '50.00', note: 'R:R 2.00' });
+        expect(d.riskField()).toEqual({ tag: 'RISK', value: '$100', note: 'Size 10' });
         d.applySettings({ showPrices: false }); // percentages alone
-        expect(d.targetLabel()).toBe('TP  +40.00%');
-        expect(d.stopLabel()).toBe('SL  −20.00%');
+        expect(d.targetField()).toEqual({ tag: 'TP', value: '', note: '+40.00%' });
+        expect(d.stopField()).toEqual({ tag: 'SL', value: '', note: '−20.00%' });
+        expect(d.entryField()).toEqual({ tag: 'LONG', value: '', note: 'R:R 2.00' });
+        // header off: the tag falls back to the level's name so the price stays labelled
+        d.applySettings({ showHeader: false, showPrices: true });
+        expect(d.entryField()).toEqual({ tag: 'ENTRY', value: '50.00', note: '' });
+        d.applySettings({ showHeader: true });
         d.applySettings({ showText: false, showLossSize: false });
         expect(d.showText).toBe(false);
         expect(d.showLossSize).toBe(false);

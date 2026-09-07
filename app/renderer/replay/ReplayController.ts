@@ -1,9 +1,12 @@
 import { ReplaySession } from '../../../shared/engine/replaySession.js';
 import type { ReplayBar, ReplayResult } from '../../../shared/engine/replaySession.js';
-import type { Costs, Order, OrderSpec, ProtectionLevels } from '../../../shared/engine/broker.js';
+import type { Broker, Costs, Order, OrderSpec, ProtectionLevels } from '../../../shared/engine/broker.js';
 import type { IndicatorHandle } from '../../../src';
 import type { ReplayProvider } from './ReplayProvider';
-import { STATE_INPUT, type ReplayVisualState } from './replayIndicator';
+import { STATE_INPUT } from './replayIndicator';
+import { visualState } from '../trading/visualState';
+import { accountFigures, type AccountFigures } from './accountFigures';
+import { tradeBook, type TradeBook } from './tradeBook';
 import { loadReplayWindow } from './replayWindow';
 
 /** Playback speeds, in bars per second. */
@@ -36,6 +39,13 @@ export interface ReplayControllerOptions {
      * to stay honest.
      */
     onPlayStateChange?: () => void;
+    /**
+     * Told whenever the account moved — a bar revealed, an order placed, a position
+     * closed. Every one of those already goes through `pushState`, so a readout hung
+     * here cannot miss one and never has to poll. Settable afterwards as well, for a
+     * readout that can only be built once the chart it sits on exists.
+     */
+    onAccountChange?: () => void;
 }
 
 /**
@@ -61,12 +71,15 @@ export class ReplayController {
     private speedBarsPerSec: number = 4;
     private indicator: IndicatorHandle | null = null;
     private readonly onPlayStateChange: (() => void) | null;
+    /** See {@link ReplayControllerOptions.onAccountChange}. */
+    onAccountChange: (() => void) | null;
 
     constructor(opts: ReplayControllerOptions) {
         this.provider = opts.provider;
         this.symbol = opts.symbol;
         this.currentTimeframe = opts.timeframe;
         this.onPlayStateChange = opts.onPlayStateChange ?? null;
+        this.onAccountChange = opts.onAccountChange ?? null;
         this.savedSessionId = opts.restoredSessionId ?? null;
         this.session = opts.restoreFrom
             ? ReplaySession.restore(opts.restoreFrom, { bars: opts.bars, forming: opts.forming ?? null })
@@ -87,31 +100,36 @@ export class ReplayController {
         this.pushState();
     }
 
+    /** What the account is worth right now — for a readout, never for a decision. */
+    account(): AccountFigures {
+        return accountFigures(this.session.broker);
+    }
+
+    /** Redraw the chart from the account as it stands — after a refused edit, so what is on
+     *  screen goes back to being what is true. */
+    refreshVisuals(): void {
+        this.pushState();
+    }
+
     /**
      * Push the account's visual state to the indicator. JSON through a string
      * input is the only channel into a running native instance (`InputValue` is
      * primitives only) — a deliberate workaround, not a Vela feature.
      */
     private pushState(): void {
+        this.onAccountChange?.();
         if (!this.indicator) return;
-        const broker = this.session.broker;
-        const state: ReplayVisualState = {
-            positions: broker.positions.map((p) => ({
-                id: p.id,
-                side: p.size > 0 ? 'buy' : 'sell',
-                entryPrice: p.entryPrice,
-                entryTime: p.openedAt,
-                stopPrice: p.stopLoss,
-                targetPrice: p.takeProfit,
-            })),
-            orders: broker.pending
-                // reduce-only legs are a position's own stop/target — that position
-                // already draws them as its levels, so they are not resting orders.
-                .filter((o) => !o.reduceOnly)
-                .map((o) => ({ id: o.id, side: o.side, price: o.limitPrice ?? o.stopPrice, tag: o.tag }))
-                .filter((o): o is { id: number; side: 'buy' | 'sell'; price: number; tag: string | null } => o.price != null),
-        };
-        this.indicator.setInput(STATE_INPUT, JSON.stringify(state));
+        this.indicator.setInput(STATE_INPUT, JSON.stringify(visualState(this.session.broker, this.session.bar.close)));
+    }
+
+    /** The newest price the session stands on — what a market order fills against. */
+    price(): number {
+        return this.session.bar.close;
+    }
+
+    /** The account. The session owns it; this is the name the chart wirings know it by. */
+    get broker(): Broker {
+        return this.session.broker;
     }
 
     // ── transport ────────────────────────────────────────────────────────
@@ -265,6 +283,64 @@ export class ReplayController {
         const done = this.session.breakEven(positionId);
         this.pushState();
         return done;
+    }
+
+    /**
+     * Close ONE position outright, at market.
+     *
+     * Not `closePart` with the position's own size: that books the exit as a scale-out, and
+     * the tag is what the trade record ends up saying about how it ended. The session wraps
+     * only the flat "close whatever is open", so a named one goes to the broker the way the
+     * old app's did — the same two calls, in the same order.
+     */
+    closeOne(positionId: number): void {
+        const broker = this.session.broker;
+        const order = broker.closePosition('manual', { positionId });
+        if (order) broker.fillNow(order);
+        this.pushState();
+    }
+
+    /** Take part of a position off at market, now. */
+    closePart(size: number, positionId?: number | null): void {
+        this.session.closePart(size, positionId);
+        this.pushState();
+    }
+
+    /** Close and open the same size the other way, in one go. */
+    reverse(positionId?: number | null): void {
+        this.session.reverse(positionId);
+        this.pushState();
+    }
+
+    /** Let the stop follow price at a fixed distance behind it. */
+    setTrailing(distance: number, options?: { activateAt?: number }, positionId?: number | null): void {
+        this.session.setTrailing(distance, options ?? {}, positionId);
+        this.pushState();
+    }
+
+    /** Move a resting order rather than cancelling and replacing it. */
+    modifyOrder(id: number, patch: Partial<OrderSpec>): boolean {
+        const moved = this.session.modifyOrder(id, patch);
+        this.pushState();
+        return moved;
+    }
+
+    /** Take one resting order out of the book. The session wraps everything else; a single
+     *  cancel is the one call that goes straight to the broker, as it did in the old app. */
+    cancelOrder(id: number): boolean {
+        const gone = this.session.broker.cancelOrder(id);
+        this.pushState();
+        return gone;
+    }
+
+    cancelAll(tag?: string): void {
+        this.session.cancelAll(tag);
+        this.pushState();
+    }
+
+    /** What is open and what is waiting — for a list, never for a decision. */
+    book(): TradeBook {
+        return tradeBook(this.session.broker);
     }
 
     /** The finished run, in the same shape a backtest produces. */

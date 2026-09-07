@@ -13,10 +13,24 @@
  *            entry sits on, and asking would be asking the user to restate
  *            what they already drew.
  *
- *   market   the *distances* as drawn, applied now. A block drawn an hour ago
- *            has an entry the market has left behind; what is still worth
- *            keeping is its shape — risk 500, reward 1000 — and that shape is
- *            what moves to the current price.
+ *   market   filled now, at whatever the market is. What becomes of the drawn
+ *            stop and target is then a second question, because the entry is
+ *            no longer the one they were drawn against — see `bracket` below.
+ *
+ * Two readings of the drawn stop and target (market orders only)
+ * -------------------------------------------------------------
+ *   levels    the prices as drawn. The block was drawn against those levels —
+ *            a structure high, a swing low — and a structure does not move
+ *            because the fill did. Refused when the market has already run
+ *            past one of them, since that order would be dead on arrival.
+ *
+ *   distance  the *distances* as drawn, applied to the fill. A block drawn an
+ *            hour ago has an entry the market has left behind; what is still
+ *            worth keeping is its shape — risk 500, reward 1000 — and that
+ *            shape is what moves to the current price.
+ *
+ * A pending order fills at the drawn entry, so the two readings coincide there
+ * and it always carries levels.
  *
  * Distances are carried, not computed here
  * ----------------------------------------
@@ -39,6 +53,9 @@
 /** How a drawn block is read. */
 export const PLAN_MODES = ['market', 'pending'];
 
+/** How a market order carries the drawn stop and target. */
+export const BRACKET_MODES = ['levels', 'distance'];
+
 /**
  * An order spec from a drawn position block.
  *
@@ -46,14 +63,18 @@ export const PLAN_MODES = ['market', 'pending'];
  * @param {object} options
  * @param {number} options.price   the last price anyone can see
  * @param {string} options.mode    'market' or 'pending'
+ * @param {string} [options.bracket] 'levels' (default) or 'distance' — market orders only
  * @returns {{side, type, price, bracket, risk, reward}}
  *   `price` is the level a resting order waits at, or null for a market order.
  *   `bracket` is what the Broker attaches when the entry fills: absolute levels
  *   for a pending order, distances from the fill for a market one.
  */
-export function orderFromPlan(plan, { price, mode }) {
+export function orderFromPlan(plan, { price, mode, bracket = 'levels' }) {
   if (!PLAN_MODES.includes(mode)) {
     throw new Error(`orderFromPlan: unknown mode "${mode}". Known: ${PLAN_MODES.join(', ')}`);
+  }
+  if (!BRACKET_MODES.includes(bracket)) {
+    throw new Error(`orderFromPlan: unknown bracket "${bracket}". Known: ${BRACKET_MODES.join(', ')}`);
   }
   if (!plan || !Number.isFinite(plan.entry) || !Number.isFinite(plan.stop)) {
     throw new Error('orderFromPlan: the block needs an entry and a stop');
@@ -84,14 +105,39 @@ export function orderFromPlan(plan, { price, mode }) {
   const reward = target == null ? null : Math.abs(target - entry);
 
   if (mode === 'market') {
+    if (bracket === 'distance') {
+      return {
+        side,
+        type: 'market',
+        price: null,
+        /* Offsets, resolved against the actual fill. See the header. */
+        bracket: {
+          stopDistance: risk,
+          ...(reward ? { targetDistance: reward } : {}),
+        },
+        risk,
+        reward,
+      };
+    }
+    /* Levels as drawn, against a fill that happens HERE — so each leg has to still
+     * be on its own side of the market, or it is an exit that has already happened. */
+    if ((stop < price) !== long) {
+      throw new Error(`The market has already passed this block's stop (${stop}), so filling `
+        + 'here would open a trade that is immediately out — move the stop, or set TP/SL to '
+        + 'keep their distance from the fill.');
+    }
+    if (target != null && (target > price) !== long) {
+      throw new Error(`The market has already passed this block's target (${target}), so there `
+        + 'is nothing left of the plan to fill for — move the target, or set TP/SL to keep '
+        + 'their distance from the fill.');
+    }
     return {
       side,
       type: 'market',
       price: null,
-      /* Offsets, resolved against the actual fill. See the header. */
       bracket: {
-        stopDistance: risk,
-        ...(reward ? { targetDistance: reward } : {}),
+        stopLoss: stop,
+        ...(target == null ? {} : { takeProfit: target }),
       },
       risk,
       reward,

@@ -88,6 +88,21 @@ export class DrawingsControl {
         return this;
     }
 
+    /**
+     * Take over right-presses on drawings.
+     *
+     * Vela ships no per-drawing menu: what a drawing offers on right-click depends entirely on
+     * what it means to the host, so the host says whether it has one. With this ON, a
+     * right-press that lands on a drawing is reported as `drawing:contextmenu` (carrying the id
+     * and the cursor's viewport position) and the chart's own context menu stays shut for that
+     * press; the host is then the only thing that can put something there. OFF — the default —
+     * leaves right-presses exactly as they were.
+     */
+    setContextMenu(on: boolean): this {
+        if (this.ok('setContextMenu')) this.ctrl.setContextMenu(on);
+        return this;
+    }
+
     /** Display another chart's in-progress placement as a GHOST at reduced opacity
      *  (`null` clears it) — how a multi-chart host mirrors `drawing:draft` onto linked
      *  charts. Never a real drawing: no store entry, no selection, no persistence.

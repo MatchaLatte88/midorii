@@ -249,6 +249,13 @@ const midnight = {
 new Vela('#chart', { data: bars, theme: midnight });
 ```
 
+Two more fields are optional, and neither built-in theme sets them: `accent` and
+`accentBright` name the chrome accent — selected entries and primary buttons, and the
+higher-contrast partner used for a switch that is on or the underline under the active
+tab. Left out, both stay the brand's own, which is the right answer for a theme that is
+only a different lightness; state them when the theme is a different *look*, such as an
+app shipping a second palette of its own.
+
 The theme can also be swapped at runtime — `chart.setTheme('light')` (or a full theme
 object) re-skins the chart live and emits `theme:changed` so your surrounding UI can
 follow; users reach the same switch in chart settings → Canvas → Theme. The built-in

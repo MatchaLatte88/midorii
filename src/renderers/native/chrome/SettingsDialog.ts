@@ -510,6 +510,15 @@ export class SettingsDialog {
         body.append(sid(this.toggleRow('Horizontal', config.grid.horzLines.visible, (v) => this.emit({ grid: { horzLines: { visible: v } } }), [
             this.swatch(config.grid.horzLines.color, (v) => this.emit({ grid: { horzLines: { color: v } } })),
         ]), 'canvas.grid.horizontal'));
+        // Ambient corner washes on the backdrop canvas. Their alpha lives in the swatch
+        // color, so the picker's opacity slider IS the intensity control.
+        body.append(sid(this.sectionTitle('Ambient blobs'), 'canvas.blobs'));
+        body.append(sid(this.toggleRow('Top-left', config.blobs.topLeft.visible, (v) => this.emit({ blobs: { topLeft: { visible: v } } }), [
+            this.swatch(config.blobs.topLeft.color, (v) => this.emit({ blobs: { topLeft: { color: v } } })),
+        ]), 'canvas.blobs.top-left'));
+        body.append(sid(this.toggleRow('Bottom-right', config.blobs.bottomRight.visible, (v) => this.emit({ blobs: { bottomRight: { visible: v } } }), [
+            this.swatch(config.blobs.bottomRight.color, (v) => this.emit({ blobs: { bottomRight: { color: v } } })),
+        ]), 'canvas.blobs.bottom-right'));
         if (this.themeControl) {
             const tc = this.themeControl;
             body.append(sid(this.sectionTitle('Theme'), 'canvas.theme'));

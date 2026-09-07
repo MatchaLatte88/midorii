@@ -607,7 +607,9 @@ export class Topbar {
             }
             b.addEventListener('click', () => {
                 const c = this.opts.getContext?.();
-                if (c) action.run(c);
+                // The context is rebuilt per invocation, so naming the button on it is safe:
+                // an action that opens a menu needs something to hang it off.
+                if (c) action.run(Object.assign(c, { trigger: b }));
             });
             (pin ? pin.host : left ? this.leftActionsHost : this.actionsHost).appendChild(b);
         }

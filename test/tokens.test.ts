@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mix, parseRgb } from '../src/core/color';
-import { ACCENT } from '../src/core/palette';
+import { ACCENT, ACCENT_BRIGHT } from '../src/core/palette';
 import { DARK_THEME, LIGHT_THEME } from '../src/core/theme';
 import { STATIC_TOKENS, themeTokens } from '../src/core/tokens';
 
@@ -53,9 +53,18 @@ describe('themeTokens', () => {
         expect(light['--vela-selected-fg']).toBe('#ffffff');
     });
 
-    it('keeps the brand accent theme-independent', () => {
+    it('keeps the brand accent theme-independent unless a theme states its own', () => {
+        // Dark and light are the same look at two lightnesses, so neither renames the accent.
         expect(themeTokens(DARK_THEME)['--vela-accent']).toBe(ACCENT);
         expect(themeTokens(LIGHT_THEME)['--vela-accent']).toBe(ACCENT);
+
+        // A theme that is a different LOOK may — an app shipping a palette of its own.
+        const own = themeTokens({ ...DARK_THEME, accent: '#0369a1', accentBright: '#22d3ee' });
+        expect(own['--vela-accent']).toBe('#0369a1');
+        expect(own['--vela-accent-bright']).toBe('#22d3ee');
+
+        // Stating one does not drag the other along.
+        expect(themeTokens({ ...DARK_THEME, accent: '#0369a1' })['--vela-accent-bright']).toBe(ACCENT_BRIGHT);
     });
 
     it('emits every token in both themes so no chrome falls back to an unset variable', () => {

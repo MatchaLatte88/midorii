@@ -1,0 +1,182 @@
+import { rMultiple } from '../format';
+
+/**
+ * What is open and what is waiting, as rows.
+ *
+ * The engine holds positions and orders in the shape it needs to match them against bars; this
+ * is the shape a person reads. Every number still comes off the Broker as it stands — nothing
+ * here keeps a tally of its own, for the reason the account readout gives.
+ *
+ * Kept apart from the dock that paints it so the rows can be asserted without a DOM.
+ */
+
+/** The position fields a row reads. The engine's `Position` satisfies it. */
+export interface BookPosition {
+    id: number;
+    size: number;
+    entryPrice: number;
+    openedAt: number;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    trailing: unknown;
+    riskPerUnit: number | null;
+    entryTag: string | null;
+}
+
+/** The order fields a row reads. The engine's `Order` satisfies it. */
+export interface BookOrder {
+    id: number;
+    side: 'buy' | 'sell';
+    type: string;
+    size: number;
+    limitPrice: number | null;
+    stopPrice: number | null;
+    reduceOnly: boolean;
+    tag: string | null;
+}
+
+/** The slice of the Broker a book needs. The real `Broker` satisfies it. */
+export interface BookSource {
+    positions: readonly BookPosition[];
+    pending: readonly BookOrder[];
+    /** Nullable, because the engine's own signature is — a row never passes null. */
+    positionPnl(position: BookPosition | null): number;
+    exitResult(position: BookPosition, price: number): number;
+    breakEvenRefusal(position: BookPosition): string | null;
+}
+
+export interface PositionRow {
+    id: number;
+    side: 'long' | 'short';
+    /** Always positive — the side says the direction. */
+    size: number;
+    entryPrice: number;
+    openedAt: number;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    /** The stop is following price rather than standing still. */
+    trailing: boolean;
+    entryTag: string | null;
+    /** Profit if it closed at the last price, costs included. */
+    unrealized: number;
+    /** That profit against what the position risked when it opened, or null without a stop. */
+    r: number | null;
+    /**
+     * What the stop would leave behind if it filled: negative while it is protection, positive
+     * once it sits past break-even. Null when the position has no stop — which is not zero
+     * risk, it is an amount nobody knows.
+     */
+    stopResult: number | null;
+    /** Why moving the stop to break-even is refused right now, or null when it can be done. */
+    breakEvenRefusal: string | null;
+}
+
+export interface OrderRow {
+    id: number;
+    side: 'buy' | 'sell';
+    type: string;
+    size: number;
+    /** Where it waits — a limit's price, or a stop's trigger. */
+    price: number | null;
+    tag: string | null;
+}
+
+export interface TradeBook {
+    positions: PositionRow[];
+    orders: OrderRow[];
+}
+
+/** The trade fields a history row reads. The engine's closed trade satisfies it. */
+export interface ClosedTrade {
+    side: 'long' | 'short';
+    size: number;
+    entryPrice: number;
+    exitPrice: number;
+    openedAt: number;
+    closedAt: number;
+    netPnl: number;
+    fees: number;
+    entryTag: string | null;
+    exitTag: string | null;
+    riskPerUnit: number | null;
+}
+
+/** One closed round trip, as a person reads it. */
+export interface HistoryRow {
+    side: 'long' | 'short';
+    size: number;
+    entryPrice: number;
+    exitPrice: number;
+    openedAt: number;
+    closedAt: number;
+    netPnl: number;
+    fees: number;
+    /** The result against what the trade risked when it opened, or null without a stop. */
+    r: number | null;
+    /** How it ended: the exit tag the engine recorded ('stop', 'target', 'manual', …). */
+    exitTag: string | null;
+}
+
+/**
+ * What the account has already done, newest first.
+ *
+ * Reversed here rather than in the view: "newest first" is a statement about how a
+ * history is read, and a second list that sorted it differently would be a second
+ * answer to the same question.
+ */
+export function tradeHistory(trades: readonly ClosedTrade[]): HistoryRow[] {
+    const rows = trades.map((t): HistoryRow => ({
+        side: t.side,
+        size: t.size,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        openedAt: t.openedAt,
+        closedAt: t.closedAt,
+        netPnl: t.netPnl,
+        fees: t.fees,
+        // The same R the run library reports afterwards, measured against the same unit.
+        r: rMultiple({ netPnl: t.netPnl, size: t.size, riskPerUnit: t.riskPerUnit }),
+        exitTag: t.exitTag,
+    }));
+    rows.reverse();
+    return rows;
+}
+
+export function tradeBook(broker: BookSource): TradeBook {
+    const positions = broker.positions.map((p): PositionRow => {
+        const size = Math.abs(p.size);
+        const unrealized = broker.positionPnl(p);
+        return {
+            id: p.id,
+            side: p.size > 0 ? 'long' : 'short',
+            size,
+            entryPrice: p.entryPrice,
+            openedAt: p.openedAt,
+            stopLoss: p.stopLoss,
+            takeProfit: p.takeProfit,
+            trailing: p.trailing != null,
+            entryTag: p.entryTag,
+            unrealized,
+            // The same R the run library reports afterwards, measured against the same unit.
+            r: rMultiple({ netPnl: unrealized, size, riskPerUnit: p.riskPerUnit }),
+            stopResult: p.stopLoss == null ? null : broker.exitResult(p, p.stopLoss),
+            breakEvenRefusal: broker.breakEvenRefusal(p),
+        };
+    });
+
+    /* A position's own stop and target are reduce-only legs of it, and the position already
+     * shows them as its levels. Listing them again as resting orders would offer two ways to
+     * cancel the same protection, one of which leaves the position looking protected. */
+    const orders = broker.pending
+        .filter((o) => !o.reduceOnly)
+        .map((o): OrderRow => ({
+            id: o.id,
+            side: o.side,
+            type: o.type,
+            size: o.size,
+            price: o.limitPrice ?? o.stopPrice,
+            tag: o.tag,
+        }));
+
+    return { positions, orders };
+}

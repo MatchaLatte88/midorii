@@ -57,6 +57,10 @@ class FakePort implements IDrawingsRendererPort {
     openSettings(id: string): void {
         this.settingsOpenedFor = id;
     }
+    contextMenuHandled: boolean | null = null;
+    setContextMenuHandled(on: boolean): void {
+        this.contextMenuHandled = on;
+    }
     /** Assigned per test to emulate a renderer whose drawings share the series' z space. */
     stackRange?: (paneId: string) => { front: number; back: number };
     onDrawingIntent(cb: (i: DrawingIntent) => void): () => void {
@@ -133,6 +137,31 @@ describe('DrawingController (enabled)', () => {
         ctrl.select([]); // clearing selection propagates too
         expect(port.selectionIds).toEqual([]);
         expect(seen).toContainEqual(['drawing:selected', null]);
+    });
+
+    it('leaves right-presses alone until a host claims them', () => {
+        const { port, ctrl } = setup();
+        // Off by default: Vela has no per-drawing menu, so a right-press on a drawing must go
+        // on reaching the chart's own menu exactly as it always did.
+        expect(port.contextMenuHandled).toBeNull();
+        ctrl.setContextMenu(true);
+        expect(port.contextMenuHandled).toBe(true);
+        ctrl.setContextMenu(false);
+        expect(port.contextMenuHandled).toBe(false);
+    });
+
+    it('a right-press on a drawing is reported for the host to hang its own menu on', () => {
+        const { port, events, ctrl } = setup();
+        port.fire({ kind: 'create', doc: HLINE_DOC });
+        const id = ctrl.all()[0]!.id;
+        const hits: Array<{ id: string; x: number; y: number }> = [];
+        events.on('drawing:contextmenu', (e) => hits.push(e));
+        // Viewport coordinates, so a menu can be anchored at the cursor. Nothing is selected
+        // or changed by it — a context menu is a question, not an edit.
+        port.fire({ kind: 'context-menu', id, x: 412, y: 233 });
+        expect(hits).toEqual([{ id, x: 412, y: 233 }]);
+        expect(port.selectionIds).toEqual([]);
+        expect(ctrl.all()).toHaveLength(1);
     });
 
     it('openSettings() forwards to the port (opens the on-chart popup)', () => {

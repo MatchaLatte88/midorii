@@ -6,6 +6,8 @@ import {
     LINE_STYLE_OPTIONS,
     MachFigure,
     PositionTool,
+    ZONE_STYLE_OPTIONS,
+    BRACKET_MODE_OPTIONS,
     clonePlain,
 } from '../../../core/drawings';
 import { contrastColor } from '../../shared/drawing-geometry';
@@ -217,8 +219,35 @@ export class DrawingSettingsDialog {
         levelRow('Target', 'targetPrice', 'target');
 
         grid.appendChild(fieldSection('Display', { variant: 'inputs' }));
-        const toggles: Array<[string, 'showText' | 'showHeader' | 'showLossSize' | 'showTargetLabel' | 'showStopLabel' | 'showPrices']> = [
+        const zoneStyle = buildFieldControl({
+            kind: 'select',
+            options: ZONE_STYLE_OPTIONS,
+            value: live().zoneStyle,
+            fill: false,
+            theme: this.theme,
+            onChange: (v) => {
+                actions.patch({ zoneStyle: v });
+                refreshAll();
+            },
+        });
+        refreshers.push(() => zoneStyle.setValue?.(live().zoneStyle));
+        grid.appendChild(fieldRow({ label: 'Zone fill', control: zoneStyle.el }));
+        const bracketMode = buildFieldControl({
+            kind: 'select',
+            options: BRACKET_MODE_OPTIONS,
+            value: live().bracketMode,
+            fill: false,
+            theme: this.theme,
+            onChange: (v) => {
+                actions.patch({ bracketMode: v });
+                refreshAll();
+            },
+        });
+        refreshers.push(() => bracketMode.setValue?.(live().bracketMode));
+        grid.appendChild(fieldRow({ label: 'TP/SL from', control: bracketMode.el }));
+        const toggles: Array<[string, 'showText' | 'showHeader' | 'showLossSize' | 'showTargetLabel' | 'showStopLabel' | 'showPrices' | 'textOnHover']> = [
             ['Show text', 'showText'],
+            ['Text on hover only', 'textOnHover'],
             ['Show direction & ratio', 'showHeader'],
             ['Show loss & size', 'showLossSize'],
             ['Show target label', 'showTargetLabel'],

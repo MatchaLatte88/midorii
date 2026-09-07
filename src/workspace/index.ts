@@ -6,6 +6,9 @@ export type { VelaWorkspaceOptions, WorkspaceEventMap, WorkspaceScriptRun } from
 export { ChartCell } from './ChartCell';
 export type { CellSeed, CellBoot, CellChartDefaults, PooledCellState, CellNativeInfo } from './ChartCell';
 export type { WorkspaceWidgetContext } from './context';
+/* The shape of a tab contributed through `VelaWorkspace.setAppSettingsSections` — re-exported
+ * here because an API that takes rows is no use to a caller who cannot name one. */
+export type { HostSettingsRow, HostSettingsSection } from '../renderers/native/chrome/SettingsDialog';
 export {
     registerLayout,
     unregisterLayout,

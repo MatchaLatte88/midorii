@@ -57,6 +57,16 @@ export interface DrawingBox {
     extend: DrawingExtend;
     /** Fill color (may carry alpha). `undefined` → no fill (`na`). */
     bgColor?: string;
+    /**
+     * Second fill color: set ⇒ the box is filled with a vertical gradient running from
+     * `bgColor` at its TOP edge to this at its BOTTOM edge. Unset ⇒ a flat `bgColor`.
+     *
+     * Beyond Pine, which has no gradient fill, and deliberately narrow: a zone measured off a
+     * price — risk under an entry, reward above it — reads as belonging to the level it starts
+     * at, and a flat block of colour spanning both says the opposite. Vertical only, because
+     * that is the axis such a zone means anything on.
+     */
+    bgColorTo?: string;
     /** Border color. `undefined` → no border (`na`). */
     borderColor?: string;
     borderWidth: number;
