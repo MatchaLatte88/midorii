@@ -154,6 +154,18 @@ ${overlayScrollbarCss('.midorii-dock-body')}
 `;
 
 /** What the dock can ask the session to do. Every one of these already exists on the engine. */
+export interface DockOptions {
+    /**
+     * How to get into a trade, for the line shown while nothing has been traded yet.
+     *
+     * The dock is used on three screens and only two of them have the chart's own order
+     * gestures. On the Trading Bot tab there is deliberately no way in at all — a strategy
+     * opens the trades — so the default here would be telling somebody to do something that
+     * screen refuses to let them do.
+     */
+    howToTrade?: string;
+}
+
 export interface DockActions {
     closePosition(id: number): void;
     closePart(size: number, id: number): void;
@@ -405,7 +417,7 @@ function summaryLine(doc: Document, stats: AccountView['stats']): HTMLElement {
  * Mount the dock. The caller owns the element afterwards — `el.remove()` takes it away, and
  * there is nothing else to release.
  */
-export function mountTradeDock(host: HTMLElement, actions: DockActions): TradeDock {
+export function mountTradeDock(host: HTMLElement, actions: DockActions, opts: DockOptions = {}): TradeDock {
     const doc = host.ownerDocument;
     injectStyles(STYLE_ID, CSS, doc);
 
@@ -482,8 +494,9 @@ export function mountTradeDock(host: HTMLElement, actions: DockActions): TradeDo
                 empty.className = 'midorii-dock-empty';
                 // The how-to only while nothing has been traded yet: after the first round
                 // trip it is instructions for something the person has already done.
-                empty.textContent = (account?.stats.tradeCount ?? 0) === 0
-                    ? 'Nothing open. Draw a position on the chart, then right-click it to order.'
+                const howTo = opts.howToTrade ?? 'Draw a position on the chart, then right-click it to order.';
+                empty.textContent = (account?.stats.tradeCount ?? 0) === 0 && howTo
+                    ? `Nothing open. ${howTo}`
                     : 'Nothing open.';
                 live.append(empty);
                 return;

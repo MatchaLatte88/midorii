@@ -332,6 +332,42 @@ export interface MidoriPriceAlert {
     lastTriggeredAt: number | null;
 }
 
+/**
+ * A stored trading bot — see app/renderer/bot/botTypes.ts for what each field means.
+ *
+ * The settings are `unknown`-valued on purpose: the store keeps what it was handed and the
+ * renderer resolves it against the current schema, so a build that renames a parameter is
+ * met with a value that falls back to its default rather than a file it cannot read.
+ */
+export interface MidoriBot {
+    id: string;
+    name: string;
+    /** Which strategy it runs, by registry id. */
+    strategy: string;
+    /** The market, provider-prefixed: `capital:EURUSD`. */
+    symbol: string;
+    /** The bars the strategy is fed, in Vela's canonical spelling. */
+    timeframe: string;
+    /** Where its orders go: this app's own paper account, or a real Capital.com one. */
+    venue: 'paper' | 'capital';
+    /** The strategy's own settings, as stored. */
+    params: Record<string, unknown>;
+    /** What the bot is allowed to do unattended — see strategies/liveGuards.ts. */
+    guards: Record<string, unknown>;
+    /** Starting cash for a paper bot. Ignored on a live one, which has the venue's. */
+    balance: number;
+    /** Whether the bot should be running. Restored on startup for paper bots only. */
+    enabled: boolean;
+    createdAt: number;
+}
+
+/** One bot's stored paper account — a `LiveSession.snapshot()` and the market it trades. */
+export interface MidoriBotAccount {
+    symbol: string;
+    session: unknown;
+    savedAt: number;
+}
+
 /** One Capital.com `GET /markets` row — the fields CapitalProvider reads. */
 export interface MidoriCapitalMarket {
     epic: string;
@@ -339,6 +375,13 @@ export interface MidoriCapitalMarket {
     instrumentType: string;
     marketStatus: string;
     streamingPricesAvailable: boolean;
+}
+
+/** A dealing-rule threshold. `unit` is `'POINTS'` or `'PERCENTAGE'` — a distance rule
+ *  can be expressed either way, so it is never safe to read `value` without it. */
+export interface MidoriCapitalRule {
+    unit: string;
+    value: number;
 }
 
 /** `GET /markets/:epic` — the subset CapitalProvider reads for `getSymbolInfo`. */
@@ -349,7 +392,199 @@ export interface MidoriCapitalMarketInfo {
         type: string;
         currency: string;
         lotSize: number;
+        /** Margin required as a percentage of notional (`marginFactorUnit` says which).
+         *  Absent on instruments Capital.com does not margin. */
+        marginFactor?: number;
+        marginFactorUnit?: string;
     };
+    /** What the venue will accept. Every one of these is a rejection waiting to happen
+     *  if an order is built without it. */
+    dealingRules?: {
+        /** The smallest position the venue will open. */
+        minDealSize?: MidoriCapitalRule;
+        maxDealSize?: MidoriCapitalRule;
+        /** The grid sizes must sit on — 0.1 means 1.05 is refused. */
+        minSizeIncrement?: MidoriCapitalRule;
+        /** How far a stop or a target must be from the market, and how far it may be. */
+        minStopOrProfitDistance?: MidoriCapitalRule;
+        maxStopOrProfitDistance?: MidoriCapitalRule;
+        minStepDistance?: MidoriCapitalRule;
+    };
+    snapshot?: {
+        /** `TRADEABLE`, `CLOSED`, `EDITS_ONLY`, … — forex is shut at the weekend. */
+        marketStatus: string;
+        bid: number;
+        /** Capital.com's name for the ask. */
+        offer: number;
+        /** How many decimals the instrument is quoted to — 5 for EURUSD. */
+        decimalPlacesFactor: number;
+        scalingFactor: number;
+    };
+}
+
+/** The trading account, as `GET /accounts` reports it. */
+export interface MidoriCapitalAccount {
+    accountId: string;
+    accountName: string;
+    currency: string;
+    balance: {
+        /** Settled cash. */
+        balance: number;
+        deposit: number;
+        /** Open profit and loss, the venue's own figure — never a computed one. */
+        profitLoss: number;
+        /** What is left to open something new with, after margin. */
+        available: number;
+    };
+}
+
+/** One open position, as `GET /positions` reports it. */
+export interface MidoriCapitalPosition {
+    position: {
+        dealId: string;
+        dealReference: string;
+        /** Always positive — a short is `direction`, never a negative size. */
+        size: number;
+        direction: 'BUY' | 'SELL';
+        /** The price it opened at. */
+        level: number;
+        currency: string;
+        contractSize: number;
+        createdDateUTC: string;
+        stopLevel: number | null;
+        profitLevel: number | null;
+        /** Unrealized profit and loss, as the venue computes it. */
+        upl?: number;
+    };
+    market: {
+        epic: string;
+        instrumentName: string;
+        marketStatus: string;
+        bid: number;
+        offer: number;
+    };
+}
+
+/** One resting order, as `GET /workingorders` reports it. */
+export interface MidoriCapitalWorkingOrder {
+    workingOrderData: {
+        dealId: string;
+        direction: 'BUY' | 'SELL';
+        epic: string;
+        orderSize: number;
+        /** Where it waits. */
+        orderLevel: number;
+        /** Which of the two a level means follows from the direction. */
+        orderType: 'LIMIT' | 'STOP';
+        createdDateUTC: string;
+        currencyCode: string;
+    };
+    marketData: {
+        epic: string;
+        instrumentName: string;
+        marketStatus: string;
+    };
+}
+
+/**
+ * What became of one instruction — the answer to `GET /confirms/{dealReference}`, which is
+ * the only thing that says whether an order did anything.
+ *
+ * `accepted` is decided by an explicit `ACCEPTED` from the venue and nothing else: an answer
+ * that does not say so is a refusal here, never a hopeful maybe.
+ */
+export interface MidoriCapitalConfirmation {
+    accepted: boolean;
+    dealId: string | null;
+    dealReference: string | null;
+    /** `OPEN`, `CLOSED`, `AMENDED`, … — what became of the position. Null on a refusal. */
+    status: string | null;
+    /** The venue's own word for why not (`INSUFFICIENT_FUNDS`, `MARKET_CLOSED`, …), or null. */
+    reason: string | null;
+    /** Where it actually filled — not the price that was asked for. */
+    level: number | null;
+    size: number | null;
+    direction: string | null;
+}
+
+/** What to open, in the venue's own terms. */
+export interface MidoriCapitalOrderSpec {
+    epic: string;
+    direction: 'BUY' | 'SELL';
+    /** Positive; the venue refuses anything off its own size grid. */
+    size: number;
+    stopLevel?: number;
+    profitLevel?: number;
+    guaranteedStop?: boolean;
+    trailingStop?: boolean;
+}
+
+/**
+ * One finished trade in Midorii's own live journal.
+ *
+ * `estimated` is the field that keeps this record honest: a position closed by a stop
+ * overnight is noticed by the next read, not watched as it happens, so its exit price and
+ * result are this app's best reconstruction until the venue's transaction history confirms
+ * them. Marked rather than quietly presented as fact.
+ */
+export interface MidoriLiveTrade {
+    /** The venue's own deal id — the natural key, so one closure is never recorded twice. */
+    id: string;
+    symbol: string;
+    side: 'long' | 'short';
+    size: number;
+    entryPrice: number;
+    exitPrice: number;
+    openedAt: number;
+    closedAt: number;
+    netPnl: number;
+    fees: number;
+    estimated: boolean;
+    /** Whether it was taken on the real-money account, so a demo run never totals in. */
+    live: boolean;
+    exitTag: string | null;
+    /** What `netPnl` and `fees` are denominated in. Null on entries written before this was
+     *  recorded — unknown, which is not the same as the account's own currency. */
+    currency: string | null;
+}
+
+/** One trading account the credentials reach. */
+export interface MidoriCapitalAccountSummary {
+    accountId: string;
+    accountName: string;
+    currency: string;
+    preferred: boolean;
+    balance: number | null;
+    available: number | null;
+}
+
+/** What a screen may know about the stored credentials — everything except the secrets. */
+export interface MidoriCapitalCredentialStatus {
+    /** Whether something is stored at all. */
+    configured: boolean;
+    /** The login the stored key belongs to. Shown so the account is recognisable; it is not
+     *  what protects it. */
+    identifier: string | null;
+    env: 'demo' | 'live' | null;
+    hasSecret: boolean;
+    savedAt?: number | null;
+    /** False on a machine with no OS keychain — storing is refused there rather than done
+     *  in plain text. */
+    encryptionAvailable: boolean;
+    /** Whether a `.env.local` is currently supplying credentials instead. */
+    envPresent: boolean;
+}
+
+/** One bid/ask tick off the `quote` stream, renamed out of Capital.com's vocabulary
+ *  (`ofr` → `ask`) on the way through the main process. */
+export interface MidoriCapitalQuote {
+    epic: string;
+    bid: number;
+    ask: number;
+    bidSize: number | null;
+    askSize: number | null;
+    /** Epoch ms, as the venue stamped it. */
+    time: number;
 }
 
 export interface MidoriCapitalBar {
@@ -494,6 +729,19 @@ declare global {
                 load(): Promise<MidoriPriceAlert[]>;
                 save(alerts: MidoriPriceAlert[]): Promise<{ savedAt: number }>;
             };
+            /** Trading bots — their definitions, round-tripped whole. */
+            bots: {
+                load(): Promise<MidoriBot[]>;
+                save(bots: MidoriBot[]): Promise<{ savedAt: number }>;
+                /** Each bot's own paper account, keyed by the bot it belongs to. */
+                account: {
+                    load(id: string): Promise<MidoriBotAccount | null>;
+                    save(id: string, account: { symbol: string; session: unknown }): Promise<{ savedAt: number }>;
+                    clear(id: string): Promise<boolean>;
+                    /** Drop accounts whose bot is gone; answers how many went. */
+                    sweep(keep: readonly string[]): Promise<{ removed: number }>;
+                };
+            };
             runs: {
                 /** Every stored run, newest first, as summaries. */
                 list(): Promise<MidoriRunSummary[]>;
@@ -505,9 +753,53 @@ declare global {
             };
             /** Forex/CFD data — the login and the WebSocket live in the main process
              *  (see app/electron/data/capital.js); this only ever sees bars. */
+            /**
+             * The live trading journal — Midorii's own record of what has been traded on a
+             * real account. Kept here rather than read from the venue each time: the venue
+             * serves at most a day of history per request and loses it with the account.
+             */
+            live: {
+                /** Every trade on record, oldest first. */
+                trades(): Promise<MidoriLiveTrade[]>;
+                /** Add one. `added` is false where the id was already on record — the same
+                 *  closure can be noticed twice when two reads overlap. */
+                append(trade: MidoriLiveTrade): Promise<{ added: boolean; total: number }>;
+                /** Replace the estimated exit figures on one entry with the venue's own.
+                 *  Resolves false where the entry is unknown or already settled. */
+                settle(patch: { id: string; exitPrice?: number; netPnl?: number; fees?: number; currency?: string | null }): Promise<boolean>;
+                clear(): Promise<void>;
+            };
             capital: {
                 /** Whether CAPITAL_API_KEY/CAPITAL_IDENTIFIER/CAPITAL_PASSWORD are set. */
                 configured(): Promise<boolean>;
+                /**
+                 * Managing the stored credentials.
+                 *
+                 * The secret goes in and never comes back out: there is no call here that
+                 * returns the key or the password, which is why no bug can put either on a
+                 * screen or in a log.
+                 */
+                credentials: {
+                    status(): Promise<MidoriCapitalCredentialStatus>;
+                    /** Try them WITHOUT storing, and answer with the accounts they reach. */
+                    test(creds: { apiKey: string; identifier: string; password: string; env: 'demo' | 'live' }): Promise<MidoriCapitalAccountSummary[]>;
+                    /** Try, then store, then put into effect. Rejects without storing where
+                     *  the venue refuses them. */
+                    save(creds: { apiKey: string; identifier: string; password: string; env: 'demo' | 'live' }): Promise<{
+                        accounts: MidoriCapitalAccountSummary[];
+                        env: 'demo' | 'live';
+                    }>;
+                    /** Forget them, falling back to whatever the environment says. */
+                    clear(): Promise<{ source: string; env: string }>;
+                };
+                /**
+                 * Which account the credentials point at.
+                 *
+                 * `live` is the whole reason this exists: the difference between demo and real
+                 * money is one word in a file, and anything that can place an order has to be
+                 * able to SAY which of the two it is wired to rather than assume.
+                 */
+                environment(): Promise<{ configured: boolean; env: 'demo' | 'live' | null; live: boolean }>;
                 markets(searchTerm?: string): Promise<MidoriCapitalMarket[]>;
                 marketInfo(epic: string): Promise<MidoriCapitalMarketInfo | null>;
                 prices(query: { epic: string; resolution: string; from?: number; to?: number; limit?: number }): Promise<MidoriCapitalBar[]>;
@@ -516,6 +808,59 @@ declare global {
                 unsubscribe(subscriptionId: string): Promise<void>;
                 /** Returns its own unsubscribe. */
                 onOhlc(handler: (payload: { subscriptionId: string; bar: MidoriCapitalBar }) => void): () => void;
+                /** The trading account this session acts on — the preferred one. */
+                account(): Promise<MidoriCapitalAccount | null>;
+                /** Every position the account holds, including ones this app never opened. */
+                positions(): Promise<MidoriCapitalPosition[]>;
+                /**
+                 * Open a position, and resolve with what the venue CONFIRMED — an accepted
+                 * deal or a named refusal. Rejects only where no verdict could be obtained
+                 * at all, which is not the same as a refusal: the instruction was delivered,
+                 * so the position list is the thing to check before sending it again.
+                 */
+                openPosition(spec: MidoriCapitalOrderSpec): Promise<MidoriCapitalConfirmation>;
+                /** Move (or, with an explicit null, remove) the stop and target on a position. */
+                amendPosition(spec: {
+                    dealId: string;
+                    stopLevel?: number | null;
+                    profitLevel?: number | null;
+                }): Promise<MidoriCapitalConfirmation>;
+                closePosition(dealId: string): Promise<MidoriCapitalConfirmation>;
+                /** Every resting order the account holds, on any instrument. */
+                workingOrders(): Promise<MidoriCapitalWorkingOrder[]>;
+                /** Rest an order at a level. Which of LIMIT/STOP a level means follows from
+                 *  the direction, and the caller decides it. */
+                createOrder(spec: {
+                    epic: string;
+                    direction: 'BUY' | 'SELL';
+                    size: number;
+                    type: 'LIMIT' | 'STOP';
+                    level: number;
+                    stopLevel?: number;
+                    profitLevel?: number;
+                }): Promise<MidoriCapitalConfirmation>;
+                amendOrder(spec: {
+                    dealId: string;
+                    level?: number;
+                    stopLevel?: number | null;
+                    profitLevel?: number | null;
+                }): Promise<MidoriCapitalConfirmation>;
+                cancelOrder(dealId: string): Promise<MidoriCapitalConfirmation>;
+                /**
+                 * The two ledgers a finished trade's real cost has to be joined from — the
+                 * cash side and the position's life. The window is in epoch milliseconds and
+                 * is walked in daily slices, which is all `/history/activity` serves.
+                 */
+                history(window: { from: number; to: number }): Promise<{
+                    transactions: unknown[];
+                    activities: unknown[];
+                }>;
+                /** The bid/ask tick stream, subscribed per instrument (no resolution —
+                 *  a quote is not bucketed). Resolves to an opaque subscription id. */
+                subscribeQuotes(query: { epic: string }): Promise<string>;
+                unsubscribeQuotes(subscriptionId: string): Promise<void>;
+                /** Returns its own unsubscribe. */
+                onQuote(handler: (payload: { subscriptionId: string; quote: MidoriCapitalQuote }) => void): () => void;
             };
         };
     }

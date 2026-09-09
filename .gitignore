@@ -4,3 +4,11 @@ dist/
 *.log
 .env.local
 .DS_Store
+
+# Local market data: bulk CSV history, fetched rather than authored. Tens of megabytes
+# that would live in the repository's history forever and can be downloaded again.
+MarketData/
+
+# Working notes and per-machine tooling config, neither of which is anybody else's.
+.claude/
+Fertig eingerichtet. Zusammenfassun.txt

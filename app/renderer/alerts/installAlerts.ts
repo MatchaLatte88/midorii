@@ -9,6 +9,8 @@ import { ALERT_INDICATOR_TYPE, alertIndicatorInputs, readAlertLineId, registerAl
 import { registerAlertsPanel } from './alertsPanel';
 import { newAlert, symbolProvider } from './alertTypes';
 import { installCursorPriceTracking, lastCrosshairPrice } from './cursorPrice';
+import { snapToTick, trackSymbolTicks } from './symbolTick';
+import { loadAlertDisplay, onAlertDisplayChange } from './alertDisplay';
 
 /** Providers whose symbols can carry an alert — everything with a live feed. The local
  *  archive has none, so "Add Alert" stays hidden there. */
@@ -39,13 +41,17 @@ export function installAlerts(workspace: VelaWorkspace, providers: Record<string
     registerAlertsPanel(store, dialog);
 
     const offCursor = installCursorPriceTracking();
+    const offSymbolTicks = trackSymbolTicks(workspace.chart);
     workspace.refreshActions(); // mount the just-registered cursor-price attachment now
 
     // The alert lines' own visual: one always-on native indicator, fed the whole list on
     // every store change (mirrors app/renderer/trading/paperMount.ts's position lines).
     const indicator: IndicatorHandle = workspace.chart.addNativeIndicator(ALERT_INDICATOR_TYPE);
-    const pushLines = (): void => indicator.setInputs(alertIndicatorInputs(store.list()));
+    const pushLines = (): void => indicator.setInputs(alertIndicatorInputs(store.list(), loadAlertDisplay()));
     const offIndicatorSync = store.onChange(pushLines);
+    // The Settings tab can change how the tags read while alerts are already on the chart —
+    // push the list again so the change lands now rather than at the next store edit.
+    const offDisplaySync = onAlertDisplayChange(pushLines);
 
     // The chart line's own ✕ tag button deletes the alert — filtered by our id prefix so
     // a paper-trading position's close button (the same chart-wide event) is untouched.
@@ -58,7 +64,11 @@ export function installAlerts(workspace: VelaWorkspace, providers: Record<string
     // the line is what lets the renderer claim the gesture at all (see alertIndicator.ts).
     const offPriceLineMoved = workspace.chart.on('priceline:moved', ({ id, price }) => {
         const alertId = readAlertLineId(id);
-        if (alertId) store.update(alertId, { price });
+        if (!alertId) return;
+        // The drop reports where the pointer let go, to the pixel — snap it to the symbol's
+        // own increment, exactly as the level was snapped when the alert was created.
+        const alert = store.list().find((a) => a.id === alertId);
+        store.update(alertId, { price: alert ? snapToTick(price, alert.symbol) : price });
     });
 
     // Right-click or double-click the alert's own tag (its "bracket") reopens its popup —
@@ -92,7 +102,7 @@ export function installAlerts(workspace: VelaWorkspace, providers: Record<string
         run: (ctx) => {
             const price = lastCrosshairPrice();
             if (price == null) return;
-            const alert = store.add(newAlert(ctx.symbol, price));
+            const alert = store.add(newAlert(ctx.symbol, snapToTick(price, ctx.symbol)));
             dialog.open(alert.id);
         },
     });
@@ -108,6 +118,8 @@ export function installAlerts(workspace: VelaWorkspace, providers: Record<string
     // Kept alive for the lifetime of the app (Midorii never tears this down); the
     // disposers exist so a future "uninstall" path has somewhere to hang.
     void offCursor;
+    void offSymbolTicks;
+    void offDisplaySync;
     void offIndicatorSync;
     void offPriceLineAction;
     void offPriceLineMoved;

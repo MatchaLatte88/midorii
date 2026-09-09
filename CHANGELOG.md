@@ -3,6 +3,227 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
+## [Unreleased]
+
+### Added
+
+- **The ticket is laid out the way an order ticket is laid out.** The two-sided price is at the
+  top of the panel and pressing a side is how the direction is chosen, so the price you are
+  trading against and the way you are pointed are one control rather than two. Underneath it,
+  the order type as a strip, one framed field per number with what that number comes to in the
+  other unit greyed inside the same frame, the exits behind switches, and everything decided
+  once a session shut away under Extra settings. At the bottom there is now ONE button, in the
+  colour of the side chosen at the top, saying exactly what pressing it sends. Where the venue
+  quotes two sides — a Capital.com account — the header shows what a sell gets, what a buy
+  costs and the spread between them; where the feed quotes one, both halves show it and no
+  spread is claimed.
+
+- **Quick sizes: the sizes this account is actually traded in, one press away.** A row of
+  presets under the size field, with minus and plus walking off its ends and a pencil to
+  rewrite the list. The step those ends walk in is the smallest size on the row, so a list of
+  1, 3, 5 steps in whole contracts and a list of 0.01, 0.05, 0.1 steps in hundredths. Pressing
+  one is a typed size, so the ticket switches to sizing by units. The list is a trading setting
+  and lives with the others — the ticket's pencil and the Trading settings page edit the same
+  one.
+
+- **Automatic brackets: a ticket that arrives with its stop and target already on it.** Off by
+  default; switched on in Trading settings, where both distances are set either in ticks — the
+  instrument's own increment — or in price. They are measured from wherever the trade would go
+  in and FOLLOW it: on a market order they track the market, on a resting one they move with
+  the entry price as it is typed, and they land on the instrument's own grid of tradable
+  levels. Typing over one ends that for the box typed in — the level is then yours and nothing
+  moves it — and so does switching it off. A resting order with no price yet shows no levels
+  at all rather than a pair worked out from a price the trade is not going in at. A distance
+  in ticks needs the instrument's increment to be known; where it is not, nothing is placed
+  rather than a stop measured on a guessed grid.
+
+- **Trading bots: a strategy that trades on its own, on a paper or a real account.** The
+  Trading Bot tab runs any strategy from the Strategies tab against a live market, without
+  anybody watching. A bot is a strategy, a market and an account: it watches the market it was
+  given whatever the Chart tab happens to be showing, it keeps running while you look at
+  something else, and a paper one comes back by itself when the app restarts. Each bot brings
+  its own account, so what a strategy traded is never mixed in one ledger with what you placed
+  by hand. The rules it trades are the rules a backtest ran — the same strategy object, not a
+  second version of it — and it sees a bar only once that bar has closed, exactly as a backtest
+  does. A bot pointed at Capital.com sends real orders, and is never resumed by itself on
+  startup: a real account is armed by a person, every time.
+
+- **A bot's account survives, and is filed rather than binned.** What a bot has traded is kept
+  between sittings, so stopping one — or closing the app for the night — no longer loses its
+  history: it picks the same account back up when it starts again and says how many trades are
+  on it. When an account is finished with, whether the bot is deleted or simply started over,
+  it goes onto the run library first, on the same shelf the backtest of that strategy landed
+  on. That is the comparison worth having: the same rules over history, and the same rules
+  against a live feed, side by side. A bot whose account could not be filed is not deleted at
+  all, and says so. A bot that trades a real Capital.com account writes every closed trade into
+  the trading journal exactly as the chart does, because that journal is the only record
+  anywhere that money moved — and a bot trading unwatched is the case where nobody is there to
+  notice otherwise.
+
+- **Conditions a strategy has to satisfy before it may trade unattended.** A backtest runs over
+  a fixed stretch of history and stops, so it never has to decide when to start, when to give
+  up for the day, or what to do about a feed that has gone quiet. A bot does. Each one is given
+  its own trading days and hours in UTC, a limit on trades a day and positions at once, a daily
+  loss limit and profit target measured against what the account was worth when the day opened,
+  a cooldown after a losing trade, a widest spread it will trade through, and a point at which
+  a silent feed stops it sending anything. None of them can open a trade — every one of them
+  can refuse one, and says which one refused it. A strategy that is already holding a position
+  is never blocked from managing it: a condition that could strand a live position would cost
+  more than it saves. A bot can also be told to close everything when its hours end, which is
+  off by default, because closing a position nobody asked to close is the more expensive
+  mistake.
+
+- **A bot's own screen: its chart, its positions, and everything it declined to do.** The
+  Trading Bot tab shows the selected bot's market on a full chart, with its positions and
+  resting orders drawn exactly as a hand-placed trade's are, its account beside them, and its
+  own running commentary underneath. That commentary is the part a screen for an unattended
+  strategy has to get right: a bot that has taken no trades all week is either working
+  perfectly on a quiet market or has been turning every setup away since Tuesday, and nothing
+  else on the screen tells those apart. So refusals are recorded beside the orders, in
+  sentences, with a repeated one counted rather than repeated. There is deliberately no way to
+  place a trade from this screen — the buttons under the chart can only close what the bot
+  opened.
+
+- **Trade a Capital.com account from the chart.** The Trade menu now offers the account your
+  `CAPITAL_*` credentials point at, beside paper trading, and everything the chart already
+  does — the ticket, a block traded from a right-click, a stop dragged to a new level, a
+  position closed from its own line — goes to the venue instead of to the engine. Nothing is
+  drawn until the venue confirms it: an order is two steps there, and a position that appeared
+  on the press would be one the chart had to take back. Positions opened elsewhere, on the
+  phone app or the website, are drawn too, because they are on the same account and money you
+  cannot see is money you are still carrying. Sizes are put on the venue's own increment grid
+  before they are sent, and a size below its minimum is refused rather than quietly rounded up
+  into a bigger trade than the risk called for. When the venue refuses something — not enough
+  margin, market closed, a stop too near the price — it says so in the words it used, with
+  what you were doing named alongside, because the answer can arrive seconds after the press.
+  Limits and stops rest on the venue's book and are drawn on the chart like any other waiting
+  order; cancelling one takes it off there too.
+
+- **Every live trade is written down, and the Analysis tab reads it back.** Midorii keeps its
+  own journal of what has been traded on a venue rather than asking for it back later: the
+  venue serves at most a single day of history per request, and loses it entirely when an
+  account is closed or its credentials change. A position that ends is recorded the moment it
+  is noticed — whether you closed it, or a stop did overnight while the app was shut — with
+  the market, the side, both prices and the result. The trade panel's History tab shows it
+  beside the ticket, and the Analysis tab totals it: trades, win rate, net result, and the
+  running curve of what the account has made. Real and demo accounts are counted separately,
+  because they are two accounts and a win rate that mixed them would answer nothing.
+
+  Where an exit was reconstructed rather than read, it says so — and does not stay that way. A
+  stop that fires between two reads is not watched as it happens, so its exit price and result
+  start as Midorii's closest honest reconstruction, marked in the table and counted separately
+  in the summary. A few minutes later the venue's own ledgers have caught up, and the entry is
+  replaced with what actually happened: the realized result, the price it closed at, the
+  overnight financing, the commission, and whether it was a stop, a target or you that ended
+  it. Trades the venue voided or corrected are left marked rather than quietly rewritten.
+
+- **Every figure says which money it is in.** A CFD account holds one currency while its
+  instruments quote in others, so a result is only a number until something names the money.
+  Each journal entry now carries the currency the venue booked it in, the trade list has a
+  column for it, and the account card names the currency the account itself is held in. Where
+  a set of trades turns out to be booked in more than one, the total says so instead of
+  looking like a single figure. Nothing is converted: Midorii has no exchange rate of its own,
+  and a plausible wrong total in the record you judge your money by is the one mistake worth
+  taking trouble to avoid.
+
+- **The ticket knows what a trade costs in margin.** On a live account the number that decides
+  how big a position can be is not the leverage figure in the settings — it is the money the
+  venue has left after what it already holds, and the share of each position's value it holds
+  against it. Both now come from the venue: the ticket shows what opening the trade would tie
+  up against what is available, warns when it would take more than there is, and sizes a trade
+  to whichever ceiling bites first. A size held back by margin says so in those words rather
+  than reporting a leverage cap, because the two have different remedies. Paper accounts are
+  unchanged — they have no margin, and the ticket goes on showing the position against equity.
+
+  Switching it on asks first, and asks differently depending on which account it is. A demo
+  account gets a notice; a real one names the account and its balance and requires the word
+  `LIVE` to be typed. While it is on, a band sits on the chart that cannot be dismissed — red
+  when the money is real — carrying what the account is worth, what is left to trade with, and
+  a Close all that never sits behind a menu. Live trading is not remembered across restarts:
+  a chart that came back up already pointed at real money would be one nobody had aimed.
+
+- **Bid and ask, for markets that quote both.** A forex or commodity chart draws its candles
+  from the bid, so the chart alone never said what a _buy_ costs — that is the ask, it is a
+  different number, and the gap between the two is what a trade pays before it is right about
+  anything. Three ways of seeing it now, each of which can be turned off on its own under
+  Settings → Customization → Bid and ask. A card in the bottom-right corner names all three
+  figures: what you can sell at, what you can buy at, and what the gap between them costs,
+  said underneath in the increments the instrument is quoted in. The two sides are also drawn
+  as levels across the plot, in one colour because they are two ends of one measurement — the
+  ask is always the upper of the two. And each level chips its price onto the price scale
+  beside the ones already there. All of it appears only where a venue quotes two sides, and
+  stays off everywhere else. When ticks stop arriving — the connection dropped, the market
+  closed — the card dims and says when it last heard one, rather than going on showing a price
+  that is no longer true.
+
+- **The level on an alert's tag can be turned off.** Under Settings → Customization → Alerts.
+  An alert's tag repeats its price by default; switch it off and the tag says only what the
+  alert is — its label, or the bare word — leaving the price to the axis, where a position
+  and its stop and target already leave theirs. The line does not move and the alert still
+  fires at exactly the same price. The number is simply not said twice.
+
+- **The account card and the quick ticket can be moved, and put away.** Both float over the
+  top-right corner of the chart, which is often exactly where the market is. Drag either one
+  anywhere on the plot — by the card itself, not by the boxes and buttons on it — and it stays
+  where it was dropped, on this chart and on the next session. Each has a small close button on
+  its corner; while anything is closed, a button in the top right brings it all back. Because
+  the cards can now be dragged, a press on one moves the card rather than panning the chart
+  behind it. Under Settings → Customization → Chart cards the account card can be switched off
+  for good, for anyone who reads the account in the panel below the chart and wants the corner
+  back — the quick ticket then moves up into it.
+
+- **The account card says which account it is.** A line over the four figures naming what is
+  being traded — paper trading, or a replay. The same card serves both and the figures look
+  identical either way, so a session left open for an hour was a session whose kind you had to
+  remember. A live Capital.com account is unaffected: it has its own band on the chart, which
+  already says in as many words whether the money is real.
+
+### Fixed
+
+- **A live trade is no longer sized against the wrong side of the price.** The candles on a
+  CFD chart are drawn from the bid, and the live account was measuring every plan against
+  that — right for a sell, wrong by the whole spread for a buy, and silent about it. Plans are
+  now measured against the mid, which is wrong by half a spread in both directions instead of
+  wholly wrong in one, and the card in the corner of the chart says what that half is worth.
+  The two sides now come from the venue's own quote stream rather than from the candle feed,
+  which only ever carried one of them.
+
+- **Orders into a closed market are refused before they are sent.** Forex is shut all weekend
+  and an instrument can go close-only at any time. The chart used to send the order anyway and
+  report whatever code came back; it now asks first and answers in words about the market.
+
+- **The live account card says when it has stopped hearing from the venue.** A dropped
+  connection left the equity and available margin sitting there looking current. The figures
+  still stay — a lost connection is not a closed position — but the card now dims them and
+  says when it last got an answer, the same way the bid/ask card does when its stream goes
+  quiet.
+
+- **Prices chipped onto the scale no longer stack on top of one another.** Two levels a few
+  pixels apart — a stop dragged up against its entry, two alerts watching the same area, and
+  now a bid and its ask — each stamped a chip onto the price scale at the same height, and
+  whichever happened to be drawn second simply covered the first. Chips that would collide are
+  now spread just far enough apart to be read, moved as a group and centred on where they
+  wanted to be, so neither of the pair is the one that gives way. None of them is ever dropped
+  to make room: a level whose price the scale does not say reads as a level that is no longer
+  there.
+
+- **Alert levels are no longer set to eleven decimal places.** An alert placed by right-clicking
+  the chart took its price straight off the pointer — a pixel row mapped back through the
+  scale — so a Bitcoin alert would read `111234.56789012345` on its tag while the axis beside
+  it said `111234.57`. Levels are now snapped to the increment the market actually quotes in,
+  both when the alert is created and when its line is dragged to a new price, and they are
+  printed without the leftover decimals wherever they appear. A symbol that reports no tick
+  size is left alone rather than snapped to a guessed one, and alerts saved before this read
+  correctly even though their stored level is untouched.
+
+- **Capital.com instruments are drawn to the precision they are quoted at.** A forex pair or
+  a commodity charted from Capital.com never said how finely it trades, so the price axis
+  worked its decimals out from whatever was on screen — EUR/USD labelled to three places
+  where the market quotes five, and the figures shifting as you zoomed. The instrument's own
+  precision is now read along with the rest of its details: the axis is labelled at it, and a
+  level dropped by hand snaps to it like every other market's does. Instruments served
+  without that detail are left as they were rather than snapped to a guessed one.
+
 ## [v0.3.0]
 
 ### Added

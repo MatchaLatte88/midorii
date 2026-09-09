@@ -40,21 +40,6 @@
                 bottom: 0;
                 left: 0;
             }
-            .midorii-dummy-view {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                color: var(--vela-fg-muted, #868a96);
-                font: 13px/1.5 var(--vela-font, sans-serif);
-                letter-spacing: 0.02em;
-            }
-            /* `[hidden]` and `.midorii-dummy-view` are both author-stylesheet rules of
-               equal specificity — without this, `display: flex` above wins the cascade
-               by source order and all three dummy views render stacked regardless of
-               the `hidden` attribute that is supposed to keep only one tab's view showing. */
-            .midorii-dummy-view[hidden] {
-                display: none;
-            }
         </style>
     </head>
     <body>
@@ -65,7 +50,7 @@
         <div id="analysis-root" hidden></div>
         <div id="strategies-root" hidden></div>
         <div id="settings-root" hidden></div>
-        <div id="bot-root" class="midorii-dummy-view" hidden>Bot — coming soon</div>
+        <div id="bot-root" hidden></div>
         <script type="module" src="./main.ts"></script>
     </body>
 </html>

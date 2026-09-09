@@ -13,7 +13,7 @@ import { renderTradeMarkers } from '../../shared/trade-markers';
 import type { TradeExecution } from '../../../core/model/trades';
 import { paneAxisTicks, formatAxisValue, timeTicks } from './ticks';
 import { axisColumnX, PANE_SEPARATOR_PX } from './axisLayout';
-import { priceLineActionRect, priceLineHitAt, priceLineTagRect, TAG_PAD, TAG_RADIUS, type PriceLineHit } from './priceLineTags';
+import { priceLineActionRect, priceLineHitAt, priceLineTagRect, declutterAxisTags, AXIS_TAG_HEIGHT, TAG_PAD, TAG_RADIUS, type PriceLineHit } from './priceLineTags';
 import { parseColor } from '../backend/gl/color';
 import { DARK_THEME } from '../../../core/theme';
 import { tzOffsetMs } from './tz';
@@ -27,6 +27,20 @@ import { tzOffsetMs } from './tz';
  * their model's z slot — this layer only keeps the shared DrawingSceneRenderer to
  * compute the drawing price-range that folds into autoscale (`paneDrawingsRange`).
  */
+
+/**
+ * One price line's chip against the price scale, held back until every one of them is
+ * known so they can be laid out without landing on each other. `y` is where the chip
+ * WANTS to be — its line — which is not always where it ends up.
+ */
+interface AxisChip {
+    pane: PaneNode;
+    y: number;
+    text: string;
+    color: string;
+    ink: string;
+}
+
 export class ChromeRenderer {
     private canvas: HTMLCanvasElement | null = null;
     private ctx: CanvasRenderingContext2D | null = null;
@@ -343,6 +357,7 @@ export class ChromeRenderer {
     private drawPriceLineTags(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, dataW: number, panes: readonly PaneNode[]): void {
         ctx.font = this.tagFont(theme);
         ctx.textBaseline = 'middle';
+        const chips: AxisChip[] = [];
         for (const model of scene.indicators.values()) {
             for (const pl of model.priceLines) {
                 if (!pl.title && !pl.axisTag && !pl.action) continue;
@@ -390,19 +405,63 @@ export class ChromeRenderer {
                     ctx.stroke();
                 }
                 if (pl.axisTag) {
-                    const text = formatAxisValue(pane.scale, pane.bounds.height, pl.price, percentScaleFor(scene, pane), scene.priceMintick);
-                    const w = ctx.measureText(text).width + 8;
-                    ctx.fillStyle = color;
-                    ctx.fillRect(dataW + 1, y - 8, w, 16);
-                    ctx.fillStyle = ink;
-                    ctx.textAlign = 'center';
-                    ctx.fillText(text, dataW + 1 + w / 2, y);
-                    ctx.textAlign = 'start';
+                    /* Collected rather than drawn: two levels a few pixels apart stamp two
+                     * chips on the same few pixels of the scale, and neither is readable.
+                     * They are laid out together once every one of them is known — see
+                     * `drawAxisChips`. */
+                    chips.push({
+                        pane,
+                        y,
+                        text: formatAxisValue(pane.scale, pane.bounds.height, pl.price, percentScaleFor(scene, pane), scene.priceMintick),
+                        color,
+                        ink,
+                    });
                 }
             }
         }
+        this.drawAxisChips(ctx, chips, dataW);
         this.drawPriceLineDrag(ctx, scene, coords, theme, dataW, panes);
         ctx.textBaseline = 'alphabetic';
+    }
+
+    /**
+     * The price lines' own chips against the scale, spread apart where they would collide.
+     *
+     * Laid out per pane, because that is the box they have to stay inside and the scale they
+     * were measured against. Within one pane a chip is nudged off its line rather than
+     * dropped: a level whose price the scale does not say reads as a level that is no longer
+     * there, which is worse than one sitting a few pixels high.
+     */
+    private drawAxisChips(ctx: CanvasRenderingContext2D, chips: readonly AxisChip[], dataW: number): void {
+        if (chips.length === 0) return;
+        const byPane = new Map<PaneNode, AxisChip[]>();
+        for (const chip of chips) {
+            const group = byPane.get(chip.pane);
+            if (group) group.push(chip);
+            else byPane.set(chip.pane, [chip]);
+        }
+
+        const half = AXIS_TAG_HEIGHT / 2;
+        for (const [pane, group] of byPane) {
+            // Bounds on the chip's CENTRE, so the whole box stays inside the pane.
+            const ys = declutterAxisTags(
+                group.map((c) => c.y),
+                AXIS_TAG_HEIGHT,
+                pane.bounds.top + half,
+                pane.bounds.top + pane.bounds.height - half,
+            );
+            for (let i = 0; i < group.length; i++) {
+                const chip = group[i]!;
+                const y = ys[i]!;
+                const w = ctx.measureText(chip.text).width + 8;
+                ctx.fillStyle = chip.color;
+                ctx.fillRect(dataW + 1, y - half, w, AXIS_TAG_HEIGHT);
+                ctx.fillStyle = chip.ink;
+                ctx.textAlign = 'center';
+                ctx.fillText(chip.text, dataW + 1 + w / 2, y);
+                ctx.textAlign = 'start';
+            }
+        }
     }
 
     /** The font the tags are set in — one definition, so measuring and painting agree. */

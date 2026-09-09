@@ -58,6 +58,22 @@ export function formatSize(size: number): string {
 }
 
 /**
+ * A price, as short as it can be said without changing it.
+ *
+ * Prices that came off the pointer rather than off a keyboard carry the double's full
+ * decimal tail, and a level of 111234.56789012345 is one no one chose and no one could
+ * read back. Alert levels are snapped to the symbol's tick before they are stored (see
+ * `alerts/symbolTick.ts`), so this is the second line of defence: it covers a level saved
+ * before that snapping existed, and one whose symbol never reported a tick size. Eight
+ * decimals is a satoshi — finer than anything is quoted in — and `Number()` drops the
+ * zeros `toFixed` pads with, so a round price still reads round.
+ */
+export function formatPrice(price: number): string {
+    if (!Number.isFinite(price)) return '—';
+    return String(Number(price.toFixed(8)));
+}
+
+/**
  * A trade's result in R — what it made against what it risked when it was opened.
  *
  * Null when the trade carried no stop: risking nothing is not a risk of zero, it is a trade

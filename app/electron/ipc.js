@@ -14,7 +14,13 @@ import { randomUUID } from 'node:crypto';
 import { open, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { capitalConfigured, capitalMarketInfo, capitalMarkets, capitalPrices, capitalSubscribe } from './data/capital.js';
+import {
+  capitalAccount, capitalActivities, capitalAmendOrder, capitalAmendPosition, capitalCancelOrder, capitalClosePosition, capitalConfigured,
+  capitalCreateOrder, capitalEnvironment, capitalMarketInfo, capitalMarkets, capitalOpenPosition, capitalPositions,
+  capitalPrices, capitalProbe, capitalSubscribe, capitalSubscribeQuotes, capitalTransactions, capitalWorkingOrders,
+  configureCapital,
+} from './data/capital.js';
+import { clearCredentials, encryptionAvailable, readPublic, readSecret, saveCredentials } from './data/store/credentialStore.js';
 import { CSV_TIME_ZONES, dominantInterval, missingFields, parseMarketCsv, sniffCsv } from './data/csv.js';
 import { DEFAULT_SOURCE, listSources, sourceOf } from './data/providers/index.js';
 import { deleteDataset, describeMs, listDatasets, mergeBars, parseTimeframe, readBars, readMeta } from './data/store/barStore.js';
@@ -22,8 +28,11 @@ import { annotateSweep, deleteSweep, listSweeps, loadSweep, saveSweep } from './
 import { clearStrategySettings, loadStrategySettings, saveStrategySettings } from './data/store/strategyStore.js';
 import { annotateRun, condenseEquity, deleteRun, listRuns, loadRun, saveRun } from './data/store/runStore.js';
 import { clearAccount, loadAccount, saveAccount } from './data/store/paperStore.js';
+import { appendLiveTrade, clearLiveTrades, loadLiveTrades, settleLiveTrade } from './data/store/liveTradeStore.js';
 import { deleteSession, listSessions, loadSession, saveSession } from './data/store/sessionStore.js';
 import { loadAlerts, saveAlerts } from './data/store/alertStore.js';
+import { loadBots, saveBots } from './data/store/botStore.js';
+import { clearBotAccount, listBotAccounts, loadBotAccount, saveBotAccount } from './data/store/botAccountStore.js';
 import { applyTitleBarTheme } from './titlebar.js';
 
 /** Datasets live outside the app bundle so an update never touches them. */
@@ -70,6 +79,29 @@ export function sessionsDir() {
 }
 
 /**
+ * Trading bots.
+ *
+ * Configuration, like the strategy settings above and for the same reason — a bot is which
+ * strategy on which market with what permissions, not a result. What a bot has DONE goes
+ * where every other traded account's history goes: the paper account, or the live journal.
+ */
+export function botsDir() {
+  return path.join(app.getPath('userData'), 'bots');
+}
+
+/**
+ * The paper accounts the bots are running.
+ *
+ * Apart from the definitions above, for the reason sessionStore is apart from the runs: one
+ * is what a bot IS and is edited by hand, the other is working state rewritten a few times a
+ * minute for weeks. A FINISHED bot account is not here — it goes onto the run shelf beside
+ * the backtest of the same strategy, which is the only place the two can be compared.
+ */
+export function botAccountsDir() {
+  return path.join(app.getPath('userData'), 'bot-accounts');
+}
+
+/**
  * The paper account.
  *
  * Its own folder rather than a file among the sessions: a session is one
@@ -79,6 +111,55 @@ export function sessionsDir() {
  */
 export function paperDir() {
   return path.join(app.getPath('userData'), 'paper-account');
+}
+
+/**
+ * The live trading journal.
+ *
+ * Apart from the paper account and from the run library both: this is not one account that
+ * can be reset, and not a shelf of finished experiments — it is the record of money that
+ * actually moved, and the one thing here that cannot be reproduced by running something
+ * again.
+ */
+export function liveTradesDir() {
+  return path.join(app.getPath('userData'), 'live-trading');
+}
+
+/**
+ * Broker credentials, encrypted by the OS.
+ *
+ * Its own folder, and nothing else goes in it: these are the keys to an account that holds
+ * money, and a directory that holds only them is one whose permissions and backups can be
+ * reasoned about on their own.
+ */
+export function credentialsDir() {
+  return path.join(app.getPath('userData'), 'credentials');
+}
+
+/**
+ * Put the stored Capital.com credentials into effect, falling back to the environment.
+ *
+ * What somebody typed into the app wins over `.env.local`: the file is a developer's way in
+ * and the screen is everybody else's, and a stale variable silently overriding what the
+ * settings page plainly shows would be the wrong way round. Called at startup and again
+ * whenever the credentials change.
+ */
+export async function applyStoredCapitalCredentials() {
+  const stored = await readSecret(credentialsDir(), 'capital').catch(() => null);
+  if (stored?.apiKey && stored?.identifier && stored?.password) {
+    configureCapital(stored);
+    return { source: 'stored', env: stored.env };
+  }
+  configureCapital({
+    apiKey: process.env.CAPITAL_API_KEY,
+    identifier: process.env.CAPITAL_IDENTIFIER,
+    password: process.env.CAPITAL_PASSWORD,
+    env: process.env.CAPITAL_ENV,
+  });
+  return {
+    source: process.env.CAPITAL_API_KEY ? 'env' : 'none',
+    env: process.env.CAPITAL_ENV === 'live' ? 'live' : 'demo',
+  };
 }
 
 /**
@@ -731,6 +812,50 @@ export function registerIpc() {
     return saveAlerts(alertsDir(), alerts);
   });
 
+  /* ─── Trading bots ───────────────────────────────────────────────────── *
+   *
+   * The definitions only, round-tripped whole like the alerts above: a handful of small
+   * records, edited on one screen, with no history to browse. A bot's live state is not
+   * here on purpose — see app/electron/data/store/botStore.js.
+   *
+   * Nothing is validated beyond an id and a strategy name. What the settings MEAN lives in
+   * the renderer, where the schema is, and the renderer resolves what it reads against the
+   * current one — the same rule the strategy settings follow.
+   */
+  ipcMain.handle('bots:load', () => loadBots(botsDir()));
+
+  ipcMain.handle('bots:save', (_e, bots) => {
+    if (!Array.isArray(bots)) throw new Error('bots:save: expected an array');
+    return saveBots(botsDir(), bots);
+  });
+
+  /* A bot's own paper account, keyed by the bot it belongs to. Read when the bot starts,
+   * written whenever it moves, cleared when the bot is deleted or started over. A FINISHED
+   * one goes through `backtest:save` instead, onto the run shelf. */
+  ipcMain.handle('botAccount:load', (_e, id) => loadBotAccount(botAccountsDir(), requireString(id, 'id')));
+
+  ipcMain.handle('botAccount:save', (_e, id, account) => (
+    saveBotAccount(botAccountsDir(), requireString(id, 'id'), account ?? {})
+  ));
+
+  ipcMain.handle('botAccount:clear', (_e, id) => clearBotAccount(botAccountsDir(), requireString(id, 'id')));
+
+  /* Accounts whose bot is gone. Deleting a bot takes its account with it, so this only ever
+   * finds one left behind by a crash between the two writes — but left alone it would sit
+   * there for good, and it carries an account's worth of trades. */
+  ipcMain.handle('botAccount:sweep', async (_e, keep) => {
+    if (!Array.isArray(keep)) throw new Error('botAccount:sweep: expected the list of bot ids to keep');
+    const alive = new Set(keep.filter((id) => typeof id === 'string'));
+    const stored = await listBotAccounts(botAccountsDir());
+    let removed = 0;
+    for (const id of stored) {
+      if (alive.has(id)) continue;
+      await clearBotAccount(botAccountsDir(), id);
+      removed += 1;
+    }
+    return { removed };
+  });
+
   /* ─── App theme + the custom title bar ─────────────────────────────── */
 
   /* Purely cosmetic: the renderer already re-themes itself (chart, chrome,
@@ -782,6 +907,8 @@ export function registerIpc() {
    */
   ipcMain.handle('capital:configured', () => capitalConfigured());
 
+  ipcMain.handle('capital:environment', () => capitalEnvironment());
+
   ipcMain.handle('capital:markets', (_e, searchTerm) => capitalMarkets(searchTerm || undefined));
 
   ipcMain.handle('capital:market-info', (_e, epic) => capitalMarketInfo(requireString(epic, 'epic')));
@@ -795,18 +922,283 @@ export function registerIpc() {
    * same epic/resolution is already subscribed elsewhere. */
   const capitalSubs = new Map();
 
+  /**
+   * Hold a subscription until the renderer drops it — or until its window does.
+   *
+   * A window that goes without unsubscribing (closed, reloaded, crashed) would hold its
+   * slot for the life of the process, and the venue allows forty of them. So the release is
+   * registered against the window as well, and is written to be safe to run twice: whichever
+   * of the two gets there first takes the id out of the registry, and the other finds it
+   * gone and does nothing.
+   */
+  function holdSubscription(registry, sender, id, unsubscribe) {
+    const release = () => {
+      if (!registry.delete(id)) return;
+      sender.off('destroyed', release);
+      unsubscribe();
+    };
+    registry.set(id, release);
+    sender.once('destroyed', release);
+  }
+
   ipcMain.handle('capital:subscribe', async (event, { epic, resolution } = {}) => {
     const id = randomUUID();
     const sender = event.sender;
     const unsubscribe = await capitalSubscribe(requireString(epic, 'epic'), requireString(resolution, 'resolution'), (bar) => {
       if (!sender.isDestroyed()) sender.send('capital:ohlc', { subscriptionId: id, bar });
     });
-    capitalSubs.set(id, unsubscribe);
+    // The window can have gone while the venue was answering, and a 'destroyed' that has
+    // already fired will not fire again — so nothing would ever release this one.
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(capitalSubs, sender, id, unsubscribe);
     return id;
   });
 
-  ipcMain.handle('capital:unsubscribe', (_e, id) => {
-    capitalSubs.get(id)?.();
-    capitalSubs.delete(id);
+  ipcMain.handle('capital:unsubscribe', (_e, id) => { capitalSubs.get(id)?.(); });
+
+  /* The tick stream, on the same shape as the candle one above. */
+  const capitalQuoteSubs = new Map();
+
+  ipcMain.handle('capital:subscribe-quotes', async (event, { epic } = {}) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = await capitalSubscribeQuotes(requireString(epic, 'epic'), (quote) => {
+      if (!sender.isDestroyed()) sender.send('capital:quote', { subscriptionId: id, quote });
+    });
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(capitalQuoteSubs, sender, id, unsubscribe);
+    return id;
   });
+
+  ipcMain.handle('capital:unsubscribe-quotes', (_e, id) => { capitalQuoteSubs.get(id)?.(); });
+
+  /* ─── Capital.com trading ────────────────────────────────────────────
+   *
+   * The channels that move money. Everything crossing here is checked rather
+   * than forwarded: the renderer builds these payloads from a form, and a field
+   * that arrives as a string, a NaN or an unbounded number must be refused at
+   * this boundary and not by the venue — the venue's refusal costs a round trip
+   * and arrives as a code nobody asked for.
+   */
+
+  ipcMain.handle('capital:account', () => capitalAccount());
+
+  ipcMain.handle('capital:positions', () => capitalPositions());
+
+  ipcMain.handle('capital:open-position', (_e, spec = {}) => capitalOpenPosition({
+    epic: requireString(spec.epic, 'epic'),
+    direction: requireDirection(spec.direction),
+    size: requireSize(spec.size),
+    ...optionalLevels(spec),
+  }));
+
+  ipcMain.handle('capital:amend-position', (_e, { dealId, ...levels } = {}) => capitalAmendPosition(
+    requireString(dealId, 'dealId'),
+    /* A level given as null is an instruction to REMOVE it, so it has to survive the
+     * filter that drops the fields nobody mentioned — see `optionalLevels`. */
+    optionalLevels(levels, { keepNull: true }),
+  ));
+
+  ipcMain.handle('capital:close-position', (_e, dealId) => capitalClosePosition(requireString(dealId, 'dealId')));
+
+  ipcMain.handle('capital:working-orders', () => capitalWorkingOrders());
+
+  ipcMain.handle('capital:create-order', (_e, spec = {}) => capitalCreateOrder({
+    epic: requireString(spec.epic, 'epic'),
+    direction: requireDirection(spec.direction),
+    size: requireSize(spec.size),
+    type: requireOrderType(spec.type),
+    level: requireLevel(spec.level, 'level'),
+    ...optionalLevels(spec),
+  }));
+
+  ipcMain.handle('capital:amend-order', (_e, { dealId, level, ...levels } = {}) => capitalAmendOrder(
+    requireString(dealId, 'dealId'),
+    {
+      ...(level == null ? {} : { level: requireLevel(level, 'level') }),
+      ...optionalLevels(levels, { keepNull: true }),
+    },
+  ));
+
+  ipcMain.handle('capital:cancel-order', (_e, dealId) => capitalCancelOrder(requireString(dealId, 'dealId')));
+
+  /* ─── Broker credentials ─────────────────────────────────────────────
+   *
+   * The secret goes IN and never comes back out: `status` says whether one is
+   * stored and which account it names, and there is no channel that returns the
+   * key or the password. A screen that edits credentials does not need to read
+   * them, so nothing here can put them on a screen or in a log.
+   */
+
+  ipcMain.handle('capital:credentials-status', async () => {
+    const stored = await readPublic(credentialsDir(), 'capital');
+    return {
+      ...stored,
+      encryptionAvailable: encryptionAvailable(),
+      /* Whether a .env.local is currently supplying credentials — worth showing, because
+       * it explains a connection that works with nothing stored. */
+      envPresent: !!(process.env.CAPITAL_API_KEY && process.env.CAPITAL_IDENTIFIER && process.env.CAPITAL_PASSWORD),
+    };
+  });
+
+  /** Try credentials WITHOUT storing them, and answer with the accounts they reach. */
+  ipcMain.handle('capital:credentials-test', (_e, { apiKey, identifier, password, env } = {}) => capitalProbe({
+    apiKey: requireString(apiKey, 'apiKey'),
+    identifier: requireString(identifier, 'identifier'),
+    password: requireString(password, 'password'),
+    env: env === 'live' ? 'live' : 'demo',
+  }));
+
+  /**
+   * Store credentials and put them into effect.
+   *
+   * Tried before they are written: a key that does not work should be refused where somebody
+   * typed it, rather than found later by a chart that will not load. The accounts it reached
+   * come back so the screen can show what was actually connected to.
+   */
+  ipcMain.handle('capital:credentials-save', async (_e, { apiKey, identifier, password, env } = {}) => {
+    const creds = {
+      apiKey: requireString(apiKey, 'apiKey'),
+      identifier: requireString(identifier, 'identifier'),
+      password: requireString(password, 'password'),
+      env: env === 'live' ? 'live' : 'demo',
+    };
+    const accounts = await capitalProbe(creds);
+    await saveCredentials(credentialsDir(), 'capital', creds);
+    await applyStoredCapitalCredentials();
+    return { accounts, env: creds.env };
+  });
+
+  ipcMain.handle('capital:credentials-clear', async () => {
+    await clearCredentials(credentialsDir(), 'capital');
+    // Back to whatever the environment says, which may be nothing at all.
+    return applyStoredCapitalCredentials();
+  });
+
+  /** The two ledgers a finished trade's real cost has to be joined from. */
+  ipcMain.handle('capital:history', async (_e, { from, to } = {}) => {
+    const fromMs = Number(from);
+    const toMs = Number(to);
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || !(toMs > fromMs)) {
+      throw new Error('history needs a from/to window in epoch milliseconds');
+    }
+    const [transactions, activities] = await Promise.all([
+      capitalTransactions(fromMs, toMs),
+      capitalActivities(fromMs, toMs),
+    ]);
+    return { transactions, activities };
+  });
+
+  /* ─── The live trading journal ───────────────────────────────────────── */
+
+  ipcMain.handle('live:trades', () => loadLiveTrades(liveTradesDir()));
+
+  ipcMain.handle('live:append', (_e, trade) => appendLiveTrade(liveTradesDir(), requireLiveTrade(trade)));
+
+  ipcMain.handle('live:settle', (_e, { id, ...actual } = {}) => settleLiveTrade(
+    liveTradesDir(),
+    requireString(id, 'id'),
+    actual,
+  ));
+
+  ipcMain.handle('live:clear', () => clearLiveTrades(liveTradesDir()));
+}
+
+/**
+ * A journal entry that can be believed later.
+ *
+ * Checked here rather than trusted, because this is the record money is judged by: a NaN
+ * price or a missing side would sit in the file for months and turn up as a nonsense total
+ * in the analysis long after anyone could work out where it came from.
+ */
+function requireLiveTrade(trade) {
+  const t = trade ?? {};
+  const number = (value, name) => {
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) throw new Error(`${name} must be a number`);
+    return n;
+  };
+  if (t.side !== 'long' && t.side !== 'short') throw new Error('side must be long or short');
+  return {
+    id: requireString(t.id, 'id'),
+    symbol: requireString(t.symbol, 'symbol'),
+    side: t.side,
+    size: number(t.size, 'size'),
+    entryPrice: number(t.entryPrice, 'entryPrice'),
+    exitPrice: number(t.exitPrice, 'exitPrice'),
+    openedAt: number(t.openedAt, 'openedAt'),
+    closedAt: number(t.closedAt, 'closedAt'),
+    netPnl: number(t.netPnl, 'netPnl'),
+    fees: number(t.fees ?? 0, 'fees'),
+    /** Whether the exit figures are the venue's own or this app's best guess. */
+    estimated: t.estimated === true,
+    /** Which account it was taken on, so a demo run never mixes into a live total. */
+    live: t.live === true,
+    exitTag: typeof t.exitTag === 'string' ? t.exitTag : null,
+    /* What the result is denominated in. Kept with the number rather than assumed: a CFD
+     * account holds one currency and its instruments quote in others, and a total added up
+     * across two kinds of money is wrong in a way nobody can see. */
+    currency: typeof t.currency === 'string' && t.currency.trim() !== '' ? t.currency.trim().toUpperCase() : null,
+  };
+}
+
+/** `LIMIT` or `STOP` — which of the two a level means follows from the direction, and
+ *  that decision is the caller's; this only checks it named one of them. */
+function requireOrderType(value) {
+  const type = requireString(value, 'type').toUpperCase();
+  if (type !== 'LIMIT' && type !== 'STOP') throw new Error(`type must be LIMIT or STOP, not "${type}"`);
+  return type;
+}
+
+/** A required price level — where a resting order waits. */
+function requireLevel(value, name) {
+  const level = optionalLevel(value, name);
+  if (level === undefined) throw new Error(`${name} is required`);
+  return level;
+}
+
+/** `BUY` or `SELL` — the venue has no third answer, and no notion of a negative size. */
+function requireDirection(value) {
+  const direction = requireString(value, 'direction').toUpperCase();
+  if (direction !== 'BUY' && direction !== 'SELL') throw new Error(`direction must be BUY or SELL, not "${direction}"`);
+  return direction;
+}
+
+/** A deal size the venue could act on: positive, finite, and not absurd. */
+function requireSize(value) {
+  const size = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(size) || size <= 0) throw new Error('size must be a positive number');
+  // A ceiling only against a runaway caller — the venue's own maxDealSize is the real
+  // limit and it refuses anything over it per instrument.
+  if (size > 1e9) throw new Error('size is implausibly large');
+  return size;
+}
+
+/** A price level, or undefined when the caller did not name one. */
+function optionalLevel(value, name) {
+  if (value == null) return undefined;
+  const level = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(level) || level <= 0) throw new Error(`${name} must be a positive price`);
+  return level;
+}
+
+/**
+ * The protection fields, checked and with the ones nobody mentioned left out.
+ *
+ * `keepNull` is for an amendment, where the difference between "leave the stop alone" and
+ * "take the stop off" is the difference between an absent field and an explicit null — and
+ * losing it would silently keep a stop somebody asked to remove.
+ */
+function optionalLevels(spec, { keepNull = false } = {}) {
+  const out = {};
+  for (const name of ['stopLevel', 'profitLevel']) {
+    if (spec[name] === null && keepNull) out[name] = null;
+    else {
+      const level = optionalLevel(spec[name], name);
+      if (level !== undefined) out[name] = level;
+    }
+  }
+  if (typeof spec.guaranteedStop === 'boolean') out.guaranteedStop = spec.guaranteedStop;
+  if (typeof spec.trailingStop === 'boolean') out.trailingStop = spec.trailingStop;
+  return out;
 }

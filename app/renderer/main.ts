@@ -13,6 +13,8 @@ import type { VelaTheme } from '../../src/core/options';
 import { VelaWorkspace } from '../../src/workspace';
 import { BRAND } from './about/brand';
 import { mountAnalysisView, type AnalysisViewHandle } from './analysis/analysisView';
+import { mountBotView, type BotViewHandle } from './bot/botView';
+import { isBotContext } from './bot/botChart';
 import { mountBacktestView, type BacktestViewHandle } from './backtest/backtestView';
 import { mountStrategiesView, type StrategiesViewHandle } from './strategies/strategiesView';
 import { openDownloadDialog } from './data/downloadDialog';
@@ -28,6 +30,7 @@ import { mountAppTopbar, type AppTab } from './shell/appTopbar';
 import { paletteOf, type AppStyle, type AppThemeName } from './shell/themes';
 import { installTradeMenu } from './trading/tradeMode';
 import { installAlerts } from './alerts/installAlerts';
+import { installQuotes } from './quotes/installQuotes';
 
 /** Every market source the app can chart: the local archive, then the venues. */
 function providers() {
@@ -127,9 +130,8 @@ ensureUIHost(document.body, palette());
 // ── app top bar ──────────────────────────────────────────────────────────
 //
 // Above Vela's own chart topbar, not instead of it: the brand mark, the app's
-// top-level views as tabs, and (light/dark, window controls) on the right. Chart,
-// Replay, Backtest, Strategies and Analysis are real views already built below;
-// Bot is a placeholder root in index.html until it is.
+// top-level views as tabs, and (light/dark, window controls) on the right. Every
+// one of them is a real view built below.
 
 /** Only ONE root is ever visible — the tabs are mutually exclusive views. */
 function showOnly(root: HTMLElement): void {
@@ -184,6 +186,9 @@ function repaint(): void {
     workspace.setTheme(t);
     mountedReplayWs?.setTheme(t);
     ensureUIHost(document.body, t);
+    // The Trading Bot tab builds a chart of its own, which is wearing the old palette until
+    // it is told otherwise. Only if it has ever been opened — nothing is built before that.
+    botView?.setTheme(t);
     appTopbar.setTheme(currentTheme);
     /* Only if it has ever been opened: the Settings tab shows which theme and style are on,
      * and the switch it would be disagreeing with is one row above it on the same screen. */
@@ -242,7 +247,11 @@ async function selectTab(tab: AppTab): Promise<void> {
         return;
     }
     showOnly(botRoot);
-    appTopbar.setActiveTab(tab);
+    appTopbar.setActiveTab('bot');
+    /* Read on the way in, like the others. Unlike the others, what this screen shows may
+     * already be RUNNING — the bots are started at launch (below) and keep running with the
+     * tab shut, so this is the view catching up with them rather than the other way round. */
+    await bots().refresh();
 }
 
 // ── topbar actions ───────────────────────────────────────────────────────
@@ -261,13 +270,16 @@ registerIcon('midorii-replay', '<svg viewBox="0 0 16 16" width="1em" height="1em
  * chart is wired to. Off by default, and off is a real state: nothing about trading is
  * on the chart until a broker is picked, and Just Watching takes it all back off.
  *
- * Gated off the replay chart, which has a session and a transport of its own. */
+ * Gated off the replay chart, which has a session and a transport of its own — and off the
+ * Trading Bot tab's, which is already being traded by a strategy. A second account wired to
+ * that one would put a hand-placed trade in the same ledger as an automated one, where
+ * neither could be told from the other afterwards. */
 const trading = installTradeMenu({
     workspace,
     stack: chartStack,
     main: chartMain,
     theme: palette,
-    when: (ctx) => !isReplayContext(ctx),
+    when: (ctx) => !isReplayContext(ctx) && !isBotContext(ctx),
 });
 (window as unknown as { __trading: typeof trading }).__trading = trading;
 
@@ -276,6 +288,11 @@ const trading = installTradeMenu({
  * the OS even while the app is minimized. Its own provider instances (never the
  * workspace's) — it watches symbols independently of whichever one is on screen. */
 installAlerts(workspace, providers());
+
+/* The two-sided price, for venues that quote one. The candles are drawn from the bid, so
+ * on a CFD market the chart alone never says what a buy costs — this does, and says what
+ * the gap between the sides is costing. Absent on markets that quote a single price. */
+installQuotes(workspace);
 
 /* The Analysis tab, built the first time it is opened rather than at startup: it reads
  * the run shelf and the paper account off disk, and neither of those is worth a round
@@ -305,6 +322,25 @@ function strategies(): StrategiesViewHandle {
     return strategiesView;
 }
 
+/* The Trading Bot tab.
+ *
+ * Built on first open like the others, and unlike the others that is only about the SCREEN:
+ * the bots themselves are started at launch (see the resume at the foot of this file), so a
+ * bot runs whether or not anybody has ever opened the tab it is drawn on. Which is the whole
+ * point of a bot, and the reason its engine is reachable through the handle rather than
+ * living inside the view. */
+let botView: BotViewHandle | null = null;
+function bots(): BotViewHandle {
+    botView ??= mountBotView(botRoot, {
+        providers: providers(),
+        theme: palette,
+        // The bot screen has no toast host of its own — it is not a chart. The live chart's
+        // is the app's, and it is on screen whichever tab is open.
+        notify: (message, kind) => workspace.toast(message, kind === 'success' ? 'success' : kind),
+    });
+    return botView;
+}
+
 /* The Settings tab — what the app is, as opposed to what it has done. Built on first open
  * like the others; until somebody asks for it there is nothing on it worth reading, and the
  * screens it edits for (the chart, the paper account) are already wired without it. */
@@ -328,7 +364,7 @@ registerWidgetAction({
     iconOnly: true,
     label: 'Download market data',
     icon: 'midorii-download',
-    when: (ctx) => !isReplayContext(ctx),
+    when: (ctx) => !isReplayContext(ctx) && !isBotContext(ctx),
     run: (ctx) => {
         void openDownloadDialog(document.body)
             .then((symbol) => {
@@ -346,7 +382,7 @@ registerWidgetAction({
     iconOnly: true,
     label: 'Runs',
     icon: 'midorii-runs',
-    when: (ctx) => !isReplayContext(ctx),
+    when: (ctx) => !isReplayContext(ctx) && !isBotContext(ctx),
     run: (ctx) => void openRunsDialog(document.body).catch((err: unknown) => (
         ctx.toast(err instanceof Error ? err.message : String(err), 'error')
     )),
@@ -360,7 +396,7 @@ registerWidgetAction({
     iconOnly: true,
     label: 'Replay',
     icon: 'midorii-replay',
-    when: (ctx) => !isReplayContext(ctx),
+    when: (ctx) => !isReplayContext(ctx) && !isBotContext(ctx),
     // Routed through the same tab switch as the app topbar's own Replay tab, so
     // either entry point keeps it in sync with which one is highlighted.
     run: (ctx) => void selectTab('replay').catch((err: unknown) => (
@@ -431,3 +467,22 @@ if (startupTab !== 'chart') {
         console.error('[midorii] could not open the view this app was set to start on', err)
     ));
 }
+
+// ── the bots this machine was left running ───────────────────────────────
+//
+// Started without the tab being opened, which is the whole point of a bot: it keeps running
+// while somebody looks at the chart, and it comes back when the app does. Paper bots only —
+// a real account is armed by a person each time, the same rule the chart's Trade menu
+// follows (see bot/BotEngine.ts's `resume`).
+//
+// The view is built to do it, because the engine lives on the handle; nothing is PAINTED
+// until the tab is opened, so this costs a hidden DOM subtree and the feeds the bots
+// themselves need.
+void bots().refresh()
+    .then(() => botView!.engine.resume())
+    .catch((err: unknown) => console.error('[midorii] could not resume the trading bots', err));
+
+/* A window closing mid-bar must not leave a subscription behind. Nothing is CLOSED — a bot
+ * that was running is still marked enabled, and its positions keep the stop and target that
+ * went out with them. */
+window.addEventListener('beforeunload', () => botView?.engine.stopAll());

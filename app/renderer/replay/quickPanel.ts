@@ -1,4 +1,5 @@
 import { injectStyles } from '../../../src/ui';
+import { makeOverlayCard } from './overlayCards';
 import { emptyQuick, quickOrder, quickPlan, stepSize } from './quickTrade';
 import type { QuickDraft } from './quickTrade';
 import type { OrderSpec } from '../../../shared/engine/broker.js';
@@ -20,8 +21,16 @@ const STYLE_ID = 'midorii-quick';
 const CSS = `
 .midorii-quick {
     position: absolute;
+    /* Same gutter as the account card, and the same room for the restore button, so the two
+       share a right edge until one of them is dragged off it. */
+    right: calc(var(--vela-scale-gutter, 0px) + 10px + var(--midorii-overlay-inset, 0px));
     z-index: 4;
     box-sizing: border-box;
+    /* The account card's own width, worked out rather than measured: four 62px columns, three
+       20px gaps and 14px of padding either side. The two are dragged separately now, so this
+       is a starting resemblance and not a promise — a card whose figures grow past it is
+       simply the wider of the two. */
+    width: 336px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -162,8 +171,8 @@ function box(doc: Document, className: string, placeholder: string, onInput: (va
 }
 
 /**
- * Mount the panel over a chart cell. The caller owns it afterwards — `destroy()` releases the
- * observer that keeps it under the account card, and `el.remove()` takes it off.
+ * Mount the panel over a chart cell. The caller owns it afterwards — `destroy()` releases what
+ * keeps it under the account card and what makes it draggable, and `el.remove()` takes it off.
  */
 export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): QuickPanel {
     const doc = cell.ownerDocument;
@@ -173,8 +182,6 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
 
     const el = doc.createElement('div');
     el.className = 'midorii-quick';
-    // Same gutter as the account card, so the two share a right edge at any axis width.
-    el.style.right = 'calc(var(--vela-scale-gutter, 0px) + 10px)';
     el.style.top = FALLBACK_TOP;
 
     const row = doc.createElement('div');
@@ -233,21 +240,24 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
     el.append(row, brackets, why);
     cell.appendChild(el);
 
-    /* Under the card, whatever height the card turns out to be — it is built from the same
-     * theme this panel is, and a hard-coded offset would drift the moment either changed. The
-     * width comes from the card as well: the two already share a right edge, and equal widths
-     * make them read as one stack rather than two overlays that happen to be near each other. */
+    /* Where it starts: under the card, whatever height the card turns out to be — it is built
+     * from the same theme this panel is, and a hard-coded offset would drift the moment either
+     * changed. Only where it STARTS, though. Both are dragged independently, and one that has
+     * been dropped somewhere holds its own pixels; `reflow` is what decides which of the two
+     * this is, so a moved panel does not jump back under a card that changed height. */
     const anchor = opts.anchor ?? null;
     const place = (): void => {
-        if (!anchor) return;
+        // No card, or a card that is switched off: there is nothing to sit under, and the
+        // panel takes the corner the card would have had.
+        if (!anchor || anchor.offsetParent === null) {
+            el.style.top = FALLBACK_TOP;
+            return;
+        }
         el.style.top = `${anchor.offsetTop + anchor.offsetHeight + GAP}px`;
-        el.style.width = `${anchor.offsetWidth}px`;
     };
-    const observer = anchor && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
-    if (anchor) {
-        observer?.observe(anchor);
-        place();
-    }
+    const card = makeOverlayCard(cell, el, { id: 'quick', place });
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => card.reflow()) : null;
+    if (anchor) observer?.observe(anchor);
 
     function refresh(): void {
         const plan = quickPlan(draft, opts.price());
@@ -278,6 +288,7 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
         refresh,
         destroy(): void {
             observer?.disconnect();
+            card.destroy();
             el.remove();
         },
     };

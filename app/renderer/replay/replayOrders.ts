@@ -101,7 +101,7 @@ export function wireOrderEntry(opts: OrderEntryOptions): () => void {
             const risk = riskNow();
             const sizeEntry = sizingEntry(spec, controller.price());
             const size = positionSize(
-                controller.broker.equity,
+                controller.equity(),
                 sizeEntry,
                 sizingStop(spec, sizeEntry),
                 risk.mode,

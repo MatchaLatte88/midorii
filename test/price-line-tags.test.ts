@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     ACTION_SIZE, GRAB_TOLERANCE, TAG_HEIGHT, TAG_INSET, TAG_PAD,
-    inRect, priceLineActionRect, priceLineHitAt, priceLineTagRect,
+    inRect, priceLineActionRect, priceLineHitAt, priceLineTagRect, declutterAxisTags,
 } from '../src/renderers/native/chrome/priceLineTags';
 import { levelAllowed, levelFromDrop } from '../app/renderer/replay/replayLevels';
 import type { PriceLine } from '../src/core/model/scene';
@@ -131,5 +131,64 @@ describe('what a drag off the entry draws', () => {
                 expect(levelAllowed(level, side, 100, price)).toBe(true);
             }
         }
+    });
+});
+
+describe('declutterAxisTags', () => {
+    /** The smallest gap two settled chips may have between their centres. */
+    const H = 16;
+    /** Every neighbouring pair is at least a chip apart — the whole point of the exercise. */
+    const gaps = (ys: number[]): number[] => {
+        const sorted = [...ys].sort((a, b) => a - b);
+        return sorted.slice(1).map((y, i) => y - sorted[i]!);
+    };
+
+    it('leaves chips that already clear each other exactly where they are', () => {
+        expect(declutterAxisTags([100, 200, 300], H)).toEqual([100, 200, 300]);
+        // Touching but not overlapping is not a collision.
+        expect(declutterAxisTags([100, 116], H)).toEqual([100, 116]);
+    });
+
+    it('splits a colliding pair evenly — neither chip is the one that gives way', () => {
+        // A bid and its ask, four pixels apart: each moves six, and the pair stays centred
+        // on where it was.
+        expect(declutterAxisTags([100, 104], H)).toEqual([94, 110]);
+        const mid = (ys: number[]): number => (Math.min(...ys) + Math.max(...ys)) / 2;
+        expect(mid(declutterAxisTags([100, 104], H))).toBe(mid([100, 104]));
+    });
+
+    it('answers in the caller\'s order, not in top-down order', () => {
+        // The ask arrives first and sits ABOVE the bid; each answer must come back against
+        // the chip that asked for it, or the two prices are drawn on each other's lines.
+        expect(declutterAxisTags([104, 100], H)).toEqual([110, 94]);
+    });
+
+    it('collapses a run that only overlaps once the run above has moved', () => {
+        // The pair at 20/25 centres on 22.5 and spreads to 14.5/30.5 — which then collides
+        // with the chip at 0. Resolving only the pair just joined leaves that overlap.
+        const out = declutterAxisTags([0, 20, 25], H);
+        expect(Math.min(...gaps(out))).toBeGreaterThanOrEqual(H);
+    });
+
+    it('separates a dense run of levels', () => {
+        const out = declutterAxisTags([200, 202, 204, 206, 208], H);
+        expect(Math.min(...gaps(out))).toBeGreaterThanOrEqual(H);
+        // Still centred on the group it came from: five chips around 204.
+        expect((Math.min(...out) + Math.max(...out)) / 2).toBe(204);
+    });
+
+    it('keeps chips inside the pane', () => {
+        // Two chips at the very top of the scale cannot spread upward past it.
+        const out = declutterAxisTags([2, 4], H, 8, 400);
+        expect(Math.min(...out)).toBeGreaterThanOrEqual(8);
+        expect(Math.min(...gaps(out))).toBeGreaterThanOrEqual(H);
+
+        const low = declutterAxisTags([396, 398], H, 8, 400);
+        expect(Math.max(...low)).toBeLessThanOrEqual(400);
+    });
+
+    it('has nothing to do for a single chip, or none', () => {
+        expect(declutterAxisTags([100], H)).toEqual([100]);
+        expect(declutterAxisTags([], H)).toEqual([]);
     });
 });

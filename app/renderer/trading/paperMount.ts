@@ -11,7 +11,8 @@ import { wireOrderEntry } from '../replay/replayOrders';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { PaperController } from './PaperController';
 import { catchUpLabel, fetchGapBars } from './paperCatchUp';
-import { riskOf, type PaperSettings } from './paperSettings';
+import { bracketsOf, riskOf, type PaperSettings } from './paperSettings';
+import { tickSizeOf } from '../alerts/symbolTick';
 import type { ThemeName, VelaTheme } from '../../../src';
 
 /**
@@ -44,6 +45,15 @@ export interface PaperMountOptions {
     controller: PaperController;
     /** Read fresh at every order — the settings dialog changes them mid-session. */
     settings: () => PaperSettings;
+    /**
+     * Put edited settings back where they came from.
+     *
+     * The ticket's quick sizes are settings a person edits from the ticket rather than from
+     * the dialog — they are the sizes this account is traded in, and the place that question
+     * comes up is while sizing a trade. They still belong in the one settings record, so
+     * they go back through the one door that writes it.
+     */
+    onSettings: (next: PaperSettings) => void;
     /** The app's theme, for the one panel that sits OUTSIDE the chart's own root. */
     theme: ThemeName | VelaTheme;
 }
@@ -103,6 +113,14 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
         risk: riskOf(opts.settings()),
         // What this account has already done, in the panel's own History tab.
         history: () => controller.history(),
+        /* All three read the settings fresh rather than a copy taken at wiring time: they are
+         * changed from the dialog while the panel is on screen, and a ticket bracketed by
+         * last week's numbers is worse than one bracketed by none. */
+        brackets: () => bracketsOf(opts.settings()),
+        // Warm from the chart's own metadata — see alerts/symbolTick.ts.
+        tick: () => tickSizeOf(controller.symbol) ?? null,
+        quickSizes: () => opts.settings().quickSizes,
+        onQuickSizes: (next) => opts.onSettings({ ...opts.settings(), quickSizes: next }),
     });
     /* Its own kit host: the ticket is a sibling of the chart rather than a child, so the
      * theme variables the workspace writes on its own root do not reach it. */
@@ -131,7 +149,13 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
      * which would mean Vela's shell had changed shape — nothing is mounted, since a
      * card floating in the wrong corner is worse than no card. */
     const cell = ws.root.querySelector<HTMLElement>('.vela-cell');
-    const strip = cell ? mountAccountStrip(cell) : null;
+    // The words the Trade menu uses for this broker, so the card and the menu agree.
+    const strip = cell
+        ? mountAccountStrip(cell, {
+            broker: 'Paper trading',
+            brokerHint: 'Real prices, an account of this app\'s own. Nothing here reaches a venue.',
+        })
+        : null;
     const quick = cell
         ? mountQuickPanel(cell, {
             price: () => controller.price(),
@@ -221,6 +245,7 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
             for (const dispose of off.splice(0)) dispose();
             controller.onAccountChange = null;
             quick?.destroy();
+            strip?.destroy();
             strip?.el.remove();
             sidebar.el.remove();
             dock.el.remove();

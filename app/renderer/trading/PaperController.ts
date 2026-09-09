@@ -8,7 +8,7 @@ import { accountFigures, type AccountFigures } from '../replay/accountFigures';
 import { tradeBook, tradeHistory, type ClosedTrade, type HistoryRow, type TradeBook } from '../replay/tradeBook';
 import { STATE_INPUT } from '../replay/replayIndicator';
 import { costsOf, positionModeOf, type PaperSettings } from './paperSettings';
-import type { TradingController } from './TradingController';
+import type { ControlledPosition, TradingController } from './TradingController';
 import { visualState } from './visualState';
 
 /**
@@ -87,6 +87,16 @@ export class PaperController implements TradingController {
     /** The account. */
     get broker(): Broker {
         return this.session.broker;
+    }
+
+    /** What the account is worth. Its own computation — this account IS the engine. */
+    equity(): number {
+        return this.session.broker.equity;
+    }
+
+    /** What is open right now, for the chart's own gestures. */
+    positions(): readonly ControlledPosition[] {
+        return this.session.broker.positions;
     }
 
     /** The newest price the account has been marked at — 0 before the feed has spoken. */
@@ -266,6 +276,14 @@ export class PaperController implements TradingController {
     flatten(): void {
         this.guard();
         this.session.flatten();
+        this.settled();
+    }
+
+    /** Close the open position at market, tagging the exit with why. What a strategy's own
+     *  `ctx.close()` reaches when this account is being traded by a bot. */
+    close(tag?: string): void {
+        this.guard();
+        this.session.close(tag);
         this.settled();
     }
 

@@ -4,7 +4,7 @@ import type { DetectionCache } from './detection';
 import { INTRADAY_MOMENTUM_STRATEGY } from './intradayMomentum';
 import { OPENING_RANGE_STRATEGY } from './openingRange';
 import { SILVER_BULLET_STRATEGY } from './silverBullet';
-import type { StrategyInfo, StrategyParams, StrategyParamValue, StrategySpec } from './types';
+import type { StrategyInfo, StrategyParam, StrategyParams, StrategyParamValue, StrategySpec } from './types';
 
 /**
  * The strategies this app can run, and the one way of turning settings into a runnable one.
@@ -45,37 +45,58 @@ export function strategyCatalog(): StrategyInfo[] {
  * it later — a run whose settings were quietly corrected reports a result nobody asked for.
  */
 export function resolveStrategyParams(id: string, params: Readonly<Record<string, unknown>> = {}): StrategyParams {
-    const spec = specFor(id);
+    return resolveParams(specFor(id).params, params, id);
+}
+
+/**
+ * The same validation, against a schema handed in rather than looked up by strategy id.
+ *
+ * What {@link resolveStrategyParams} is written on top of, and what the bot's live guards use
+ * — those are a schema of the same shape that belongs to no strategy (see
+ * `strategies/liveGuards.ts`). One implementation rather than two, because a second copy is
+ * a second set of bounds to drift out of step with the first.
+ *
+ * `label` only ever reaches an error message; it is what a refused value is named after.
+ */
+export function resolveParams(
+    schema: readonly StrategyParam[],
+    params: Readonly<Record<string, unknown>> = {},
+    label = 'params',
+): StrategyParams {
     const merged: StrategyParams = {};
 
-    for (const p of spec.params) {
+    for (const p of schema) {
         const given = params[p.key];
         if (given === undefined) {
             merged[p.key] = p.default;
             continue;
         }
 
-        if (p.type === 'number') {
+        if (p.type === 'number' || p.type === 'time') {
             const n = Number(given);
-            if (!Number.isFinite(n)) throw new Error(`${id}.${p.key}: "${String(given)}" is not a number`);
-            if (p.min !== undefined && n < p.min) throw new Error(`${id}.${p.key}: ${n} is below ${p.min}`);
-            if (p.max !== undefined && n > p.max) throw new Error(`${id}.${p.key}: ${n} is above ${p.max}`);
-            merged[p.key] = n;
+            if (!Number.isFinite(n)) throw new Error(`${label}.${p.key}: "${String(given)}" is not a number`);
+            /* A clock time has fixed bounds of its own, whatever the field declares: it is
+             * minutes since midnight, and there is no such thing as 25:00. */
+            const min = p.type === 'time' ? 0 : p.min;
+            const max = p.type === 'time' ? 1439 : p.max;
+            if (min !== undefined && n < min) throw new Error(`${label}.${p.key}: ${n} is below ${min}`);
+            if (max !== undefined && n > max) throw new Error(`${label}.${p.key}: ${n} is above ${max}`);
+            merged[p.key] = p.type === 'time' ? Math.round(n) : n;
         } else if (p.type === 'multi') {
-            if (!Array.isArray(given)) throw new Error(`${id}.${p.key}: expected a list, got ${typeof given}`);
+            if (!Array.isArray(given)) throw new Error(`${label}.${p.key}: expected a list, got ${typeof given}`);
             for (const v of given) {
                 if (!p.options?.some((o) => o.value === v)) {
-                    throw new Error(`${id}.${p.key}: "${String(v)}" is not one of ${optionList(p.options)}`);
+                    throw new Error(`${label}.${p.key}: "${String(v)}" is not one of ${optionList(p.options)}`);
                 }
             }
             merged[p.key] = [...given] as readonly string[];
         } else if (p.type === 'select') {
             if (!p.options?.some((o) => o.value === given)) {
-                throw new Error(`${id}.${p.key}: "${String(given)}" is not one of ${optionList(p.options)}`);
+                throw new Error(`${label}.${p.key}: "${String(given)}" is not one of ${optionList(p.options)}`);
             }
             merged[p.key] = given as string;
         } else if (p.type === 'bool') {
-            if (typeof given !== 'boolean') throw new Error(`${id}.${p.key}: expected true or false`);
+            if (typeof given !== 'boolean') throw new Error(`${label}.${p.key}: expected true or false`);
             merged[p.key] = given;
         } else {
             merged[p.key] = given as StrategyParamValue;
@@ -123,6 +144,7 @@ function describeValue(value: unknown, param: StrategySpec['params'][number] | u
     if (param?.type === 'select') {
         return param.options?.find((o) => o.value === value)?.label ?? String(value);
     }
+    if (param?.type === 'time' && typeof value === 'number') return formatClock(value);
     return String(value);
 }
 
@@ -158,6 +180,22 @@ export function describeParams(id: string, params: Readonly<Record<string, unkno
  *  every combination then detects for itself, which is correct and slow. */
 export function detectionKeysOf(id: string): readonly string[] {
     return specFor(id).detectionKeys ?? [];
+}
+
+/** Minutes since midnight as the clock reads it — `990` is `16:30`. */
+export function formatClock(minutes: number): string {
+    const total = Math.max(0, Math.min(1439, Math.round(minutes)));
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/** The reverse, for a control that hands back what a person typed. Null when it is not a time. */
+export function parseClock(text: string): number | null {
+    const match = /^(\d{1,2}):(\d{2})$/.exec(text.trim());
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (hours > 23 || minutes > 59) return null;
+    return hours * 60 + minutes;
 }
 
 export { RISK_PARAM_KEYS } from './types';

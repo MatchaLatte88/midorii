@@ -3,6 +3,7 @@ import { buildFieldControl } from '../../../src/ui';
 import type { AlertDialog } from './AlertDialog';
 import type { AlertStore } from './AlertStore';
 import type { PriceAlert } from './alertTypes';
+import { formatPrice } from '../format';
 
 const CONDITION_LABEL: Record<PriceAlert['condition'], string> = {
     crossing: 'Crossing',
@@ -25,7 +26,7 @@ function row(alert: PriceAlert, store: AlertStore, dialog: AlertDialog): HTMLEle
     info.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;';
     const main = document.createElement('div');
     main.style.cssText = 'font-size:12px;color:var(--vela-fg-bright);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-    main.textContent = `${alert.symbol} @ ${alert.price}`;
+    main.textContent = `${alert.symbol} @ ${formatPrice(alert.price)}`;
     const sub = document.createElement('div');
     sub.style.cssText = 'font-size:11px;color:var(--vela-fg-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
     sub.textContent = alert.label ? `${CONDITION_LABEL[alert.condition]} · ${alert.label}` : CONDITION_LABEL[alert.condition];

@@ -123,6 +123,24 @@ contextBridge.exposeInMainWorld('midori', {
     save: (alerts) => ipcRenderer.invoke('alerts:save', alerts),
   },
 
+  /* Trading bots — their definitions, round-tripped whole like the alerts. A bot's live
+     state is not stored: it is rebuilt from the market's own history when the bot starts. */
+  bots: {
+    load: () => ipcRenderer.invoke('bots:load'),
+    save: (bots) => ipcRenderer.invoke('bots:save', bots),
+
+    /* Each bot's own paper account, keyed by the bot. Its own namespace rather than
+       `paper`, which holds the one account the Chart tab trades — a bot never shares that,
+       so hand-placed trades and automated ones are never in one ledger. */
+    account: {
+      load: (id) => ipcRenderer.invoke('botAccount:load', id),
+      save: (id, account) => ipcRenderer.invoke('botAccount:save', id, account),
+      clear: (id) => ipcRenderer.invoke('botAccount:clear', id),
+      /** Remove accounts whose bot no longer exists. */
+      sweep: (keep) => ipcRenderer.invoke('botAccount:sweep', keep),
+    },
+  },
+
   /* Finished runs — every session that was played to the end, and in time
    * every backtest, on one shelf. Listing hands back summaries; `load` opens
    * the one being looked at, with its trades and equity curve. */
@@ -133,10 +151,29 @@ contextBridge.exposeInMainWorld('midori', {
     annotate: (id, note) => ipcRenderer.invoke('runs:annotate', id, note),
   },
 
+  /* The live trading journal — every trade taken on a real account, kept by Midorii
+     itself because the venue serves at most a day of history per request and loses it
+     entirely with the account. */
+  live: {
+    trades: () => ipcRenderer.invoke('live:trades'),
+    append: (trade) => ipcRenderer.invoke('live:append', trade),
+    settle: (patch) => ipcRenderer.invoke('live:settle', patch),
+    clear: () => ipcRenderer.invoke('live:clear'),
+  },
+
   /** Capital.com forex/CFD data — the session (login, keepalive, the WebSocket)
    *  lives in the main process; see app/renderer/providers/CapitalProvider.ts. */
   capital: {
     configured: () => ipcRenderer.invoke('capital:configured'),
+    /* Credential management. The secret goes IN and never comes back out — there is
+       deliberately no channel that returns the key or the password. */
+    credentials: {
+      status: () => ipcRenderer.invoke('capital:credentials-status'),
+      test: (creds) => ipcRenderer.invoke('capital:credentials-test', creds),
+      save: (creds) => ipcRenderer.invoke('capital:credentials-save', creds),
+      clear: () => ipcRenderer.invoke('capital:credentials-clear'),
+    },
+    environment: () => ipcRenderer.invoke('capital:environment'),
     markets: (searchTerm) => ipcRenderer.invoke('capital:markets', searchTerm),
     marketInfo: (epic) => ipcRenderer.invoke('capital:market-info', epic),
     prices: (query) => ipcRenderer.invoke('capital:prices', query),
@@ -148,6 +185,26 @@ contextBridge.exposeInMainWorld('midori', {
       const listener = (_event, payload) => handler(payload);
       ipcRenderer.on('capital:ohlc', listener);
       return () => ipcRenderer.off('capital:ohlc', listener);
+    },
+    /* Trading. Each of these resolves with what the venue CONFIRMED, not with the
+     * receipt it gave for the instruction — see app/electron/data/capital.js. */
+    account: () => ipcRenderer.invoke('capital:account'),
+    positions: () => ipcRenderer.invoke('capital:positions'),
+    openPosition: (spec) => ipcRenderer.invoke('capital:open-position', spec),
+    amendPosition: (spec) => ipcRenderer.invoke('capital:amend-position', spec),
+    closePosition: (dealId) => ipcRenderer.invoke('capital:close-position', dealId),
+    workingOrders: () => ipcRenderer.invoke('capital:working-orders'),
+    createOrder: (spec) => ipcRenderer.invoke('capital:create-order', spec),
+    amendOrder: (spec) => ipcRenderer.invoke('capital:amend-order', spec),
+    cancelOrder: (dealId) => ipcRenderer.invoke('capital:cancel-order', dealId),
+    /** The two ledgers a finished trade's real cost is joined from. */
+    history: (window) => ipcRenderer.invoke('capital:history', window),
+    subscribeQuotes: (query) => ipcRenderer.invoke('capital:subscribe-quotes', query),
+    unsubscribeQuotes: (subscriptionId) => ipcRenderer.invoke('capital:unsubscribe-quotes', subscriptionId),
+    onQuote: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('capital:quote', listener);
+      return () => ipcRenderer.off('capital:quote', listener);
     },
   },
 });

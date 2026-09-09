@@ -173,7 +173,13 @@ function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayCont
  */
 function showAccount(ws: VelaWorkspace, stack: HTMLElement, controller: ReplayController, sidebar: TradeSidebar): void {
     const cell = ws.root.querySelector<HTMLElement>('.vela-cell');
-    const strip = cell ? mountAccountStrip(cell) : null;
+    const strip = cell
+        ? mountAccountStrip(cell, {
+            broker: 'Replay',
+            brokerHint: 'A session played back bar by bar against this app\'s own engine — '
+                + 'separate from the paper account, and from any venue.',
+        })
+        : null;
 
     // Buy/Sell on the chart itself, directly under the card — market orders, nothing else.
     const quick = cell

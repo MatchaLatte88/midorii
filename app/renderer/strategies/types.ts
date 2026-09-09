@@ -29,7 +29,15 @@ export type StrategyParamValue = number | string | boolean | readonly string[];
 /** The values of a whole schema, keyed by field. */
 export type StrategyParams = Record<string, StrategyParamValue>;
 
-export type StrategyParamType = 'number' | 'select' | 'multi' | 'bool';
+/**
+ * What kind of control a field asks for.
+ *
+ * `time` is a number underneath — minutes since midnight UTC, 0 to 1439 — and is its own
+ * type only because a clock time typed as a raw minute count is a field nobody fills in
+ * correctly. It exists for the live guards (see liveGuards.ts), where "stop trading at
+ * 16:30" is a condition that has to be written the way it is read.
+ */
+export type StrategyParamType = 'number' | 'select' | 'multi' | 'bool' | 'time';
 
 export interface StrategyParamOption {
     value: string;

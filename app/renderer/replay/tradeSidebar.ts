@@ -1,8 +1,8 @@
 import { NumberInput, injectStyles, overlayScrollbarCss } from '../../../src/ui';
-import { formatMoney, formatPercent, formatR, formatSignedMoney, formatSize, formatWhen } from '../format';
+import { formatMoney, formatPercent, formatPrice, formatR, formatSignedMoney, formatSize, formatWhen } from '../format';
 import { equityPath } from '../runs/runStats';
-import { emptyTicket, ticketOrder, ticketPlan, ticketRefusal } from './orderTicket';
-import type { TicketAccount, TicketDraft } from './orderTicket';
+import { bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPlan, ticketRefusal } from './orderTicket';
+import type { BracketSettings, TicketAccount, TicketDraft } from './orderTicket';
 import { DEFAULT_RISK } from './replayOrders';
 import type { RiskSettings } from './replayOrders';
 import type { HistoryRow } from './tradeBook';
@@ -104,127 +104,307 @@ const CSS = `
 .midorii-side-body { flex: 1 1 auto; overflow-y: auto; padding: 10px 12px 6px; }
 ${overlayScrollbarCss('.midorii-side-body')}
 
-.midorii-side-sect {
-    margin: 14px 0 7px;
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--vela-fg-muted);
-}
-.midorii-side-sect:first-child { margin-top: 0; }
-
-.midorii-side-row {
+/* ── the two-sided price, and which way this trade goes ──────────────────
+   Not a readout: pressing a side is HOW the direction is chosen. The price you are trading
+   against and the direction you are trading in are then one control, and the panel says
+   which way it is pointed before it says anything else. */
+.midorii-side-quote {
+    flex: 0 0 auto;
+    position: relative;
     display: grid;
-    grid-template-columns: 74px 1fr;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 7px;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--vela-border-faint);
+    border-bottom: 1px solid var(--vela-border-faint);
 }
-.midorii-side-row > span:first-child { color: var(--vela-fg-muted); }
-.midorii-side-row[data-hint] { margin-bottom: 2px; }
-/* A display set by a class beats the user agent's own rule for [hidden], so a row switched
-   off with el.hidden would otherwise stay on screen. This is what actually hides it. */
-.midorii-side [hidden] { display: none; }
-.midorii-side-hint {
-    margin: 0 0 7px;
-    font-size: 10px;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-    color: var(--vela-fg-faint);
-    min-height: 13px;
-}
-
-.midorii-side-seg {
+.midorii-side-quote button {
+    all: unset;
+    box-sizing: border-box;
     display: flex;
+    flex-direction: column;
     gap: 2px;
-    padding: 2px;
-    border-radius: var(--vela-radius-sm);
+    padding: 9px 12px 10px;
     background: var(--vela-surface-sunken);
+    cursor: pointer;
 }
-.midorii-side-seg button {
+.midorii-side-quote button[data-side='sell'] { align-items: flex-start; }
+.midorii-side-quote button[data-side='buy'] { align-items: flex-end; }
+.midorii-side-quote small { font-size: 11px; font-weight: 600; color: var(--vela-fg-muted); }
+.midorii-side-quote b {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--vela-fg);
+}
+.midorii-side-quote button:hover { background: var(--vela-hover); }
+.midorii-side-quote button[data-on][data-side='sell'] { background: color-mix(in srgb, var(--vela-down) 22%, var(--vela-surface-sunken)); }
+.midorii-side-quote button[data-on][data-side='buy'] { background: color-mix(in srgb, var(--vela-up) 22%, var(--vela-surface-sunken)); }
+.midorii-side-quote button[data-on][data-side='sell'] small,
+.midorii-side-quote button[data-on][data-side='sell'] b { color: var(--vela-down); }
+.midorii-side-quote button[data-on][data-side='buy'] small,
+.midorii-side-quote button[data-on][data-side='buy'] b { color: var(--vela-up); }
+/* What crossing costs, drawn in the gap it is the gap of. Absent where the venue quotes one
+   price — an account with no two-sided feed has no spread to name, and a zero would claim it
+   is free rather than unknown. */
+.midorii-side-spread {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 2px 6px;
+    border-radius: var(--vela-radius-sm);
+    background: var(--vela-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+    color: var(--vela-fg-muted);
+    pointer-events: none;
+}
+.midorii-side-spread:empty { display: none; }
+
+/* The order type, as a strip rather than a control: it is chosen first, and it decides what
+   the rest of the panel asks for. */
+.midorii-side-types { flex: 0 0 auto; display: flex; border-bottom: 1px solid var(--vela-border-faint); }
+.midorii-side-types button {
     all: unset;
     flex: 1 1 0;
-    padding: 5px 0;
-    border-radius: calc(var(--vela-radius-sm) - 1px);
+    padding: 9px 0 8px;
+    box-shadow: inset 0 -2px 0 transparent;
     text-align: center;
     font-size: 11px;
     font-weight: 600;
     color: var(--vela-fg-muted);
     cursor: pointer;
 }
-.midorii-side-seg button:hover { color: var(--vela-fg-bright); }
-.midorii-side-seg button[data-on] {
-    background: var(--vela-surface-overlay);
-    color: var(--vela-fg-bright);
-    box-shadow: var(--vela-shadow);
-}
+.midorii-side-types button:hover { color: var(--vela-fg-bright); }
+.midorii-side-types button[data-on] { color: var(--vela-fg-bright); box-shadow: inset 0 -2px 0 var(--vela-accent); }
 
-.midorii-side-price {
+/* A section that can be shut. What is under Extra settings is decided once a session; a panel
+   that keeps all of it open spends its height on questions nobody is asking.
+
+   The air above a section belongs to the section, not to its heading: the heading is always
+   the first thing inside its own wrapper, so a margin there would be collapsed away by the
+   very :first-child rule meant to keep the top of the panel tight. */
+.midorii-side-group { margin-top: 16px; }
+.midorii-side-group:first-child { margin-top: 0; }
+.midorii-side-sect {
+    all: unset;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     width: 100%;
-    padding: 5px 8px;
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--vela-fg-bright);
+    cursor: pointer;
+}
+.midorii-side-sect em {
+    font-style: normal;
+    font-size: 11px;
+    color: var(--vela-fg-muted);
+    transition: transform var(--vela-dur-fast) var(--vela-ease);
+}
+.midorii-side-sect[data-shut] em { transform: rotate(-90deg); }
+
+/* The caption over a field, with room on the right for the switch that turns it off. */
+.midorii-side-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 20px;
+    margin: 12px 0 5px;
+    font-size: 11px;
+    color: var(--vela-fg-muted);
+}
+.midorii-side-label:first-child { margin-top: 0; }
+.midorii-side-pick {
+    all: unset;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--vela-fg-muted);
+    cursor: pointer;
+}
+.midorii-side-pick:hover { color: var(--vela-fg-bright); }
+.midorii-side-pick em { font-style: normal; font-size: 9px; }
+
+/* Off is a switch, not an empty box: a target you meant to set and left blank looks exactly
+   like a target you did not want, and only one of the two is a mistake. */
+.midorii-side-switch {
+    all: unset;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 17px;
+    padding: 2px;
+    border-radius: 999px;
+    background: var(--vela-border-strong);
+    cursor: pointer;
+    transition: background var(--vela-dur-fast) var(--vela-ease);
+}
+.midorii-side-switch i {
+    display: block;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--vela-fg-bright);
+    transition: transform var(--vela-dur-fast) var(--vela-ease);
+}
+.midorii-side-switch[data-on] { background: var(--vela-accent); }
+.midorii-side-switch[data-on] i { transform: translateX(13px); }
+
+/* One number, one frame — and inside the frame, on the right, what that number comes to in
+   the unit you did not type. Two boxes for one quantity is how a stop gets typed into the
+   wrong one. */
+.midorii-side-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-right: 9px;
     border: 1px solid var(--vela-border-soft);
     border-radius: var(--vela-radius-sm);
     background: var(--vela-surface-overlay);
-    color: var(--vela-fg);
+}
+.midorii-side-field:focus-within { border-color: var(--vela-focus); }
+.midorii-side-field > input {
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    border: none;
+    background: transparent;
+    color: var(--vela-fg-bright);
     font: inherit;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-variant-numeric: tabular-nums;
+    font-size: 13px;
     outline: none;
 }
-.midorii-side-price:focus { border-color: var(--vela-focus); }
-.midorii-side-price::placeholder { color: var(--vela-fg-faint); }
-
-.midorii-side-unit { display: grid; grid-template-columns: 1fr 52px; gap: 6px; }
-.midorii-side-unit button {
-    all: unset;
-    display: grid;
-    place-items: center;
-    border: 1px solid var(--vela-border-soft);
-    border-radius: var(--vela-radius-sm);
-    background: var(--vela-surface-overlay);
+.midorii-side-field > input::placeholder { color: var(--vela-fg-faint); }
+/* A NumberInput dropped in here brings its own frame; the field is the frame. */
+.midorii-side-field .vela-num[data-size] { flex: 1 1 auto; width: auto; }
+.midorii-side-field .vela-num[data-size] input {
+    height: 32px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: var(--vela-fg-bright);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+}
+.midorii-side-field .vela-num[data-size] input:focus { box-shadow: none; }
+/* The one thing that qualifies what is in the field above, under its right-hand end so it
+   reads off the same edge as the number it is about. Gone entirely when there is nothing to
+   say, rather than holding a line of air open. */
+.midorii-side-hint {
+    margin: 4px 0 0;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    color: var(--vela-fg-faint);
+}
+.midorii-side-hint:empty { display: none; }
+.midorii-side-field aside {
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
     color: var(--vela-fg-muted);
-    font-size: 11px;
+    white-space: nowrap;
+}
+.midorii-side-field aside:empty { display: none; }
+.midorii-side-field button {
+    all: unset;
+    flex: 0 0 auto;
+    padding: 2px 5px;
+    border-radius: var(--vela-radius-sm);
+    font-size: 10px;
     font-weight: 600;
+    color: var(--vela-fg-muted);
     cursor: pointer;
 }
-.midorii-side-unit button:hover { color: var(--vela-fg-bright); background: var(--vela-hover); }
+.midorii-side-field button:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
+
+/* A display set by a class beats the user agent's own rule for [hidden], so a row switched
+   off with el.hidden would otherwise stay on screen. This is what actually hides it. */
+.midorii-side [hidden] { display: none; }
+
+/* One derived figure: what it is called, what it is, and what qualifies it. */
+.midorii-side-stat {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    gap: 1px 8px;
+    margin-top: 9px;
+    font-size: 11px;
+    color: var(--vela-fg-muted);
+}
+.midorii-side-stat > b {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--vela-fg-bright);
+    text-align: right;
+    white-space: nowrap;
+}
+.midorii-side-stat > i {
+    grid-column: 1 / -1;
+    font-style: normal;
+    font-size: 10px;
+    text-align: right;
+    color: var(--vela-fg-faint);
+}
+.midorii-side-stat > i:empty { display: none; }
+.midorii-side-stat > i.warn { color: var(--vela-danger); }
 
 .midorii-side-out {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 9px 10px;
-    margin-top: 10px;
-    padding: 10px;
+    margin-top: 12px;
+    padding: 9px 10px 10px;
     border: 1px solid var(--vela-border-faint);
     border-radius: var(--vela-radius-md);
     background: var(--vela-surface-sunken);
 }
-.midorii-side-out > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.midorii-side-out small {
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    color: var(--vela-fg-muted);
+.midorii-side-out .midorii-side-stat:first-child { margin-top: 0; }
+
+/* Size in one press, in the sizes this account is actually traded in. Minus and plus walk
+   off the ends of that list, for the size that is not on it. */
+.midorii-side-chips {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 7px;
 }
-.midorii-side-out b {
+.midorii-side-chips button {
+    all: unset;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    min-width: 26px;
+    height: 26px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: var(--vela-surface-overlay);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-variant-numeric: tabular-nums;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--vela-fg-bright);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.midorii-side-out i {
-    font-style: normal;
-    font-size: 10px;
-    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+    font-weight: 600;
     color: var(--vela-fg-muted);
-    min-height: 13px;
+    cursor: pointer;
 }
-.midorii-side-out i.warn { color: var(--vela-danger); }
+.midorii-side-chips button:hover { background: var(--vela-hover-strong); color: var(--vela-fg-bright); }
+.midorii-side-chips button[data-on] { background: var(--vela-selected-bg); color: var(--vela-selected-fg); }
+.midorii-side-chips-list { flex: 1 1 auto; display: flex; justify-content: center; gap: 5px; }
+.midorii-side-chips button[data-role='edit'] { background: transparent; }
+.midorii-side-chips button[data-role='edit']:hover { background: var(--vela-hover); }
+.midorii-side-chips-edit { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.midorii-side-chips-edit .midorii-side-field { flex: 1 1 auto; }
+
 
 .midorii-side-foot {
     flex: 0 0 auto;
@@ -238,20 +418,24 @@ ${overlayScrollbarCss('.midorii-side-body')}
     color: var(--vela-danger);
 }
 .midorii-side-why:empty { display: none; }
-.midorii-side-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* One button, in the direction the header is pointed. Two buttons would ask the direction
+   twice — once at the top where the price is, once at the bottom where the click is — and
+   the panel would have no answer of its own to show in between. */
 .midorii-side-go {
     all: unset;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1px;
-    padding: 8px 0 7px;
+    gap: 2px;
+    width: 100%;
+    padding: 11px 0 10px;
     border-radius: var(--vela-radius-md);
     color: var(--vela-fg-on-fill);
-    font-size: 12px;
+    font-size: 14px;
     font-weight: 700;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
+    text-align: center;
     cursor: pointer;
 }
 .midorii-side-go small {
@@ -266,6 +450,7 @@ ${overlayScrollbarCss('.midorii-side-body')}
 .midorii-side-go[data-side='sell'] { background: var(--vela-down); }
 .midorii-side-go:hover:not(:disabled) { filter: brightness(1.1); }
 .midorii-side-go:disabled { opacity: 0.35; cursor: default; }
+
 
 .midorii-side-quick { display: flex; gap: 6px; margin-top: 8px; }
 .midorii-side-quick button {
@@ -396,6 +581,24 @@ export interface TradeSidebarOptions {
      * empty.
      */
     history?(): readonly HistoryRow[];
+    /**
+     * Where a fresh ticket's stop and target start, read fresh on every repaint.
+     *
+     * Absent where nobody decided — a replay bootstrapped without settings — and then the
+     * ticket simply arrives empty, which is what it has always done.
+     */
+    brackets?(): BracketSettings;
+    /**
+     * The instrument's own price increment, or null where it is not known.
+     *
+     * A bracket measured in ticks has no length without it, and nothing is placed rather
+     * than a stop four increments away on an instrument that moves in hundredths.
+     */
+    tick?(): number | null;
+    /** The sizes offered as one press. No row at all where this is not supplied. */
+    quickSizes?(): readonly number[];
+    /** Where an edited list of those sizes goes. Without it the row cannot be edited. */
+    onQuickSizes?(next: number[]): void;
 }
 
 export interface TradeSidebar {
@@ -414,15 +617,22 @@ export interface TradeSidebar {
     refresh(): void;
 }
 
-/** A row of mutually exclusive buttons. Returns the element; `sync` repaints the selection. */
+/**
+ * A row of mutually exclusive buttons. Returns the element; `sync` repaints the selection.
+ *
+ * `className` is how the same control wears two faces: the order type is a strip of
+ * underlined tabs across the top of the panel, the history windows a small inset group. One
+ * behaviour, because picking one of a few is one behaviour.
+ */
 function segmented<T extends string>(
     doc: Document,
     options: readonly { value: T; label: string }[],
     current: () => T,
     onPick: (value: T) => void,
+    className = 'midorii-side-seg',
 ): { el: HTMLElement; sync(): void } {
     const el = doc.createElement('div');
-    el.className = 'midorii-side-seg';
+    el.className = className;
     const buttons = options.map((o) => {
         const b = doc.createElement('button');
         b.type = 'button';
@@ -450,7 +660,6 @@ function segmented<T extends string>(
  */
 function priceInput(doc: Document, placeholder: string, commit: (price: number | null) => void): HTMLInputElement {
     const input = doc.createElement('input');
-    input.className = 'midorii-side-price';
     input.type = 'text';
     input.inputMode = 'decimal';
     input.placeholder = placeholder;
@@ -482,28 +691,99 @@ function priceInput(doc: Document, placeholder: string, commit: (price: number |
     return input;
 }
 
-/** A labelled control on its own line, with a slot for a hint underneath. */
-function row(doc: Document, label: string, control: HTMLElement): { el: HTMLElement; hint: HTMLElement } {
+/** The caption over a field. Whatever is passed as `trailing` sits at its right end. */
+function caption(doc: Document, text: string, trailing?: HTMLElement): HTMLElement {
     const el = doc.createElement('div');
-    el.className = 'midorii-side-row';
-    el.dataset.hint = '';
+    el.className = 'midorii-side-label';
     const name = doc.createElement('span');
-    name.textContent = label;
-    el.append(name, control);
-
-    const hint = doc.createElement('div');
-    hint.className = 'midorii-side-hint';
-    return { el, hint };
+    name.textContent = text;
+    el.append(name);
+    if (trailing) el.append(trailing);
+    return el;
 }
 
-/** One figure in the readout: caption, value, and a second line for what qualifies it. */
-function outCell(doc: Document, caption: string): { el: HTMLElement; value: HTMLElement; sub: HTMLElement } {
+/** The frame one number is typed into. Whatever else is passed rides inside that frame. */
+function fieldBox(doc: Document, ...parts: readonly HTMLElement[]): HTMLElement {
     const el = doc.createElement('div');
-    const small = doc.createElement('small');
-    small.textContent = caption;
+    el.className = 'midorii-side-field';
+    el.append(...parts);
+    return el;
+}
+
+/** The greyed half of a field: what the typed number comes to in the other unit. */
+function fieldAside(doc: Document): HTMLElement {
+    return doc.createElement('aside');
+}
+
+/** The line under a field, for the one thing that qualifies what is in it. */
+function hintLine(doc: Document): HTMLElement {
+    const el = doc.createElement('div');
+    el.className = 'midorii-side-hint';
+    return el;
+}
+
+/** On or off, as a switch rather than as an empty box. */
+function toggle(doc: Document, onFlip: (on: boolean) => void): {
+    el: HTMLButtonElement;
+    on(): boolean;
+    set(on: boolean): void;
+} {
+    const el = doc.createElement('button');
+    el.className = 'midorii-side-switch';
+    el.type = 'button';
+    el.append(doc.createElement('i'));
+
+    const on = (): boolean => el.hasAttribute('data-on');
+    const set = (next: boolean): void => {
+        if (next) el.setAttribute('data-on', '');
+        else el.removeAttribute('data-on');
+        el.setAttribute('aria-pressed', String(next));
+    };
+    el.onclick = () => {
+        set(!on());
+        onFlip(on());
+    };
+    set(false);
+    return { el, on, set };
+}
+
+/** A titled section whose contents can be shut away. Append to `body`, mount `el`. */
+function section(doc: Document, title: string, open: boolean): { el: HTMLElement; body: HTMLElement } {
+    const el = doc.createElement('div');
+    el.className = 'midorii-side-group';
+    const head = doc.createElement('button');
+    head.className = 'midorii-side-sect';
+    head.type = 'button';
+    const name = doc.createElement('span');
+    name.textContent = title;
+    const chevron = doc.createElement('em');
+    chevron.textContent = '⌄';
+    head.append(name, chevron);
+
+    const body = doc.createElement('div');
+
+    const paint = (shown: boolean): void => {
+        body.hidden = !shown;
+        if (shown) head.removeAttribute('data-shut');
+        else head.setAttribute('data-shut', '');
+        head.setAttribute('aria-expanded', String(shown));
+    };
+    head.onclick = () => paint(body.hidden);
+    paint(open);
+
+    el.append(head, body);
+    return { el, body };
+}
+
+/** One derived figure: what it is called, what it is, and what qualifies it. */
+function stat(doc: Document, name: string): { el: HTMLElement; value: HTMLElement; sub: HTMLElement } {
+    const el = doc.createElement('div');
+    el.className = 'midorii-side-stat';
+    const label = doc.createElement('span');
+    label.textContent = name;
     const value = doc.createElement('b');
     const sub = doc.createElement('i');
-    el.append(small, value, sub);
+    el.append(label, value, sub);
     return { el, value, sub };
 }
 
@@ -687,14 +967,40 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     rail.onclick = () => setFolded(false);
     setFolded(false);
 
-    // ── order ────────────────────────────────────────────────────────────
-    const body = doc.createElement('div');
-    body.className = 'midorii-side-body';
+    // ── which way, and against what price ───────────────────────────────
+    /* The direction lives here rather than in the draft, because the PLAN does not depend on
+     * it: the size, the notional, the cash at risk and the reward:risk are the same figures
+     * whichever way the trade goes. Only whether it may be sent depends on the side — see
+     * ticketPlan and ticketRefusal, which split exactly along that line. */
+    let side: 'buy' | 'sell' = 'buy';
 
-    const orderHead = doc.createElement('div');
-    orderHead.className = 'midorii-side-sect';
-    orderHead.textContent = 'Order';
+    const quote = doc.createElement('div');
+    quote.className = 'midorii-side-quote';
+    const quoteSide = (which: 'sell' | 'buy'): { btn: HTMLButtonElement; value: HTMLElement } => {
+        const btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.dataset.side = which;
+        btn.title = which === 'sell' ? 'Point this ticket short' : 'Point this ticket long';
+        const label = doc.createElement('small');
+        label.textContent = which === 'sell' ? 'Sell' : 'Buy';
+        const value = doc.createElement('b');
+        value.textContent = NONE;
+        btn.append(label, value);
+        btn.onclick = () => {
+            side = which;
+            refresh();
+        };
+        quote.append(btn);
+        return { btn, value };
+    };
+    // Sell on the left and buy on the right, the way a two-sided price is always printed.
+    const sellSide = quoteSide('sell');
+    const buySide = quoteSide('buy');
+    const spreadTag = doc.createElement('span');
+    spreadTag.className = 'midorii-side-spread';
+    quote.append(spreadTag);
 
+    // ── what kind of order ──────────────────────────────────────────────
     const types = segmented(
         doc,
         [{ value: 'market', label: 'Market' }, { value: 'limit', label: 'Limit' }, { value: 'stop', label: 'Stop' }] as const,
@@ -704,39 +1010,43 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
             types.sync();
             refresh();
         },
+        'midorii-side-types',
     );
 
+    const body = doc.createElement('div');
+    body.className = 'midorii-side-body';
+
+    // ── where it goes in ────────────────────────────────────────────────
     const entryBox = priceInput(doc, 'Price', (v) => { draft.entryPrice = v; refresh(); });
-    const entry = row(doc, 'Entry', entryBox);
-    const stopBox = priceInput(doc, NONE, (v) => { draft.stopLoss = v; refresh(); });
-    const stop = row(doc, 'Stop loss', stopBox);
-    const targetBox = priceInput(doc, NONE, (v) => { draft.takeProfit = v; refresh(); });
-    const target = row(doc, 'Take profit', targetBox);
+    const entryAside = fieldAside(doc);
+    const entryCaption = caption(doc, 'Entry price');
+    const entryField = fieldBox(doc, entryBox, entryAside);
 
-    // ── size ─────────────────────────────────────────────────────────────
-    const sizeHead = doc.createElement('div');
-    sizeHead.className = 'midorii-side-sect';
-    sizeHead.textContent = 'Size';
+    // ── how big ─────────────────────────────────────────────────────────
+    /* One caption doing the work of a dropdown: which question this field is asking is
+     * itself the thing being chosen, and there are only two answers. */
+    const sizingPick = doc.createElement('button');
+    sizingPick.className = 'midorii-side-pick';
+    sizingPick.type = 'button';
+    sizingPick.title = 'Size from what the trade may lose, or type a number of units';
+    const sizingName = doc.createElement('span');
+    const sizingChevron = doc.createElement('em');
+    sizingChevron.textContent = '⌄';
+    sizingPick.append(sizingName, sizingChevron);
+    sizingPick.onclick = () => {
+        draft.sizing = draft.sizing === 'risk' ? 'fixed' : 'risk';
+        refresh();
+    };
+    const sizingCaption = doc.createElement('div');
+    sizingCaption.className = 'midorii-side-label';
+    sizingCaption.append(sizingPick);
 
-    const sizings = segmented(
-        doc,
-        [{ value: 'risk', label: 'By risk' }, { value: 'fixed', label: 'Fixed units' }] as const,
-        () => draft.sizing,
-        (value) => {
-            draft.sizing = value;
-            sizings.sync();
-            refresh();
-        },
-    );
-
-    /* Percent or cash, on the field itself rather than in a second dropdown: it is one
-     * question about one number, and the answer belongs next to it. */
-    const unit = doc.createElement('div');
-    unit.className = 'midorii-side-unit';
     const riskValue = new NumberInput({
         value: risk.value, min: 0.01, max: 1e6, step: 0.25, size: 'sm', fill: true,
         onChange: (v) => { risk.value = v; refresh(); },
     });
+    /* Percent or cash, on the field itself rather than in a second dropdown: it is one
+     * question about one number, and the answer belongs next to it. */
     const unitBtn = doc.createElement('button');
     unitBtn.type = 'button';
     unitBtn.title = 'Read the risk as a percentage of equity, or as cash';
@@ -744,63 +1054,168 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         risk.mode = risk.mode === 'percent' ? 'fixed' : 'percent';
         refresh();
     };
-    unit.append(riskValue.el, unitBtn);
-    const riskRow = row(doc, 'Risk', unit);
-
-    const leverage = new NumberInput({
-        value: risk.maxLeverage, min: 1, max: 100, step: 0.5, size: 'sm', fill: true,
-        onChange: (v) => { risk.maxLeverage = v; refresh(); },
-    });
-    const leverageRow = row(doc, 'Max leverage', leverage.el);
+    const riskAside = fieldAside(doc);
+    const riskField = fieldBox(doc, riskValue.el, unitBtn, riskAside);
 
     const fixed = new NumberInput({
         value: 0, min: 0, step: 0.01, size: 'sm', fill: true,
         onChange: (v) => { draft.fixedSize = v > 0 ? v : null; refresh(); },
     });
-    const fixedRow = row(doc, 'Units', fixed.el);
+    const fixedAside = fieldAside(doc);
+    const fixedField = fieldBox(doc, fixed.el, fixedAside);
 
-    // ── readout ──────────────────────────────────────────────────────────
+    /* ── the sizes this account is actually traded in ─────────────────────
+     *
+     * A press, not a typed number. The step the ends of the row walk in is the SMALLEST of
+     * them rather than a hard 1: on a futures account the sizes are 1, 3, 5 and the step is
+     * one contract; on a crypto account they are 0.01, 0.05, 0.1 and a step of one whole coin
+     * would be the entire account. The list itself says which kind of instrument this is.
+     */
+    const chips = doc.createElement('div');
+    chips.className = 'midorii-side-chips';
+    const chipList = doc.createElement('div');
+    chipList.className = 'midorii-side-chips-list';
+    const chipStep = (): number => {
+        const sizes = presetSizes();
+        return sizes.length > 0 ? sizes[0]! : 1;
+    };
+    const walk = (dir: 1 | -1): void => {
+        const step = chipStep();
+        const from = draft.fixedSize ?? 0;
+        const next = from + dir * step;
+        /* Off a step of 0.01 the arithmetic lands on 0.11000000000000001, and a size box is
+         * the wrong place to show it. Rounded to the step's own precision. */
+        const decimals = Math.min(8, (String(step).split('.')[1] ?? '').length);
+        const snapped = Number((next > 0 ? next : step).toFixed(decimals));
+        pickSize(snapped);
+    };
+    const chipDown = doc.createElement('button');
+    chipDown.type = 'button';
+    chipDown.textContent = '−';
+    chipDown.title = 'One size smaller';
+    chipDown.onclick = () => walk(-1);
+    const chipUp = doc.createElement('button');
+    chipUp.type = 'button';
+    chipUp.textContent = '+';
+    chipUp.title = 'One size larger';
+    chipUp.onclick = () => walk(1);
+    const chipEdit = doc.createElement('button');
+    chipEdit.type = 'button';
+    chipEdit.dataset.role = 'edit';
+    chipEdit.textContent = '✎';
+    chipEdit.title = 'Change which sizes are offered here';
+    chips.append(chipDown, chipList, chipUp, chipEdit);
+
+    /* The same row, in the one state where it is a text field: the presets being rewritten.
+     * A separate element rather than a swapped-out input, so leaving the edit alone leaves
+     * the row it was opened from exactly as it was. */
+    const chipEditRow = doc.createElement('div');
+    chipEditRow.className = 'midorii-side-chips-edit';
+    const chipEditBox = doc.createElement('input');
+    chipEditBox.type = 'text';
+    chipEditBox.placeholder = '1, 3, 5, 10, 15';
+    chipEditBox.title = 'The sizes offered on the row, separated by commas';
+    const chipEditDone = doc.createElement('button');
+    chipEditDone.type = 'button';
+    chipEditDone.textContent = '✓';
+    chipEditDone.title = 'Keep these sizes';
+    chipEditRow.append(fieldBox(doc, chipEditBox), chipEditDone);
+    chipEditRow.hidden = true;
+
+    // ── where it gets out ───────────────────────────────────────────────
+    /* Off is a switch, and a switch that is ON with an empty box is a level still being
+     * decided — not a level of nothing. `autoTarget`/`autoStop` say the number in the box is
+     * still the setting's answer rather than a person's: the moment one is typed over it is
+     * theirs, and the panel stops moving it as the market moves. */
+    let autoStop = true;
+    let autoTarget = true;
+
+    const targetBox = priceInput(doc, NONE, (v) => {
+        draft.takeProfit = v;
+        autoTarget = false;
+        refresh();
+    });
+    const targetAside = fieldAside(doc);
+    const targetField = fieldBox(doc, targetBox, targetAside);
+    const targetHint = hintLine(doc);
+    const targetSwitch = toggle(doc, (on) => {
+        autoTarget = on;
+        if (!on) {
+            draft.takeProfit = null;
+            targetBox.value = '';
+        }
+        refresh();
+        if (on) targetBox.focus();
+    });
+    const targetCaption = caption(doc, 'Take profit', targetSwitch.el);
+
+    const stopBox = priceInput(doc, NONE, (v) => {
+        draft.stopLoss = v;
+        autoStop = false;
+        refresh();
+    });
+    const stopAside = fieldAside(doc);
+    const stopField = fieldBox(doc, stopBox, stopAside);
+    const stopHint = hintLine(doc);
+    const stopSwitch = toggle(doc, (on) => {
+        autoStop = on;
+        if (!on) {
+            draft.stopLoss = null;
+            stopBox.value = '';
+        }
+        refresh();
+        if (on) stopBox.focus();
+    });
+    const stopCaption = caption(doc, 'Stop loss', stopSwitch.el);
+
+    const rr = stat(doc, 'Risk / reward');
+
+    const exits = section(doc, 'Exits', true);
+    exits.body.append(
+        targetCaption, targetField, targetHint,
+        stopCaption, stopField, stopHint,
+        rr.el,
+    );
+
+    // ── the settings that are decided once ──────────────────────────────
+    const leverage = new NumberInput({
+        value: risk.maxLeverage, min: 1, max: 100, step: 0.5, size: 'sm', fill: true,
+        onChange: (v) => { risk.maxLeverage = v; refresh(); },
+    });
+    const leverageCaption = caption(doc, 'Max leverage');
+    const leverageField = fieldBox(doc, leverage.el);
+    const extra = section(doc, 'Extra settings', false);
+    extra.body.append(leverageCaption, leverageField);
+
+    // ── what it comes to ────────────────────────────────────────────────
     const out = doc.createElement('div');
     out.className = 'midorii-side-out';
-    const outSize = outCell(doc, 'Size');
-    const outNotional = outCell(doc, 'Notional');
-    const outRisk = outCell(doc, 'Risk');
-    const outRr = outCell(doc, 'Reward : risk');
-    out.append(outSize.el, outNotional.el, outRisk.el, outRr.el);
+    const outSize = stat(doc, 'Size');
+    const outNotional = stat(doc, 'Notional');
+    const outRisk = stat(doc, 'Risk');
+    out.append(outSize.el, outNotional.el, outRisk.el);
 
     body.append(
-        orderHead, types.el,
-        entry.el, entry.hint,
-        stop.el, stop.hint,
-        target.el, target.hint,
-        sizeHead, sizings.el,
-        riskRow.el, riskRow.hint,
-        leverageRow.el, leverageRow.hint,
-        fixedRow.el, fixedRow.hint,
+        entryCaption, entryField,
+        sizingCaption, riskField, fixedField, chips, chipEditRow,
+        exits.el,
+        extra.el,
         out,
     );
 
-    // ── send ─────────────────────────────────────────────────────────────
+    // ── send ────────────────────────────────────────────────────────────
     const foot = doc.createElement('div');
     foot.className = 'midorii-side-foot';
     const why = doc.createElement('div');
     why.className = 'midorii-side-why';
 
-    const sides = doc.createElement('div');
-    sides.className = 'midorii-side-sides';
-    const go = (side: 'buy' | 'sell'): { btn: HTMLButtonElement; price: HTMLElement } => {
-        const btn = doc.createElement('button');
-        btn.className = 'midorii-side-go';
-        btn.type = 'button';
-        btn.dataset.side = side;
-        const price = doc.createElement('small');
-        btn.append(doc.createTextNode(side === 'buy' ? 'Buy' : 'Sell'), price);
-        btn.onclick = () => send(side);
-        sides.append(btn);
-        return { btn, price };
-    };
-    const buy = go('buy');
-    const sell = go('sell');
+    const goBtn = doc.createElement('button');
+    goBtn.className = 'midorii-side-go';
+    goBtn.type = 'button';
+    const goName = doc.createElement('span');
+    const goSub = doc.createElement('small');
+    goBtn.append(goName, goSub);
+    goBtn.onclick = () => send();
 
     const quick = doc.createElement('div');
     quick.className = 'midorii-side-quick';
@@ -818,7 +1233,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     flatten.onclick = () => opts.actions.flatten();
     quick.append(cancelAll, flatten);
 
-    foot.append(why, sides, quick);
+    foot.append(why, goBtn, quick);
 
     // ── history ──────────────────────────────────────────────────────────
     const hist = doc.createElement('div');
@@ -863,7 +1278,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
      * wholesale by a reset, so its length identifies it. */
     let drawnHistory = -1;
 
-    el.append(head, rail, body, hist, foot);
+    el.append(head, rail, quote, types.el, body, hist, foot);
     host.appendChild(el);
 
     /** Which half is on. The other is hidden rather than unmounted — a ticket half-typed is
@@ -875,8 +1290,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         }
         /* The foot goes with the ticket: Buy and Sell under a list of finished trades would
          * send an order from a panel that is not showing what it was sized against. */
-        body.hidden = next !== 'trade';
-        foot.hidden = next !== 'trade';
+        for (const part of [quote, types.el, body, foot]) part.hidden = next !== 'trade';
         hist.hidden = next !== 'history';
         rail.textContent = next === 'trade' ? 'Trade' : 'History';
     }
@@ -935,60 +1349,227 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         return formatPercent((level - reference) / reference, 2, true);
     }
 
+    /** The sizes on the quick row, as the settings have them. */
+    function presetSizes(): readonly number[] {
+        return opts.quickSizes?.() ?? [];
+    }
+
+    /** Take a size and mean it: a quick size is a typed size, so the ticket switches to one. */
+    function pickSize(size: number): void {
+        draft.sizing = 'fixed';
+        draft.fixedSize = size > 0 ? size : null;
+        fixed.setValue(size);
+        refresh();
+    }
+
+    /* What the row currently has drawn on it. refresh() runs on every tick and the sizes
+     * change about once a month; the buttons are rebuilt only when the list itself differs. */
+    let drawnSizes: string | null = null;
+
+    /** Redraw the row of sizes, and mark whichever one the ticket is holding. */
+    function renderChips(): void {
+        // An account whose sizes nobody supplied has no row — not an empty one.
+        if (opts.quickSizes == null) {
+            chips.hidden = true;
+            chipEditRow.hidden = true;
+            return;
+        }
+        const sizes = presetSizes();
+        const key = sizes.join(',');
+        if (key !== drawnSizes) {
+            drawnSizes = key;
+            chipList.replaceChildren(...sizes.map((n) => {
+                const b = doc.createElement('button');
+                b.type = 'button';
+                b.dataset.size = String(n);
+                b.textContent = formatSize(n);
+                b.title = `Trade ${formatSize(n)}`;
+                b.onclick = () => pickSize(n);
+                return b;
+            }));
+        }
+        const held = draft.sizing === 'fixed' ? draft.fixedSize : null;
+        for (const b of chipList.children) {
+            const on = held != null && b instanceof HTMLElement && Number(b.dataset.size) === held;
+            if (on) (b as HTMLElement).dataset.on = '';
+            else if (b instanceof HTMLElement) delete b.dataset.on;
+        }
+        // Nothing to step down from at the smallest step the row knows.
+        chipDown.disabled = (draft.fixedSize ?? 0) <= chipStep();
+    }
+
+    /** Keep whatever is in the edit box, and put the row back. */
+    function commitSizes(): void {
+        const next = normalizeQuickSizes(chipEditBox.value.split(','));
+        // An unreadable list leaves the sizes as they were rather than emptying the row.
+        if (next != null) opts.onQuickSizes?.(next);
+        chipEditRow.hidden = true;
+        chips.hidden = false;
+        refresh();
+    }
+
+    chipEdit.onclick = () => {
+        chipEditBox.value = presetSizes().map((n) => formatSize(n)).join(', ');
+        chips.hidden = true;
+        chipEditRow.hidden = false;
+        chipEditBox.focus();
+        chipEditBox.select();
+    };
+    chipEditDone.onclick = () => commitSizes();
+    chipEditBox.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            commitSizes();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            chipEditRow.hidden = true;
+            chips.hidden = false;
+        }
+    });
+
+    /**
+     * Put the automatic levels where the settings say they go.
+     *
+     * They FOLLOW: an untouched ticket keeps its stop the same distance from the market as
+     * the market moves, which is the only reading of "automatic" that is any use while
+     * waiting for an entry. Typing over one ends that for the box that was typed in — see
+     * `autoStop`/`autoTarget` — and so does switching it off.
+     */
+    function applyAutoBrackets(account: TicketAccount): void {
+        const brackets = opts.brackets?.();
+        if (brackets == null || !brackets.on) return;
+        if (!autoStop && !autoTarget) return;
+
+        // Measured from where the trade would actually go in — the plan's own reference.
+        const reference = draft.type === 'market'
+            ? (account.price > 0 ? account.price : null)
+            : (draft.entryPrice != null && draft.entryPrice > 0 ? draft.entryPrice : null);
+        /* No reference, no levels. A resting order whose price has not been typed yet would
+         * otherwise keep the pair worked out from the last market it had one against — a stop
+         * measured from a price this trade is not going in at, shown as though it were. */
+        const levels = reference == null
+            ? { stopLoss: null, takeProfit: null }
+            : bracketLevels(reference, side, brackets, opts.tick?.() ?? null);
+
+        /* Never into a box somebody is typing in. refresh() runs on every tick, and a level
+         * rewritten under the cursor is a level nobody typed and nobody can retype. */
+        if (autoStop && stopSwitch.on() && doc.activeElement !== stopBox) {
+            draft.stopLoss = levels.stopLoss;
+            stopBox.value = levels.stopLoss == null ? '' : formatPrice(levels.stopLoss);
+        }
+        if (autoTarget && targetSwitch.on() && doc.activeElement !== targetBox) {
+            draft.takeProfit = levels.takeProfit;
+            targetBox.value = levels.takeProfit == null ? '' : formatPrice(levels.takeProfit);
+        }
+    }
+
+    /** Empty the ticket back to what a fresh one looks like under the current settings. */
+    function resetTicket(): void {
+        draft.entryPrice = null;
+        draft.stopLoss = null;
+        draft.takeProfit = null;
+        entryBox.value = '';
+        stopBox.value = '';
+        targetBox.value = '';
+        /* Both switches go back to whatever the settings say a fresh ticket arrives with, and
+         * both levels are the settings' answer again rather than anybody's. */
+        const bracketed = opts.brackets?.().on ?? false;
+        autoStop = true;
+        autoTarget = true;
+        stopSwitch.set(bracketed);
+        targetSwitch.set(bracketed);
+    }
+
     function refresh(): void {
         const account = opts.account();
+        // The automatic levels first: they write into the draft, and everything below reads it.
+        applyAutoBrackets(account);
         const plan = ticketPlan(draft, account, risk);
-        const buyWhy = ticketRefusal(draft, 'buy', account, plan);
-        const sellWhy = ticketRefusal(draft, 'sell', account, plan);
+        const refusal = ticketRefusal(draft, side, account, plan);
+
+        /* The two sides of the market, where the venue quotes two. Where it quotes one, both
+         * halves show it and the spread tag stays empty: a spread of zero would say crossing
+         * is free, and what is true is that this feed does not say what it costs. */
+        const twoSided = account.bid != null && account.ask != null && account.ask > account.bid;
+        const last = account.price > 0 ? account.price : null;
+        const bid = twoSided ? account.bid! : last;
+        const ask = twoSided ? account.ask! : last;
+        sellSide.value.textContent = bid == null ? NONE : formatMoney(bid);
+        buySide.value.textContent = ask == null ? NONE : formatMoney(ask);
+        spreadTag.textContent = twoSided ? formatMoney(account.ask! - account.bid!) : '';
+        for (const [g, which] of [[sellSide, 'sell'], [buySide, 'buy']] as const) {
+            if (which === side) g.btn.dataset.on = '';
+            else delete g.btn.dataset.on;
+        }
 
         // A market order has no price of its own to wait at.
-        entry.el.hidden = draft.type === 'market';
-        entry.hint.hidden = draft.type === 'market';
-        entry.hint.textContent = away(draft.entryPrice, account.price > 0 ? account.price : null);
-
-        stop.hint.textContent = away(draft.stopLoss, plan.reference);
-        target.hint.textContent = away(draft.takeProfit, plan.reference);
+        const resting = draft.type !== 'market';
+        entryCaption.hidden = !resting;
+        entryField.hidden = !resting;
+        entryAside.textContent = resting ? away(draft.entryPrice, account.price > 0 ? account.price : null) : '';
 
         const byRisk = draft.sizing === 'risk';
-        for (const r of [riskRow, leverageRow]) {
-            r.el.hidden = !byRisk;
-            r.hint.hidden = !byRisk;
-        }
-        fixedRow.el.hidden = byRisk;
-        fixedRow.hint.hidden = byRisk;
+        sizingName.textContent = byRisk ? 'Risk' : 'Units';
+        riskField.hidden = !byRisk;
+        fixedField.hidden = byRisk;
 
         unitBtn.textContent = risk.mode === 'percent' ? '%' : 'cash';
         // The half that was not typed: 1% of this account is that much money, and vice versa.
-        riskRow.hint.textContent = risk.mode === 'percent'
+        riskAside.textContent = risk.mode === 'percent'
             ? `≈ ${formatMoney((account.equity * risk.value) / 100)}`
             : account.equity > 0 ? `≈ ${formatPercent(risk.value / account.equity)} of equity` : '';
-        leverageRow.hint.textContent = '';
-        fixedRow.hint.textContent = '';
+        /* Against a typed size the useful second figure is the one nobody worked out: what
+         * this many units at this price actually costs if the stop is hit. */
+        fixedAside.textContent = plan.risk == null ? '' : `${formatMoney(plan.risk.cash)} at the stop`;
+        renderChips();
+
+        stopHint.textContent = away(draft.stopLoss, plan.reference);
+        targetHint.textContent = away(draft.takeProfit, plan.reference);
+        /* What the automatic levels are: the distance the settings asked for, said in the
+         * unit they were asked in, so a stop of "40 ticks" is legible as one. */
+        const brackets = opts.brackets?.();
+        const unit = brackets?.unit === 'cash' ? '' : ' ticks';
+        stopAside.textContent = autoStop && brackets?.on && draft.stopLoss != null ? `auto ${brackets.stop}${unit}` : '';
+        targetAside.textContent = autoTarget && brackets?.on && draft.takeProfit != null ? `auto ${brackets.target}${unit}` : '';
+
+        rr.value.textContent = plan.rr == null ? NONE : `${plan.rr.toFixed(2)} R`;
+
+        leverageCaption.hidden = !byRisk;
+        leverageField.hidden = !byRisk;
 
         outSize.value.textContent = plan.size == null ? NONE : formatSize(plan.size);
-        outSize.sub.textContent = plan.capped ? 'at the leverage cap' : '';
+        /* Which ceiling bit says something different about the trade. A leverage cap is a rule
+         * the account's owner wrote; running out of margin is the venue saying no, and the
+         * remedy for the two is not the same. */
+        outSize.sub.textContent = plan.capped
+            ? (plan.margin ? 'all the margin the account has left' : 'at the leverage cap')
+            : '';
         outSize.sub.classList.toggle('warn', plan.capped);
 
         outNotional.value.textContent = plan.notional == null ? NONE : formatMoney(plan.notional);
-        outNotional.sub.textContent = plan.notional != null && account.equity > 0
-            ? `${(plan.notional / account.equity).toFixed(2)}× equity`
-            : '';
+        /* On a margined account the useful second line is not what the position is worth
+         * against equity — it is what opening it actually takes out of the money left. */
+        outNotional.sub.textContent = plan.margin != null
+            ? `${formatMoney(plan.margin.required)} margin of ${formatMoney(plan.margin.available)}`
+            : plan.notional != null && account.equity > 0
+                ? `${(plan.notional / account.equity).toFixed(2)}× equity`
+                : '';
+        outNotional.sub.classList.toggle('warn', plan.margin != null && plan.margin.required > plan.margin.available);
 
         outRisk.value.textContent = plan.risk == null ? NONE : formatMoney(plan.risk.cash);
         outRisk.sub.textContent = plan.risk?.share == null ? '' : `${formatPercent(plan.risk.share)} of equity`;
 
-        outRr.value.textContent = plan.rr == null ? NONE : `${plan.rr.toFixed(2)} R`;
-        outRr.sub.textContent = '';
-
-        for (const [g, refusal] of [[buy, buyWhy], [sell, sellWhy]] as const) {
-            g.btn.disabled = refusal != null;
-            g.btn.title = refusal ?? '';
-            g.price.textContent = plan.reference == null ? NONE : formatMoney(plan.reference);
-        }
-        /* Only when neither side can be sent: with one side live the panel works, and a red
-         * line under a button that is merely the wrong direction would be noise. The greyed
-         * button still carries its own reason. */
-        why.textContent = buyWhy != null && sellWhy != null ? buyWhy : '';
+        /* The button is the direction, so it says the direction, and underneath it says
+         * exactly what pressing it sends. */
+        goBtn.dataset.side = side;
+        goBtn.disabled = refusal != null;
+        goBtn.title = refusal ?? '';
+        goName.textContent = side === 'buy' ? 'Buy' : 'Sell';
+        goSub.textContent = plan.size == null || plan.reference == null
+            ? draft.type.toUpperCase()
+            : `${formatSize(plan.size)} @ ${formatMoney(plan.reference)} ${draft.type.toUpperCase()}`;
+        // The reason in full under the button, where the button cannot fit it.
+        why.textContent = refusal ?? '';
 
         const counts = opts.counts();
         cancelAll.disabled = counts.orders === 0;
@@ -997,7 +1578,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         renderHistory();
     }
 
-    function send(side: 'buy' | 'sell'): void {
+    function send(): void {
         const account = opts.account();
         const plan = ticketPlan(draft, account, risk);
         if (ticketRefusal(draft, side, account, plan) != null || plan.size == null) return;
@@ -1006,16 +1587,13 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
         /* Emptied afterwards. A ticket still holding the last trade's stop is the one mistake
          * here that costs money: the next click would send a level from a setup that is over.
-         * The order type and the risk settings stay — those are how this session is traded,
-         * not what this trade was. */
-        draft.entryPrice = null;
-        draft.stopLoss = null;
-        draft.takeProfit = null;
-        entryBox.value = '';
-        stopBox.value = '';
-        targetBox.value = '';
+         * The order type, the direction and the risk settings stay — those are how this
+         * session is being traded, not what this trade was. */
+        resetTicket();
         refresh();
     }
+
+    resetTicket();
 
     setTab('trade');
     refresh();

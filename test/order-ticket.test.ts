@@ -152,3 +152,50 @@ describe('the order the ticket sends', () => {
         expect(ticketOrder(ticket({ takeProfit: 110 }), 'buy', 20).bracket).toEqual({ takeProfit: 110 });
     });
 });
+
+describe('a margined account', () => {
+    /** The same 10,000 account, but at a venue: 3.33% margin, 3,000 left to trade with. */
+    const MARGINED: TicketAccount = { equity: 10_000, price: 100, available: 3_000, marginFactor: 0.0333 };
+
+    it('says what opening the position would tie up', () => {
+        const plan = ticketPlan(ticket({ sizing: 'fixed', fixedSize: 10 }), MARGINED, RISK);
+        expect(plan.notional).toBe(1_000);
+        // 3.33% of the notional, held against it — not the notional itself.
+        expect(plan.margin!.required).toBeCloseTo(33.3, 8);
+        expect(plan.margin!.available).toBe(3_000);
+    });
+
+    it('reports no margin at all on an account that does not have any', () => {
+        // Zero would read as "this is free" rather than "this does not apply".
+        expect(ticketPlan(ticket({ sizing: 'fixed', fixedSize: 10 }), ACCOUNT, RISK).margin).toBeNull();
+    });
+
+    it('holds the size to the money left, not to the leverage setting', () => {
+        // Generous leverage, on an account whose margin runs out first.
+        const risk: RiskSettings = { mode: 'percent', value: 1, maxLeverage: 30 };
+        // A stop 0.1 away would buy 1,000 units on risk alone; 3,000 of margin at 3.33%
+        // of 100 a unit funds about 901.
+        const plan = ticketPlan(ticket({ stopLoss: 99.9 }), MARGINED, risk);
+        const ceiling = 3_000 / (0.0333 * 100);
+        expect(plan.size!).toBeLessThanOrEqual(ceiling + 1e-9);
+        expect(plan.size!).toBeCloseTo(ceiling, 6);
+        expect(plan.capped).toBe(true);
+    });
+
+    it('leaves a size the account can fund untouched', () => {
+        // A wide stop: 1% of 10,000 over 5 buys 20 units, well inside the margin.
+        const plan = ticketPlan(ticket({ stopLoss: 95 }), MARGINED, RISK);
+        expect(plan.size).toBe(20);
+        expect(plan.capped).toBe(false);
+    });
+
+    it('still uses the leverage ceiling when the venue rules are not known', () => {
+        // Unknown margin is not "no margin" — but with nothing to compute from, the account's
+        // own leverage setting is the only ceiling there is.
+        const partial: TicketAccount = { equity: 10_000, price: 100, available: 3_000 };
+        const risk: RiskSettings = { mode: 'percent', value: 1, maxLeverage: 1 };
+        const plan = ticketPlan(ticket({ stopLoss: 99.9 }), partial, risk);
+        expect(plan.margin).toBeNull();
+        expect(plan.size).toBe((10_000 * 1) / 100);
+    });
+});

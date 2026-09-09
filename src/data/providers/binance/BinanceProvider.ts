@@ -410,6 +410,11 @@ export class BinanceProvider implements DataProvider {
             if (stopped) return;
             try {
                 const bars = await this.getBars(ticker, timeframe, { limit: 2 });
+                // Re-checked AFTER the await, as in the streaming poll above: an unsubscribe
+                // during the fetch must not push the OLD market's bars into the new series —
+                // on the same timeframe the forming bar shares its open time, so a stale one
+                // REPLACES the new market's candle rather than landing beside it.
+                if (stopped) return;
                 for (const b of bars) onBar(b);
             } catch { /* transient — keep polling */ }
             if (!stopped) timer = setTimeout(() => void poll(), 3000);

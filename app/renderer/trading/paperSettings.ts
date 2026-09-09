@@ -1,5 +1,7 @@
 import { DEFAULT_COSTS } from '../../../shared/engine/broker.js';
 import type { Costs, PositionMode } from '../../../shared/engine/broker.js';
+import { normalizeQuickSizes } from '../replay/orderTicket';
+import type { BracketSettings } from '../replay/orderTicket';
 import type { RiskSettings } from '../replay/replayOrders';
 
 /**
@@ -38,6 +40,22 @@ export interface PaperSettings {
     riskMode: RiskSettings['mode'];
     /** How much one trade may lose — percent of equity, or cash, per `riskMode`. */
     riskValue: number;
+    /**
+     * The sizes offered as one press on the ticket, smallest first.
+     *
+     * A list rather than a step, because the sizes a person actually trades are not evenly
+     * spaced — one, then three, then five is how position size is thought about, and
+     * arriving at five by pressing "+" four times is four chances to arrive at four.
+     */
+    quickSizes: number[];
+    /** Whether a fresh ticket arrives with a stop and a target already on it. */
+    autoBrackets: boolean;
+    /** How the two distances below are read — see {@link BracketSettings}. */
+    bracketUnit: BracketSettings['unit'];
+    /** How far the automatic stop sits from the entry, in `bracketUnit`. */
+    bracketStop: number;
+    /** How far the automatic target sits from the entry, in `bracketUnit`. */
+    bracketTarget: number;
 }
 
 export const DEFAULT_PAPER_SETTINGS: PaperSettings = {
@@ -49,6 +67,11 @@ export const DEFAULT_PAPER_SETTINGS: PaperSettings = {
     maxLeverage: 1,
     riskMode: 'percent',
     riskValue: 1,
+    quickSizes: [1, 3, 5, 10, 15],
+    autoBrackets: false,
+    bracketUnit: 'ticks',
+    bracketStop: 40,
+    bracketTarget: 80,
 };
 
 const STORAGE_KEY = 'midorii-paper-settings';
@@ -69,6 +92,16 @@ export function positionModeOf(settings: PaperSettings): PositionMode {
 /** The ticket's half — how a trade is sized. Read fresh whenever one is placed. */
 export function riskOf(settings: PaperSettings): RiskSettings {
     return { mode: settings.riskMode, value: settings.riskValue, maxLeverage: settings.maxLeverage };
+}
+
+/** Where a fresh ticket's stop and target start. Read fresh, for the same reason. */
+export function bracketsOf(settings: PaperSettings): BracketSettings {
+    return {
+        on: settings.autoBrackets,
+        unit: settings.bracketUnit,
+        stop: settings.bracketStop,
+        target: settings.bracketTarget,
+    };
 }
 
 /**
@@ -114,7 +147,17 @@ export function normalizeSettings(raw: unknown): PaperSettings {
         maxLeverage: number(source.maxLeverage, d.maxLeverage, 1, 100),
         riskMode: source.riskMode === 'fixed' ? 'fixed' : 'percent',
         riskValue: number(source.riskValue, d.riskValue, 0.01, 1e6),
+        quickSizes: quickSizes(source.quickSizes) ?? [...d.quickSizes],
+        autoBrackets: typeof source.autoBrackets === 'boolean' ? source.autoBrackets : d.autoBrackets,
+        bracketUnit: source.bracketUnit === 'cash' ? 'cash' : 'ticks',
+        bracketStop: number(source.bracketStop, d.bracketStop, 0, 1e9),
+        bracketTarget: number(source.bracketTarget, d.bracketTarget, 0, 1e9),
     };
+}
+
+/** A stored quick-size list, cleaned up — or null where there is nothing usable in it. */
+function quickSizes(raw: unknown): number[] | null {
+    return Array.isArray(raw) ? normalizeQuickSizes(raw) : null;
 }
 
 /** The settings this machine last saved, or the defaults. Never throws. */

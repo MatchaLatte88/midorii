@@ -1,6 +1,7 @@
-import { NumberInput, Select, Switch, injectStyles, overlayScrollbarCss } from '../../../src/ui';
+import { injectStyles, overlayScrollbarCss } from '../../../src/ui';
 import { RISK_PARAM_KEYS, resolveStrategyParams, strategyCatalog } from './index';
-import type { StrategyInfo, StrategyParam, StrategyParams } from './types';
+import { fieldGrid, paramField } from './paramFields';
+import type { StrategyInfo, StrategyParams } from './types';
 import { button, ensureFigureStyles, sectionLabel } from '../runs/runViews';
 
 /**
@@ -100,33 +101,12 @@ ${overlayScrollbarCss('.midorii-strategies-body')}
 .midorii-strategies-conditions { margin: 0; padding-left: 18px; }
 .midorii-strategies-conditions li { margin-bottom: 3px; }
 
-.midorii-strategies-grid {
-    display: grid; gap: 10px 18px;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-}
-.midorii-strategies-row {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    min-height: 26px;
-}
-.midorii-strategies-row > span:first-child { color: var(--vela-fg-muted); white-space: nowrap; }
-.midorii-strategies-toggles { display: inline-flex; align-items: center; gap: 10px; }
-.midorii-strategies-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
 
 .midorii-strategies-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
 .midorii-strategies-status { color: var(--vela-fg-muted); font-size: 12px; }
 .midorii-strategies-status[data-error='1'] { color: var(--vela-danger); }
 .midorii-strategies-empty { padding: 20px 4px; color: var(--vela-fg-muted); line-height: 1.6; }
 `;
-
-function row(label: string, control: HTMLElement, hint?: string): HTMLElement {
-    const el = document.createElement('label');
-    el.className = 'midorii-strategies-row';
-    const text = document.createElement('span');
-    text.textContent = label;
-    if (hint) text.title = hint;
-    el.append(text, control);
-    return el;
-}
 
 export interface StrategiesViewHandle {
     /** Re-read the stored settings and repaint. Called whenever the tab is opened. */
@@ -263,61 +243,10 @@ export function mountStrategiesView(host: HTMLElement): StrategiesViewHandle {
 
     /* ── drawing ─────────────────────────────────────────────────────────── */
 
-    /** One field of a strategy's schema, as the control its type asks for. */
-    function field(param: StrategyParam, values: StrategyParams): HTMLElement {
-        if (param.type === 'select') {
-            const select = new Select({
-                options: [...(param.options ?? [])],
-                value: String(values[param.key] ?? param.default),
-                onChange: (v) => { values[param.key] = v; paint(); },
-            });
-            return row(param.label, select.el, param.hint);
-        }
-
-        if (param.type === 'multi') {
-            const picked = new Set(Array.isArray(values[param.key]) ? (values[param.key] as readonly string[]) : []);
-            const group = doc.createElement('div');
-            group.className = 'midorii-strategies-toggles';
-            for (const option of param.options ?? []) {
-                const wrap = doc.createElement('label');
-                wrap.className = 'midorii-strategies-toggle';
-                const toggle = new Switch({
-                    checked: picked.has(option.value),
-                    size: 'sm',
-                    onChange: (on) => {
-                        if (on) picked.add(option.value);
-                        else picked.delete(option.value);
-                        // The schema's own order, not the order they were clicked in.
-                        values[param.key] = (param.options ?? []).map((o) => o.value).filter((v) => picked.has(v));
-                        paint();
-                    },
-                });
-                const text = doc.createElement('span');
-                text.textContent = option.label;
-                wrap.append(toggle.el, text);
-                group.appendChild(wrap);
-            }
-            return row(param.label, group, param.hint);
-        }
-
-        if (param.type === 'bool') {
-            const toggle = new Switch({
-                checked: values[param.key] === true,
-                onChange: (on) => { values[param.key] = on; paint(); },
-            });
-            return row(param.label, toggle.el, param.hint);
-        }
-
-        const input = new NumberInput({
-            value: Number(values[param.key] ?? param.default),
-            min: param.min,
-            max: param.max,
-            step: param.step,
-            integer: param.step === 1,
-            fill: false,
-            onChange: (v) => { values[param.key] = v; paint(); },
-        });
-        return row(param.label, input.el, param.hint);
+    /** One field of a strategy's schema. The controls are shared with the Trading Bot tab,
+     *  which edits the same shape plus the live guards — see strategies/paramFields.ts. */
+    function field(param: Parameters<typeof paramField>[1], values: StrategyParams): HTMLElement {
+        return paramField(doc, param, values, paint);
     }
 
     function card(title?: string): HTMLElement {
@@ -419,15 +348,13 @@ export function mountStrategiesView(host: HTMLElement): StrategiesViewHandle {
         settings.appendChild(intro);
 
         settings.appendChild(sectionLabel('Risk and size'));
-        const riskGrid = doc.createElement('div');
-        riskGrid.className = 'midorii-strategies-grid';
+        const riskGrid = fieldGrid(doc);
         for (const param of risk) riskGrid.appendChild(field(param, values));
         settings.appendChild(riskGrid);
 
         if (own.length > 0) {
             settings.appendChild(sectionLabel('What counts as a setup'));
-            const ownGrid = doc.createElement('div');
-            ownGrid.className = 'midorii-strategies-grid';
+            const ownGrid = fieldGrid(doc);
             for (const param of own) ownGrid.appendChild(field(param, values));
             settings.appendChild(ownGrid);
         }

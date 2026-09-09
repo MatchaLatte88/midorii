@@ -117,19 +117,28 @@ export class NumberInput {
             b.appendChild(iconEl(icon, doc));
             let timer = 0;
             const apply = (): void => applyDir(dir);
-            const stop = (): void => { if (timer) { window.clearTimeout(timer); timer = 0; } };
+            const stop = (): void => {
+                if (timer) { window.clearTimeout(timer); timer = 0; }
+                window.removeEventListener('pointerup', stop);
+                window.removeEventListener('pointercancel', stop);
+            };
             b.addEventListener('pointerdown', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                /* The release is listened for on the window, not on the button: a form that
+                 * repaints from the value this writes — the bot setup does, on every change —
+                 * replaces the button under the pointer on the very first step, and a
+                 * `pointerup` on a button no longer in the document never arrives. Bound to
+                 * the button alone, the repeat below would keep firing forever. */
+                window.addEventListener('pointerup', stop);
+                window.addEventListener('pointercancel', stop);
                 apply();
                 timer = window.setTimeout(function tick() {
                     apply();
                     timer = window.setTimeout(tick, 60);
                 }, 400);
             });
-            b.addEventListener('pointerup', stop);
             b.addEventListener('pointerleave', stop);
-            b.addEventListener('pointercancel', stop);
             return b;
         };
         steps.append(mk(1, 'chevron-up', 'Increase'), mk(-1, 'chevron-down', 'Decrease'));

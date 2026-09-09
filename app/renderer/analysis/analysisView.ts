@@ -4,7 +4,7 @@ import { LiveSession } from '../../../shared/engine/liveSession.js';
 import type {
     MidoriEquityPoint, MidoriRunStats, MidoriRunSummary, MidoriSweep, MidoriSweepSummary, MidoriTrade,
 } from '../midori';
-import { formatDay, formatMoney, formatPercent, formatR, formatSignedMoney, formatWhen } from '../format';
+import { formatDay, formatMoney, formatPercent, formatPrice, formatR, formatSignedMoney, formatSize, formatWhen } from '../format';
 import {
     button, ensureFigureStyles, equityCurveSvg, runsTable, sectionLabel, settingsGrid, statGrid, tile,
     tileGrid, tradesTable,
@@ -12,6 +12,8 @@ import {
 import { ensureSweepStyles, overfitNote, sweepTable, sweepsTable } from '../backtest/sweepViews';
 import { STRATEGIES, describeParams } from '../strategies';
 import { loadPaperAccount } from '../trading/paperStore';
+import { loadJournal, summarizeJournal } from '../trading/liveJournal';
+import type { LiveTradeRecord } from '../trading/CapitalController';
 import type { PaperController } from '../trading/PaperController';
 import { tradeBreakdown } from './analysisFigures';
 
@@ -214,6 +216,8 @@ export function mountAnalysisView(host: HTMLElement, opts: AnalysisViewOptions):
     let sessions: MidoriRunSummary[] = [];
     let sweeps: MidoriSweepSummary[] = [];
     let live: Subject | null = null;
+    /** Midorii's own record of what has been traded on a real account — see liveJournal.ts. */
+    let journal: LiveTradeRecord[] = [];
 
     /* ── reading ─────────────────────────────────────────────────────────── */
 
@@ -265,10 +269,11 @@ export function mountAnalysisView(host: HTMLElement, opts: AnalysisViewOptions):
 
     async function refresh(): Promise<void> {
         try {
-            const [runs, storedSweeps, account] = await Promise.all([
+            const [runs, storedSweeps, account, trades] = await Promise.all([
                 window.midori.runs.list(),
                 window.midori.sweep.list(),
                 readLiveAccount(),
+                loadJournal(),
             ]);
             /* `strategy` is the fixed vocabulary the store files a run under (see
              * HAND_TRADED in app/electron/ipc.js), so the split is exact rather than a
@@ -277,6 +282,7 @@ export function mountAnalysisView(host: HTMLElement, opts: AnalysisViewOptions):
             sessions = runs.filter((r) => r.strategy !== 'paper');
             sweeps = storedSweeps;
             live = account;
+            journal = trades;
             open = null;
             openSweep = null;
             paint();
@@ -472,7 +478,113 @@ export function mountAnalysisView(host: HTMLElement, opts: AnalysisViewOptions):
             .catch((err: unknown) => paintError(err));
     }
 
+    /**
+     * What has been traded on a venue, from Midorii's own journal.
+     *
+     * Its own section rather than a card among the paper accounts, and the two are never
+     * totalled together: one is money and the other is not. The real account and the demo one
+     * are split for the same reason — they are two accounts, and a win rate that mixes them
+     * answers a question nobody asked.
+     *
+     * Deliberately fewer figures than a paper account gets. There is no R here (a venue does
+     * not record what a trade risked when it opened) and no equity curve read off an engine —
+     * what there is, is a list of results and their running total.
+     */
+    function liveSection(trades: readonly LiveTradeRecord[], title: string): HTMLElement {
+        const section = doc.createElement('div');
+        section.className = 'midorii-analysis-section';
+        section.append(sectionLabel(`${title} (${trades.length})`));
+
+        const summary = summarizeJournal(trades);
+        const winRate = summary.trades > 0 ? summary.wins / summary.trades : null;
+        /* The unit belongs on the number. A CFD account holds one currency and its instruments
+         * quote in others, so a bare total is only a figure until something says which money
+         * it is — and where the entries turn out to be in more than one, the total is a sum of
+         * different monies and the label has to say so rather than look tidy. */
+        const money = summary.currencies.length === 1 ? ` ${summary.currencies[0]}` : '';
+        section.append(tileGrid([
+            tile('Trades', String(summary.trades)),
+            tile('Win rate', winRate == null ? '—' : formatPercent(winRate)),
+            tile(summary.mixed ? 'Net P&L (mixed)' : `Net P&L${money}`, formatMoney(summary.netPnl), summary.netPnl),
+            /* Said out loud rather than buried: a total built partly from reconstructed exits
+             * is not the same claim as one the venue confirmed line by line. */
+            tile('Reconstructed', summary.estimated === 0 ? 'none' : `${summary.estimated} of ${summary.trades}`),
+        ]));
+
+        if (summary.mixed) {
+            section.append(subLine(
+                `These trades are booked in ${summary.currencies.join(', ')}. The total above adds them `
+                + 'together as they stand — Midorii does not convert between currencies, so read it as a '
+                + 'sum of different monies rather than one figure.',
+            ));
+        }
+
+        /* The running total, oldest first — the journal keeps newest first because that is how
+         * a list is read, and a curve is the other way round. */
+        const ordered = [...trades].reverse();
+        let running = 0;
+        const points = ordered.map((t) => {
+            running += t.netPnl;
+            return { time: t.closedAt, equity: running, balance: running, drawdown: 0 };
+        });
+        if (points.length > 1) section.append(equityCurveSvg(points, 0, summary.netPnl, 120));
+
+        section.append(liveTradesTable(trades));
+        return section;
+    }
+
+    /** The journal as a table. Its own rather than `tradesTable`, which has an R column that
+     *  a live trade can never fill. */
+    function liveTradesTable(trades: readonly LiveTradeRecord[]): HTMLElement {
+        const table = doc.createElement('table');
+        table.className = 'midorii-figures-table';
+        const head = doc.createElement('tr');
+        for (const label of ['Closed', 'Market', 'Side', 'Size', 'Entry', 'Exit', 'Net', 'Ccy']) {
+            const th = doc.createElement('th');
+            th.textContent = label;
+            head.appendChild(th);
+        }
+        table.appendChild(head);
+
+        const body = doc.createElement('tbody');
+        for (const t of trades) {
+            const tr = doc.createElement('tr');
+            const cells = [
+                formatWhen(t.closedAt),
+                t.symbol,
+                t.side,
+                formatSize(t.size),
+                formatPrice(t.entryPrice),
+                // The one place the reader can see which exits were reconstructed.
+                t.estimated ? `${formatPrice(t.exitPrice)} ~` : formatPrice(t.exitPrice),
+                formatMoney(t.netPnl),
+                t.currency ?? '—',
+            ];
+            for (const value of cells) {
+                const td = doc.createElement('td');
+                td.textContent = value;
+                tr.appendChild(td);
+            }
+            if (t.estimated) tr.title = 'The exit price and result were reconstructed by Midorii — the venue closed this position between two reads.';
+            body.appendChild(tr);
+        }
+        table.appendChild(body);
+        return table;
+    }
+
     function paintAccounts(): void {
+        const realTrades = journal.filter((t) => t.live);
+        const demoTrades = journal.filter((t) => !t.live);
+        if (realTrades.length > 0) inner.append(liveSection(realTrades, 'Live trading'));
+        if (demoTrades.length > 0) inner.append(liveSection(demoTrades, 'Demo trading'));
+        if (journal.length === 0) {
+            inner.append(sectionLabel('Live trading (0)'));
+            inner.append(empty(
+                'Nothing traded on a venue yet. Switch Trade → Capital.com on in the chart’s topbar; every '
+                + 'position that closes is written down here, whether you closed it or a stop did.',
+            ));
+        }
+
         inner.append(sectionLabel('Paper account'));
         if (live) inner.append(accountCard(live));
         else {

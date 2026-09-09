@@ -1,6 +1,8 @@
 import { injectStyles } from '../../../src/ui';
 import { formatMoney, formatPercent, formatSignedMoney, formatSize } from '../format';
 import type { AccountFigures } from './accountFigures';
+import { makeOverlayCard } from './overlayCards';
+import { loadOverlayDisplay, onOverlayDisplayChange } from './overlayDisplay';
 
 /**
  * The account, on the chart, for as long as a session runs.
@@ -9,13 +11,22 @@ import type { AccountFigures } from './accountFigures';
  * behind a stop were all in the engine and on none of the screens. Four figures is the whole
  * of it — anything more is review, and review belongs in the run library afterwards.
  *
- * It anchors to the price pane through the two custom properties the renderer publishes on the
- * cell for exactly this (`--vela-price-pane-top`, `--vela-scale-gutter`), so it sits clear of
- * the price axis at any width without reaching into the chart's own DOM.
+ * Over the four, the one thing that decides what they MEAN: whose account this is. The same
+ * card serves a replay and a paper account, and 8,934.98 says nothing about which of them is
+ * being traded — the figures are identical in shape and a session left open is a session
+ * whose kind is easy to misremember. A live account is not among them: that one has a card of
+ * its own, because "real money" is not a line in a heading.
  *
- * The card does not take the pointer: it floats over live bars, and a readout that swallowed a
- * drag through the top-right corner would be a readout people move the chart to avoid. Only
- * the labels do, so hovering one can explain what it is counting.
+ * It starts anchored to the price pane through the two custom properties the renderer
+ * publishes on the cell for exactly this (`--vela-price-pane-top`, `--vela-scale-gutter`), so
+ * it sits clear of the price axis at any width without reaching into the chart's own DOM.
+ * That is where it STARTS: the card is draggable, and one dropped somewhere else holds its own
+ * pixels from then on (see `overlayCards.ts`).
+ *
+ * The card takes the pointer, which is the price of being movable — a drag through the
+ * top-right corner moves the card rather than the chart. It can be put away for that reason
+ * alone: the close button hides it until the corner's restore button asks for it back, and
+ * Settings → Customization can keep it off for good.
  */
 
 const STYLE_ID = 'midorii-account';
@@ -23,21 +34,31 @@ const CSS = `
 .midorii-account {
     position: absolute;
     top: calc(var(--vela-price-pane-top, 0px) + 10px);
-    right: calc(var(--vela-scale-gutter, 0px) + 10px);
+    /* The last term is the room the restore button takes when it is on screen — see
+       overlayCards.ts. Zero the rest of the time, and ignored once the card is dragged. */
+    right: calc(var(--vela-scale-gutter, 0px) + 10px + var(--midorii-overlay-inset, 0px));
     z-index: 4;
     display: flex;
-    gap: 20px;
-    padding: 7px 14px 8px;
+    flex-direction: column;
+    padding: 6px 14px 8px;
     border: 1px solid var(--vela-border);
     border-radius: var(--vela-radius-md);
     background: var(--vela-surface-elev);
     box-shadow: var(--vela-shadow);
-    pointer-events: none;
     user-select: none;
 }
+/* Deliberately NOT the small-caps the column labels wear: in that dress it reads as a fifth
+   column heading with a missing figure under it. Plain sentence case, one notch quieter, is
+   what makes it a heading over the four rather than one of them. */
+.midorii-account-broker {
+    margin-bottom: 4px;
+    font-size: 10.5px;
+    color: var(--vela-fg-faint);
+    white-space: nowrap;
+}
+.midorii-account-cols { display: flex; gap: 20px; }
 .midorii-account-col { display: flex; flex-direction: column; gap: 1px; min-width: 62px; }
 .midorii-account-label {
-    pointer-events: auto;
     align-self: flex-start;
     font-size: 9px;
     font-weight: 600;
@@ -74,10 +95,23 @@ interface Column {
     readonly sub: HTMLElement;
 }
 
+export interface AccountStripOptions {
+    /**
+     * Whose account the figures are — the words the app calls this broker by elsewhere, so
+     * the card and the Trade menu agree. Required rather than defaulted: a card that guessed
+     * would eventually name the wrong account, and there is no safe guess to make.
+     */
+    broker: string;
+    /** What the heading means, on hover. */
+    brokerHint?: string;
+}
+
 export interface AccountStrip {
     /** The card itself, so whoever mounted it can take it away again. */
     readonly el: HTMLElement;
     update(figures: AccountFigures): void;
+    /** Release the drag, the corner button and the settings listener. Does not remove `el`. */
+    destroy(): void;
 }
 
 function column(doc: Document, label: string, hint?: string): Column {
@@ -119,15 +153,24 @@ function sizeLine(figures: AccountFigures): string {
 }
 
 /**
- * Mount the readout into a chart cell. The caller owns it afterwards — `el.remove()` takes it
- * off, and there is nothing else to release.
+ * Mount the readout into a chart cell. The caller owns it afterwards — `destroy()` releases
+ * what it wired up and `el.remove()` takes it off.
+ *
+ * It is mounted whatever the setting says and then hidden, rather than not mounted at all:
+ * the switch can be thrown while a session is running, and a card that had to be recreated
+ * would come back having forgotten where it was dragged to.
  */
-export function mountAccountStrip(cell: HTMLElement): AccountStrip {
+export function mountAccountStrip(cell: HTMLElement, opts: AccountStripOptions): AccountStrip {
     const doc = cell.ownerDocument;
     injectStyles(STYLE_ID, CSS, doc);
 
     const el = doc.createElement('div');
     el.className = 'midorii-account';
+
+    const broker = doc.createElement('div');
+    broker.className = 'midorii-account-broker';
+    broker.textContent = opts.broker;
+    if (opts.brokerHint) broker.title = opts.brokerHint;
 
     const equity = column(doc, 'Equity', 'Cash plus whatever is open — what the account is worth if everything closed at the last price.');
     const open = column(doc, 'Open', 'Profit on open positions that has not been booked yet. A dash means nothing is open.');
@@ -141,11 +184,23 @@ export function mountAccountStrip(cell: HTMLElement): AccountStrip {
     );
     const cash = column(doc, 'Cash', 'Settled money: what would be left if every open position closed at break-even.');
 
-    el.append(equity.el, open.el, risk.el, cash.el);
+    const cols = doc.createElement('div');
+    cols.className = 'midorii-account-cols';
+    cols.append(equity.el, open.el, risk.el, cash.el);
+
+    el.append(broker, cols);
     cell.appendChild(el);
+
+    const card = makeOverlayCard(cell, el, { id: 'account' });
+    card.setAvailable(loadOverlayDisplay().showAccount);
+    const stopWatching = onOverlayDisplayChange((display) => card.setAvailable(display.showAccount));
 
     return {
         el,
+        destroy(): void {
+            stopWatching();
+            card.destroy();
+        },
         update(f: AccountFigures): void {
             // Equity stays bright rather than coloured: the return underneath it carries the
             // direction, and two colours saying one thing is one too many.

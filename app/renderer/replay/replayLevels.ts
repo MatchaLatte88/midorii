@@ -61,7 +61,7 @@ export function wirePositionLevels(opts: LevelWiringOptions): () => void {
     const { chart, controller } = opts;
     const notify = opts.notify ?? (() => {});
 
-    const positionOf = (id: number) => controller.broker.positions.find((p) => p.id === id) ?? null;
+    const positionOf = (id: number) => controller.positions().find((p) => p.id === id) ?? null;
 
     const offMoved = chart.on('priceline:moved', ({ id, price }) => {
         const target = readLineId(id);

@@ -1,8 +1,7 @@
 import { app, BrowserWindow, nativeTheme } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configureCapital } from './data/capital.js';
-import { registerIpc } from './ipc.js';
+import { applyStoredCapitalCredentials, registerIpc } from './ipc.js';
 import { loadEnvLocal } from './loadEnv.js';
 import { TITLEBAR } from './titlebar.js';
 
@@ -18,12 +17,10 @@ const isDev = !app.isPackaged;
 // Project-root .env.local — CAPITAL_API_KEY / CAPITAL_IDENTIFIER / CAPITAL_PASSWORD /
 // CAPITAL_ENV (see .env.example). Loaded before anything reads process.env.
 loadEnvLocal(path.join(__dirname, '..', '..'));
-configureCapital({
-  apiKey: process.env.CAPITAL_API_KEY,
-  identifier: process.env.CAPITAL_IDENTIFIER,
-  password: process.env.CAPITAL_PASSWORD,
-  env: process.env.CAPITAL_ENV,
-});
+/* Credentials stored through the app take effect over the file. Awaited nowhere: the read
+ * is a few milliseconds and everything that needs them is behind a user action, so the
+ * window is not held up for it. */
+void applyStoredCapitalCredentials();
 
 let win = null;
 

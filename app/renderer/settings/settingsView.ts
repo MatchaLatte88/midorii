@@ -1,5 +1,5 @@
 import {
-    buildFieldControl, fieldGrid, fieldRow, fieldSection, injectStyles, overlayScrollbarCss,
+    buildFieldControl, fieldGrid, fieldRow, fieldSection, iconEl, injectStyles, overlayScrollbarCss,
 } from '../../../src/ui';
 import { resolveTheme } from '../../../src/core/theme';
 import type { VelaTheme } from '../../../src/core/options';
@@ -7,11 +7,16 @@ import { openChangelog } from '../about/changelogDialog';
 import { button } from '../runs/runViews';
 import { STYLES, STYLE_OPTIONS, type AppStyle, type AppThemeName } from '../shell/themes';
 import { DEFAULT_PAPER_SETTINGS, needsFreshAccount, type PaperSettings } from '../trading/paperSettings';
+import { normalizeQuickSizes } from '../replay/orderTicket';
 import {
     DEFAULT_POSITION_STYLE, LINE_WIDTHS, ZONE_OPACITIES, loadPositionStyle, opacityLabel,
     savePositionStyle, type PositionLineStyle, type PositionStyle,
 } from '../trading/positionStyle';
 import type { TradeModeHandle } from '../trading/tradeMode';
+import { loadAlertDisplay, saveAlertDisplay, type AlertDisplay } from '../alerts/alertDisplay';
+import { loadQuoteDisplay, saveQuoteDisplay, type QuoteDisplay } from '../quotes/quoteDisplay';
+import type { MidoriCapitalAccountSummary, MidoriCapitalCredentialStatus } from '../midori';
+import { loadOverlayDisplay, saveOverlayDisplay, type OverlayDisplay } from '../replay/overlayDisplay';
 import { STARTUP_TABS, loadPrefs, savePrefs, type AppPrefs, type StartupTab } from './prefs';
 
 /**
@@ -102,6 +107,25 @@ ${overlayScrollbarCss('.midorii-settings-body')}
 }
 .midorii-settings-value { color: var(--vela-fg-bright); font-variant-numeric: tabular-nums; }
 
+/* A secret typed blind is a secret typed wrong, so the field carries its own reveal.
+   The button sits inside the box rather than beside it: the row stays one control wide,
+   and the eye belongs to that field and no other. */
+.midorii-settings-secret { position: relative; display: block; width: 100%; }
+.midorii-settings-secret .vela-text-field { padding-right: 34px; }
+.midorii-settings-reveal {
+    all: unset;
+    box-sizing: border-box;
+    position: absolute; top: 50%; right: 4px; transform: translateY(-50%);
+    display: flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px;
+    border-radius: var(--vela-radius-sm);
+    color: var(--vela-fg-muted);
+    cursor: pointer;
+}
+.midorii-settings-reveal:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
+.midorii-settings-reveal:focus-visible { box-shadow: 0 0 0 2px var(--vela-focus); }
+.midorii-settings-reveal .vela-icon, .midorii-settings-reveal svg { display: block; width: 15px; height: 15px; }
+
 .midorii-settings-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
 .midorii-settings-actions-end { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .midorii-settings-status { color: var(--vela-fg-muted); font-size: 12px; }
@@ -109,12 +133,13 @@ ${overlayScrollbarCss('.midorii-settings-body')}
 `;
 
 /** Which pane is on screen. The rail is the whole of this list, in this order. */
-export type SettingsPane = 'general' | 'customization' | 'trading';
+export type SettingsPane = 'general' | 'customization' | 'trading' | 'brokers';
 
 const PANES: ReadonlyArray<{ id: SettingsPane; label: string }> = [
     { id: 'general', label: 'General' },
     { id: 'customization', label: 'Customization' },
     { id: 'trading', label: 'Trading' },
+    { id: 'brokers', label: 'Broker connection' },
 ];
 
 /** Dropdown labels for a position's line styles, and the values behind them. */
@@ -193,6 +218,15 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
     let active: SettingsPane = 'general';
     let prefs: AppPrefs = loadPrefs();
     let style: PositionStyle = loadPositionStyle();
+    let alertDisplay: AlertDisplay = loadAlertDisplay();
+    let quoteDisplay: QuoteDisplay = loadQuoteDisplay();
+    /** What is stored for the broker — never the secret itself, which the main process
+     *  has no channel to hand back. Null until the first read. */
+    let broker: MidoriCapitalCredentialStatus | null = null;
+    /** What is currently typed into the connection form. Kept across repaints so a half-
+     *  entered key is not lost by switching tabs. */
+    const brokerDraft = { apiKey: '', identifier: '', password: '', env: 'demo' as 'demo' | 'live' };
+    let overlayDisplay: OverlayDisplay = loadOverlayDisplay();
     /**
      * The paper-account form, which is the one thing here that is not applied as it is
      * typed. Kept across a pane switch rather than thrown away: it is never applied without
@@ -263,17 +297,20 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         options: ReadonlyArray<{ value: string; label: string }>,
         current: string,
         onChange: (v: string) => void,
+        /** Fixed control width. Without it the control hugs its own content, which is right
+         *  for a short list and wrong where the row sits beside typed fields. */
+        width?: number,
     ): HTMLElement {
         const control = buildFieldControl({
             kind: 'select',
             options: [...options],
             value: current,
-            fill: false,
+            fill: width != null,
             theme: theme(),
             title: label,
             onChange,
         });
-        return fieldRow({ label, control: control.el });
+        return fieldRow({ label, control: control.el, controlWidth: width });
     }
 
     function numberRow(
@@ -374,6 +411,21 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         savePositionStyle(style);
     }
 
+    function changeAlertDisplay(patch: Partial<AlertDisplay>): void {
+        alertDisplay = { ...alertDisplay, ...patch };
+        saveAlertDisplay(alertDisplay); // same contract: the chart is listening
+    }
+
+    function changeQuoteDisplay(patch: Partial<QuoteDisplay>): void {
+        quoteDisplay = { ...quoteDisplay, ...patch };
+        saveQuoteDisplay(quoteDisplay); // same contract: the chart is listening
+    }
+
+    function changeOverlayDisplay(patch: Partial<OverlayDisplay>): void {
+        overlayDisplay = { ...overlayDisplay, ...patch };
+        saveOverlayDisplay(overlayDisplay); // same contract: the chart is listening
+    }
+
     function paintGeneral(): void {
         inner.append(head(
             'General',
@@ -470,6 +522,255 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         };
         positions.appendChild(actions(defaults));
         inner.append(positions);
+
+        inner.append(card(
+            fieldSection('Alerts'),
+            note('An alert’s tag repeats its level by default. Turning that off leaves the price '
+                + 'to the axis alone — where a position and its stop and target already leave '
+                + 'theirs — and the tag says only what the alert is. Nothing about when it fires '
+                + 'changes.'),
+            boolRow('Show the level on the tag', alertDisplay.showLevel, (v) => (
+                changeAlertDisplay({ showLevel: v })
+            )),
+        ));
+
+        inner.append(card(
+            fieldSection('Bid and ask'),
+            note('Forex and commodity charts draw their candles from the bid, so the chart '
+                + 'alone never says what a buy costs. Three ways of showing it, off '
+                + 'independently: the card in the corner, the two levels across the plot, and '
+                + 'the prices chipped onto the scale beside them. Markets that quote a single '
+                + 'price — every crypto venue here — show none of it either way.'),
+            boolRow('Show the bid/ask card', quoteDisplay.showCard, (v) => (
+                changeQuoteDisplay({ showCard: v })
+            )),
+            boolRow('Show the two levels on the chart', quoteDisplay.showLines, (v) => (
+                changeQuoteDisplay({ showLines: v })
+            )),
+            boolRow('Show their prices on the scale', quoteDisplay.showBrackets, (v) => (
+                changeQuoteDisplay({ showBrackets: v })
+            )),
+        ));
+
+        inner.append(card(
+            fieldSection('Chart cards'),
+            note('The account card and the quick ticket float over the plot, and both can be '
+                + 'dragged anywhere on it and closed from their own corner — closed, they come '
+                + 'straight back through the button in the top right. This is the other answer: '
+                + 'somebody who reads the account in the dock below the chart can have the card '
+                + 'gone for good, and the ticket then takes the corner it was using.'),
+            boolRow('Show the account card', overlayDisplay.showAccount, (v) => (
+                changeOverlayDisplay({ showAccount: v })
+            )),
+        ));
+    }
+
+    /**
+     * Where a real account is connected.
+     *
+     * Its own pane rather than a corner of Trading, because it is a different kind of thing:
+     * Trading is what a trade IS, this is who you are to the venue. And it is the one screen
+     * in the app that handles a secret, which is worth keeping visibly separate.
+     *
+     * The key and the password go in and never come back. The main process has no channel
+     * that returns them — the status call says only whether something is stored and which
+     * login it belongs to — so this form can show what is connected without ever having held
+     * the secret that connects it.
+     */
+    function paintBrokers(): void {
+        inner.append(head(
+            'Broker connection',
+            'The account Midorii trades through. Stored encrypted by your operating system, '
+            + 'never in a file anyone could read.',
+        ));
+
+        const status = doc.createElement('p');
+        status.className = 'midorii-settings-status';
+        const accounts = doc.createElement('div');
+        accounts.className = 'midorii-settings-note';
+
+        const say = (text: string, error = false): void => {
+            status.textContent = text;
+            if (error) status.dataset.error = '1';
+            else delete status.dataset.error;
+        };
+
+        const listAccounts = (found: MidoriCapitalAccountSummary[]): void => {
+            accounts.replaceChildren();
+            for (const a of found) {
+                const line = doc.createElement('div');
+                const money = a.balance == null
+                    ? ''
+                    : ` · ${a.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${a.currency}`;
+                // The filled bullet marks the account the venue treats as active — the one
+                // every order and every history read is scoped to.
+                line.textContent = `${a.preferred ? '●' : '○'} ${a.accountName} (${a.accountId})${money}`;
+                accounts.appendChild(line);
+            }
+        };
+
+        /* What is stored right now, in words. Whether a .env.local is supplying credentials
+         * is worth saying: a connection that works with nothing stored is otherwise a
+         * mystery, and so is one that ignores a file somebody edited. */
+        if (broker?.configured) {
+            say(`Connected as ${broker.identifier ?? 'unknown'} · ${broker.env === 'live' ? 'LIVE MONEY' : 'demo'}`);
+        } else if (broker?.envPresent) {
+            say('Using credentials from .env.local. Saving here replaces them.');
+        } else {
+            say('Not connected.');
+        }
+
+        /* These rows are typed into, not picked from, and what goes in them is long: a key,
+         * an email address, a password. The card's control column hugs its content, which
+         * leaves a filling field with nothing to fill — so the width is stated here. */
+        const FIELD_WIDTH = 340;
+
+        const field = (
+            label: string,
+            key: 'apiKey' | 'identifier' | 'password',
+            placeholder: string,
+            secret = false,
+        ): HTMLElement => {
+            const control = buildFieldControl({
+                kind: 'text',
+                value: brokerDraft[key],
+                fill: true,
+                placeholder,
+                onChange: (v) => { brokerDraft[key] = v; },
+            });
+            if (!secret) return fieldRow({ label, control: control.el, controlWidth: FIELD_WIDTH });
+
+            // The kit has no password field; this is the same control with its characters
+            // hidden, which is all a password field is — plus the button that shows them
+            // again, because a key that cannot be read back cannot be checked for a typo.
+            const input = control.el.querySelector('input');
+            if (input) input.type = 'password';
+            const wrap = doc.createElement('div');
+            wrap.className = 'midorii-settings-secret';
+            const reveal = doc.createElement('button');
+            reveal.type = 'button';
+            reveal.className = 'midorii-settings-reveal';
+            const paintReveal = (): void => {
+                const shown = input?.type === 'text';
+                reveal.replaceChildren(iconEl(shown ? 'eye-off' : 'eye', doc));
+                const title = `${shown ? 'Hide' : 'Show'} ${label.toLowerCase()}`;
+                reveal.title = title;
+                reveal.setAttribute('aria-label', title);
+            };
+            reveal.onclick = () => {
+                if (!input) return;
+                input.type = input.type === 'password' ? 'text' : 'password';
+                paintReveal();
+            };
+            paintReveal();
+            wrap.append(control.el, reveal);
+            return fieldRow({ label, control: wrap, controlWidth: FIELD_WIDTH });
+        };
+
+        const save = button('Connect and save', 'primary');
+        const test = button('Test only');
+        const forget = button('Forget', 'danger');
+
+        const collect = (): { apiKey: string; identifier: string; password: string; env: 'demo' | 'live' } | null => {
+            const apiKey = brokerDraft.apiKey.trim();
+            const identifier = brokerDraft.identifier.trim();
+            const password = brokerDraft.password;
+            if (!apiKey || !identifier || !password) {
+                say('Fill in the API key, the login email and the key password first.', true);
+                return null;
+            }
+            return { apiKey, identifier, password, env: brokerDraft.env };
+        };
+
+        const busy = (on: boolean): void => {
+            save.disabled = on;
+            test.disabled = on;
+        };
+
+        test.onclick = () => {
+            const creds = collect();
+            if (!creds) return;
+            busy(true);
+            say('Connecting…');
+            void window.midori.capital.credentials.test(creds)
+                .then((found) => {
+                    listAccounts(found);
+                    say(`Works — ${found.length} ${found.length === 1 ? 'account' : 'accounts'} reachable. Nothing was saved.`);
+                })
+                .catch((err: unknown) => say(err instanceof Error ? err.message : String(err), true))
+                .finally(() => busy(false));
+        };
+
+        save.onclick = () => {
+            const creds = collect();
+            if (!creds) return;
+            busy(true);
+            say('Connecting…');
+            /* Tried before it is stored, so a key that does not work is refused where somebody
+             * typed it rather than found later by a chart that will not load. */
+            void window.midori.capital.credentials.save(creds)
+                .then((result) => {
+                    listAccounts(result.accounts);
+                    // The secret is out of the form the moment it is safely stored; there is
+                    // no reason for it to sit in a text box for the rest of the session.
+                    brokerDraft.apiKey = '';
+                    brokerDraft.password = '';
+                    say(`Saved and connected · ${result.env === 'live' ? 'LIVE MONEY' : 'demo'}`);
+                    refresh();
+                })
+                .catch((err: unknown) => say(err instanceof Error ? err.message : String(err), true))
+                .finally(() => busy(false));
+        };
+
+        forget.onclick = () => {
+            if (forget.dataset.armed !== '1') {
+                forget.dataset.armed = '1';
+                forget.textContent = 'Forget — click again';
+                return;
+            }
+            void window.midori.capital.credentials.clear()
+                .then(() => { say('Forgotten.'); refresh(); })
+                .catch((err: unknown) => say(err instanceof Error ? err.message : String(err), true));
+        };
+        forget.onmouseleave = () => {
+            forget.dataset.armed = '0';
+            forget.textContent = 'Forget';
+        };
+
+        const rows: HTMLElement[] = [
+            fieldSection('Capital.com'),
+            note('Create the key under Settings → API integrations on the Capital.com platform; '
+                + 'two-factor authentication has to be on before it will issue one. The password '
+                + 'below is the “Custom password” set for that key — not your account login '
+                + 'password, which does not work here and should not be put here.'),
+            field('API key', 'apiKey', 'the key from API integrations', true),
+            field('Login email', 'identifier', 'you@example.com'),
+            field('Key password', 'password', 'the custom password set for the key', true),
+            selectRow('Account', [
+                { value: 'demo', label: 'Demo — real prices, money that is not real' },
+                { value: 'live', label: 'Live — real money' },
+            ], brokerDraft.env, (v) => { brokerDraft.env = v === 'live' ? 'live' : 'demo'; }, FIELD_WIDTH),
+        ];
+        if (broker && !broker.encryptionAvailable) {
+            const warn = doc.createElement('p');
+            warn.className = 'midorii-settings-warn';
+            warn.textContent = 'This machine has no OS keychain available, so Midorii will refuse to '
+                + 'write the secret to disk rather than store it in plain text. Use a .env.local file instead.';
+            rows.push(warn);
+        }
+
+        const panel = card(...rows);
+        const actions = doc.createElement('div');
+        actions.className = 'midorii-settings-actions';
+        actions.append(save, test, status);
+        if (broker?.configured) {
+            const end = doc.createElement('div');
+            end.className = 'midorii-settings-actions-end';
+            end.append(forget);
+            actions.appendChild(end);
+        }
+        panel.append(actions, accounts);
+        inner.append(panel);
     }
 
     function paintTrading(): void {
@@ -566,6 +867,81 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
             fieldRow({ label: 'Risk per trade', control: [riskValue.el, riskModeWrap] }),
         ));
 
+        /* ── what a fresh ticket arrives with ─────────────────────────────
+         *
+         * Two distances and the unit they are read in. Ticks are the instrument's own
+         * increment — the unit a stop is actually thought in, and the one that means the
+         * same thing on an index quoted in thousands as on a pair quoted in pennies. The
+         * cash alternative is a distance in the quote currency, NOT a sum the trade may
+         * lose: what it loses is that distance times the size, and the size is decided by
+         * the risk settings above. The note says so, because the two readings are one word
+         * apart and only one of them is true. */
+        const bracketUnitLabel = (): string => (edit.bracketUnit === 'cash' ? 'price' : 'ticks');
+        const bracketStop = numberRow(`Stop distance (${bracketUnitLabel()})`, {
+            value: edit.bracketStop,
+            min: 0,
+            max: 1e9,
+            step: 1,
+            onChange: (v) => { edit.bracketStop = v; },
+        });
+        const bracketTarget = numberRow(`Target distance (${bracketUnitLabel()})`, {
+            value: edit.bracketTarget,
+            min: 0,
+            max: 1e9,
+            step: 1,
+            onChange: (v) => { edit.bracketTarget = v; },
+        });
+
+        inner.append(card(
+            fieldSection('Automatic brackets'),
+            note('A stop and a target already on the ticket when it opens, measured from '
+                + 'wherever the trade would go in. They follow the market until you type over '
+                + 'one — after that the level is yours and nothing moves it. In ticks they are '
+                + 'counted in the instrument’s own increment; in price they are a distance in '
+                + 'what the market is quoted in, not a sum of money the trade may lose. What '
+                + 'it loses is that distance times the size.'),
+            boolRow('A fresh ticket arrives bracketed', edit.autoBrackets, (v) => { edit.autoBrackets = v; }),
+            selectRow(
+                'Distances are read in',
+                [
+                    { value: 'ticks', label: 'ticks' },
+                    { value: 'cash', label: 'price' },
+                ],
+                edit.bracketUnit,
+                (v) => {
+                    edit.bracketUnit = v === 'cash' ? 'cash' : 'ticks';
+                    // The two rows below are labelled with the unit, so they have to be redrawn.
+                    paint();
+                },
+                132,
+            ),
+            bracketStop,
+            bracketTarget,
+        ));
+
+        inner.append(card(
+            fieldSection('Quick sizes'),
+            note('The sizes the ticket offers as one press, smallest first. The smallest is '
+                + 'also the step its − and + walk in, so a list of 1, 3, 5 steps in whole '
+                + 'contracts and a list of 0.01, 0.05, 0.1 steps in hundredths. The ticket can '
+                + 'edit this row itself — this is the same list, not a second one.'),
+            fieldRow({
+                label: 'Sizes offered on the ticket',
+                control: buildFieldControl({
+                    kind: 'text',
+                    value: edit.quickSizes.join(', '),
+                    fill: true,
+                    placeholder: '1, 3, 5, 10, 15',
+                    /* A list that says nothing usable leaves the sizes as they were: emptying
+                     * the row is not something anybody means by mistyping it. */
+                    onChange: (v) => {
+                        const next = normalizeQuickSizes(v.split(','));
+                        if (next != null) edit.quickSizes = next;
+                    },
+                }).el,
+            }),
+        ));
+
         save.onclick = () => {
             const applying = { ...edit };
             save.disabled = true;
@@ -630,6 +1006,7 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         inner.replaceChildren();
         if (active === 'general') paintGeneral();
         else if (active === 'customization') paintCustomization();
+        else if (active === 'brokers') paintBrokers();
         else paintTrading();
     }
 
@@ -644,6 +1021,19 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
     function refresh(): void {
         prefs = loadPrefs();
         style = loadPositionStyle();
+        alertDisplay = loadAlertDisplay();
+        quoteDisplay = loadQuoteDisplay();
+        overlayDisplay = loadOverlayDisplay();
+        /* What is stored for the broker, asked fresh: it can be changed from here and read
+         * back by the same page, and the answer comes from the main process rather than from
+         * anything this page could hold. Repaints when it lands — the pane is drawn from
+         * whatever is known at the time, and this is usually a few milliseconds later. */
+        void window.midori.capital.credentials.status()
+            .then((next) => {
+                broker = next;
+                if (active === 'brokers') paint();
+            })
+            .catch((err: unknown) => console.error('[midorii] could not read the broker credential status', err));
         /* The paper form is the exception, because it can hold work: an edit nobody has
          * saved yet is kept, and only an UNTOUCHED form is re-read. So changing the account
          * through the chart's own gear shows here on the next visit, and a half-typed

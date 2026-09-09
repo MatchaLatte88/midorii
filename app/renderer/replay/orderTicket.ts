@@ -45,6 +45,122 @@ export interface TicketAccount {
     equity: number;
     /** The last price on the chart — the only price a market order can be sized against. */
     price: number;
+    /**
+     * What is left to open something new with, and what share of a position's notional the
+     * venue holds against it.
+     *
+     * Both absent on a paper account, which has no margin: there the ceiling is the leverage
+     * setting, a number somebody typed. On a live account it is neither typed nor negotiable —
+     * the venue decides it per instrument, and a size the account cannot fund is refused
+     * however sound the risk behind it was.
+     */
+    available?: number;
+    /** A fraction of notional: 0.0333 for a venue asking 3.33%. */
+    marginFactor?: number;
+    /**
+     * The two sides of the market, where the venue quotes two.
+     *
+     * Display only — everything below is still measured from `price`, which is what the
+     * engine fills against. Absent on the accounts whose feed is one-sided (the replay, the
+     * crypto providers, the local archive), and then the panel shows the last price on both
+     * sides rather than inventing a spread nobody quoted.
+     */
+    bid?: number;
+    ask?: number;
+}
+
+/**
+ * Where a ticket's stop and target start out, before anyone drags them.
+ *
+ * A distance, not a level: the levels follow from wherever the trade would go in, so they
+ * stay the same distance away as the market moves under an untouched ticket.
+ */
+export interface BracketSettings {
+    /** Whether a fresh ticket arrives with levels on it at all. */
+    on: boolean;
+    /**
+     * How the two distances below are read.
+     *
+     * `ticks` counts the instrument's own increment — the unit a futures or FX trader
+     * actually thinks a stop in, and the one that means the same thing on an instrument
+     * quoted in thousands as on one quoted in pennies. `cash` is a distance in the quote
+     * currency: 20 means twenty of whatever the price is printed in, not a twenty-dollar
+     * loss — what the loss comes to is the size times the distance, and the size is not
+     * known until the distance is.
+     */
+    unit: 'ticks' | 'cash';
+    stop: number;
+    target: number;
+}
+
+/** How many quick sizes a ticket will offer. Past this the row is aimed at, not read. */
+export const MAX_QUICK_SIZES = 8;
+
+/**
+ * A list of quick sizes, cleaned up — or null where there is nothing usable in it.
+ *
+ * Sorted and de-duplicated because the row is read left to right: two chips saying 5 is a
+ * misprint, and 10 sitting before 3 is a row nobody can aim at. Nothing usable gives null
+ * rather than an empty list, so a mistyped list leaves the sizes as they were instead of
+ * leaving the ticket with no quick sizes and no way to get any back.
+ *
+ * Here rather than beside the settings that store it, because both the settings and the
+ * panel need it and the panel must not import the settings — the settings already import
+ * this file for {@link BracketSettings}.
+ */
+export function normalizeQuickSizes(raw: readonly unknown[]): number[] | null {
+    const clean = [...new Set(raw
+        .map((v) => (typeof v === 'number' ? v : Number(String(v).trim())))
+        .filter((n) => Number.isFinite(n) && n > 0))]
+        .sort((a, b) => a - b)
+        .slice(0, MAX_QUICK_SIZES);
+    return clean.length > 0 ? clean : null;
+}
+
+/**
+ * The levels an auto-bracketed ticket opens with, or nulls where they cannot be worked out.
+ *
+ * `tick` is the instrument's own increment, and it is genuinely unknown for some markets —
+ * a distance in ticks then has no length, and nothing is placed. A silent fallback of "1"
+ * would put a stop four ticks from the entry on an instrument that moves in hundredths.
+ */
+export function bracketLevels(
+    reference: number,
+    side: 'buy' | 'sell',
+    brackets: BracketSettings,
+    tick: number | null,
+): { stopLoss: number | null; takeProfit: number | null } {
+    const none = { stopLoss: null, takeProfit: null };
+    if (!brackets.on || !(reference > 0)) return none;
+
+    const step = brackets.unit === 'ticks' ? (tick != null && tick > 0 ? tick : null) : 1;
+    if (step == null) return none;
+
+    const away = (distance: number): number | null => (distance > 0 ? distance * step : null);
+    const stopAway = away(brackets.stop);
+    const targetAway = away(brackets.target);
+
+    // A stop below a long's entry and above a short's, and the target the other way — the
+    // same rule levelAllowed holds a dragged level to, applied before anything is dragged.
+    const sign = side === 'buy' ? 1 : -1;
+    /* On the instrument's own grid where it is known. A cash distance lands between two
+     * tradable levels more often than not, and a stop at 29603.7413 is one no venue would
+     * take and nobody would have typed. */
+    const level = (distance: number | null, direction: 1 | -1): number | null => {
+        if (distance == null) return null;
+        const price = reference + direction * sign * distance;
+        if (!(price > 0)) return null;
+        if (tick == null || !(tick > 0)) return price;
+        return Number((Math.round(price / tick) * tick).toFixed(8));
+    };
+
+    // A level the rounding has walked onto the entry is no level at all.
+    const stopLoss = level(stopAway, -1);
+    const takeProfit = level(targetAway, 1);
+    return {
+        stopLoss: stopLoss === reference ? null : stopLoss,
+        takeProfit: takeProfit === reference ? null : takeProfit,
+    };
 }
 
 export interface TicketPlan {
@@ -71,6 +187,13 @@ export interface TicketPlan {
     rr: number | null;
     /** The leverage ceiling decided this size, not the risk — the stop is too tight for it. */
     capped: boolean;
+    /**
+     * What the venue would hold against this position, and what the account has left.
+     *
+     * Null where the account does not margin — a paper account ties up nothing, and showing
+     * it a requirement of zero would read as "this is free" rather than "this does not apply".
+     */
+    margin: { required: number; available: number } | null;
 }
 
 /**
@@ -97,7 +220,7 @@ export function ticketPlan(draft: TicketDraft, account: TicketAccount, risk: Ris
     /* Where the cap bit, the size is no longer the one the risk asked for, and the trade will
      * lose less than it was allowed to at its stop. Worth saying out loud: a ticket pinned to
      * the ceiling is telling you the stop is too tight for the risk, not that all is well. */
-    const ceiling = reference != null && reference > 0 ? (account.equity * risk.maxLeverage) / reference : null;
+    const ceiling = sizeCeiling(reference, account, risk);
     const capped = draft.sizing === 'risk' && size != null && ceiling != null
         && Math.abs(size - ceiling) < ceiling * 1e-9;
 
@@ -108,14 +231,42 @@ export function ticketPlan(draft: TicketDraft, account: TicketAccount, risk: Ris
         risk: cash == null ? null : { cash, share: account.equity > 0 ? cash / account.equity : null },
         rr,
         capped,
+        margin: marginFor(notional, account),
     };
+}
+
+/**
+ * The largest size the account could carry, or null where nothing bounds it.
+ *
+ * Two different ceilings, and which one applies says what kind of account this is. A live
+ * account's is the money it has left divided by what the venue holds per unit — a hard
+ * limit, decided by somebody else. A paper account's is the leverage figure in its own
+ * settings, which is a rule its owner wrote for themselves.
+ */
+function sizeCeiling(reference: number | null, account: TicketAccount, risk: RiskSettings): number | null {
+    if (reference == null || !(reference > 0)) return null;
+    if (account.marginFactor != null && account.marginFactor > 0 && account.available != null) {
+        return account.available / (account.marginFactor * reference);
+    }
+    return (account.equity * risk.maxLeverage) / reference;
+}
+
+/** What the venue would hold against this position. Null on an account that does not margin. */
+function marginFor(notional: number | null, account: TicketAccount): { required: number; available: number } | null {
+    if (notional == null || account.marginFactor == null || account.available == null) return null;
+    return { required: notional * account.marginFactor, available: account.available };
 }
 
 /** The size the ticket would send, or null where there is no honest answer. */
 function ticketSize(draft: TicketDraft, reference: number | null, account: TicketAccount, risk: RiskSettings): number | null {
     if (draft.sizing === 'fixed') return draft.fixedSize != null && draft.fixedSize > 0 ? draft.fixedSize : null;
     if (reference == null || draft.stopLoss == null) return null;
-    return positionSize(account.equity, reference, draft.stopLoss, risk.mode, risk.value, risk.maxLeverage);
+    const sized = positionSize(account.equity, reference, draft.stopLoss, risk.mode, risk.value, risk.maxLeverage);
+    /* On a margined account the leverage setting is not the binding limit — the money left is.
+     * Held to whichever is smaller, so a ticket never offers a size the account cannot fund. */
+    const ceiling = sizeCeiling(reference, account, risk);
+    if (sized == null || ceiling == null) return sized;
+    return Math.min(sized, ceiling);
 }
 
 /**

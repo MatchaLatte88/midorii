@@ -1,3 +1,4 @@
+import type { ControlledPosition } from '../trading/TradingController';
 import { ReplaySession } from '../../../shared/engine/replaySession.js';
 import type { ReplayBar, ReplayResult } from '../../../shared/engine/replaySession.js';
 import type { Broker, Costs, Order, OrderSpec, ProtectionLevels } from '../../../shared/engine/broker.js';
@@ -130,6 +131,16 @@ export class ReplayController {
     /** The account. The session owns it; this is the name the chart wirings know it by. */
     get broker(): Broker {
         return this.session.broker;
+    }
+
+    /** What the account is worth. Its own computation — this account IS the engine. */
+    equity(): number {
+        return this.session.broker.equity;
+    }
+
+    /** What is open right now, for the chart's own gestures. */
+    positions(): readonly ControlledPosition[] {
+        return this.session.broker.positions;
     }
 
     // ── transport ────────────────────────────────────────────────────────

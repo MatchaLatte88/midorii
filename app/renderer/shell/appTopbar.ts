@@ -23,7 +23,7 @@ const TABS: ReadonlyArray<{ id: AppTab; label: string }> = [
     { id: 'backtest', label: 'Backtest' },
     { id: 'analysis', label: 'Analysis' },
     { id: 'strategies', label: 'Strategies' },
-    { id: 'bot', label: 'Bot' },
+    { id: 'bot', label: 'Trading Bot' },
 ];
 
 /** Placeholder mark until Midorii has a real one — a simple up-candle glyph. */
