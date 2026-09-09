@@ -1,5 +1,6 @@
-import { Dialog, NumberInput, Select, Switch, injectStyles } from '../../../src/ui';
+import { Dialog, NumberInput, Select, Switch, TextField, injectStyles } from '../../../src/ui';
 import { DEFAULT_PAPER_SETTINGS, needsFreshAccount, type PaperSettings } from './paperSettings';
+import { normalizeQuickSizes } from '../replay/orderTicket';
 
 /**
  * What a paper account is, before it has traded anything — and what it costs.
@@ -207,6 +208,77 @@ export async function openPaperSettings(
         risk.className = 'midorii-paper-pair';
         risk.append(riskValue.el, riskMode.el);
 
+        /* ── what a fresh ticket arrives with ─────────────────────────────
+         *
+         * Two distances and the unit they are read in. `ticks` counts the instrument's own
+         * increment; `price` is a distance in what the market is quoted in — NOT a sum the
+         * trade may lose, which is that distance times a size the risk settings above decide.
+         * The rows say which of the two is on, because the reading changes entirely with it
+         * and a bare "40" says neither. */
+        const autoBrackets = new Switch({
+            checked: draft.autoBrackets,
+            onChange: (on) => { draft.autoBrackets = on; },
+        });
+        const bracketStop = new NumberInput({
+            value: draft.bracketStop, min: 0, max: 1e9, step: 1, size: 'sm', fill: false,
+            onChange: (v) => { draft.bracketStop = v; },
+        });
+        const bracketTarget = new NumberInput({
+            value: draft.bracketTarget, min: 0, max: 1e9, step: 1, size: 'sm', fill: false,
+            onChange: (v) => { draft.bracketTarget = v; },
+        });
+        const bracketUnit = new Select({
+            options: [
+                { value: 'ticks', label: 'ticks' },
+                { value: 'cash', label: 'price' },
+            ],
+            value: draft.bracketUnit,
+            size: 'sm',
+            onChange: (v) => {
+                draft.bracketUnit = v === 'cash' ? 'cash' : 'ticks';
+                syncBracketUnit();
+            },
+        });
+        const bracketStopRow = row('Stop distance', bracketStop.el, doc);
+        const bracketTargetRow = row('Target distance', bracketTarget.el, doc);
+
+        /** Say the unit on the rows it applies to, rather than only on the one that picks it. */
+        function syncBracketUnit(): void {
+            const unit = draft.bracketUnit === 'cash' ? 'price' : 'ticks';
+            for (const [el, name] of [[bracketStopRow, 'Stop'], [bracketTargetRow, 'Target']] as const) {
+                const text = el.querySelector('span');
+                if (text) text.textContent = `${name} distance (${unit})`;
+            }
+        }
+
+        /* ── the sizes the ticket offers as one press ─────────────────────
+         *
+         * The same list the ticket's own pencil edits — one setting, two doors. A list that
+         * says nothing usable leaves the sizes as they were: emptying the row is not what
+         * anybody means by mistyping it, and it is not something the ticket could undo. */
+        const quickSizes = new TextField({
+            value: draft.quickSizes.join(', '),
+            size: 'sm',
+            /* Filled inside a width of its own: unfilled, the kit's field is a column narrow
+             * enough to ellipsise five sizes, and a list you cannot read to the end is one you
+             * cannot edit. */
+            fill: true,
+            onChange: (v) => {
+                const next = normalizeQuickSizes(v.split(','));
+                if (next != null) draft.quickSizes = next;
+                // Whatever survived the cleaning, shown as it will actually be used.
+                quickSizes.setValue(draft.quickSizes.join(', '));
+            },
+        });
+        /* The kit's own row wrapper, which is a flex box — a bare span is inline, and a width
+         * on an inline element is not a width at all. */
+        const quickSizesWrap = doc.createElement('span');
+        quickSizesWrap.className = 'midorii-paper-pair';
+        /* `flex: none` and not merely a width: the row is a flex box with a long label beside
+         * it, and a plain width would be shrunk back to the column it was widened out of. */
+        quickSizesWrap.style.flex = '0 0 160px';
+        quickSizesWrap.appendChild(quickSizes.el);
+
         save.onclick = () => finish({ settings: { ...draft }, resetsAccount: needsFreshAccount(original, draft) });
 
         const dialog = new Dialog({
@@ -240,6 +312,30 @@ export async function openPaperSettings(
                     ),
                     row('Leverage (max notional × equity)', leverage.el, doc),
                     row('Risk per trade', risk, doc),
+
+                    section('Automatic brackets', doc),
+                    note(
+                        'A stop and a target already on the ticket when it opens, measured from '
+                        + 'wherever the trade would go in. They follow the market until you type '
+                        + 'over one. In ticks they are counted in the instrument’s own increment; '
+                        + 'in price they are a distance in what the market is quoted in, not a sum '
+                        + 'of money — what the trade loses is that distance times its size.',
+                        doc,
+                    ),
+                    row('A fresh ticket arrives bracketed', autoBrackets.el, doc),
+                    row('Distances are read in', bracketUnit.el, doc),
+                    bracketStopRow,
+                    bracketTargetRow,
+
+                    section('Quick sizes', doc),
+                    note(
+                        'The sizes the ticket offers as one press, smallest first. The smallest is '
+                        + 'also the step its − and + walk in, so a list of 1, 3, 5 steps in whole '
+                        + 'contracts and one of 0.01, 0.05, 0.1 steps in hundredths. The ticket’s '
+                        + 'own pencil edits this same list.',
+                        doc,
+                    ),
+                    row('Sizes offered', quickSizesWrap, doc),
                 );
             },
             footer: (el) => {
@@ -268,6 +364,15 @@ export async function openPaperSettings(
                     fee.setValue(Number((draft.feeRate * 100).toFixed(4)));
                     spread.setValue(Number((draft.spreadPct * 100).toFixed(4)));
                     slippage.setValue(Number((draft.slippagePct * 100).toFixed(4)));
+                    /* Object.assign copies the default LIST by reference; a fresh array so
+                     * editing the sizes afterwards cannot write into the defaults themselves. */
+                    draft.quickSizes = [...DEFAULT_PAPER_SETTINGS.quickSizes];
+                    autoBrackets.setChecked(draft.autoBrackets);
+                    bracketUnit.setValue(draft.bracketUnit);
+                    bracketStop.setValue(draft.bracketStop);
+                    bracketTarget.setValue(draft.bracketTarget);
+                    quickSizes.setValue(draft.quickSizes.join(', '));
+                    syncBracketUnit();
                     syncSave();
                 };
                 const cancel = button('Cancel', doc);
@@ -276,6 +381,7 @@ export async function openPaperSettings(
             },
         });
 
+        syncBracketUnit();
         syncSave();
         dialog.show();
     });

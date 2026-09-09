@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     DEFAULT_PAPER_SETTINGS,
+    bracketsOf,
     costsOf,
     needsFreshAccount,
     normalizeSettings,
@@ -98,5 +99,49 @@ describe('how finely a gap is rechecked', () => {
         expect(catchUpLabel('60')).toBe('1h');
         expect(catchUpLabel('240')).toBe('4h');
         expect(catchUpLabel('D')).toBe('1D');
+    });
+});
+
+describe('what a fresh ticket arrives with', () => {
+    it('hands the ticket its own half of the settings', () => {
+        const s = settings({ autoBrackets: true, bracketUnit: 'cash', bracketStop: 12, bracketTarget: 30 });
+        expect(bracketsOf(s)).toEqual({ on: true, unit: 'cash', stop: 12, target: 30 });
+    });
+
+    it('is off on a fresh install', () => {
+        // A stop nobody asked for is a stop nobody chose the distance of.
+        expect(bracketsOf(DEFAULT_PAPER_SETTINGS).on).toBe(false);
+    });
+
+    it('changes nothing about the account itself', () => {
+        // These are how a trade is entered, not what the account IS — no reset.
+        const before = settings();
+        expect(needsFreshAccount(before, settings({ autoBrackets: true }))).toBe(false);
+        expect(needsFreshAccount(before, settings({ bracketStop: 99 }))).toBe(false);
+        expect(needsFreshAccount(before, settings({ quickSizes: [2, 4] }))).toBe(false);
+    });
+});
+
+describe('the quick sizes coming back from storage', () => {
+    it('keeps a list it can read, in the order the row needs', () => {
+        expect(normalizeSettings({ quickSizes: [5, 1, 5, 3] }).quickSizes).toEqual([1, 3, 5]);
+    });
+
+    it('falls back to the defaults for anything it cannot use', () => {
+        // A hand-edited entry, or a record from a version that had no such field.
+        for (const raw of [undefined, null, 'nonsense', [], [0, -1]]) {
+            expect(normalizeSettings({ quickSizes: raw }).quickSizes).toEqual(DEFAULT_PAPER_SETTINGS.quickSizes);
+        }
+    });
+
+    it('refuses a bracket unit it does not know', () => {
+        expect(normalizeSettings({ bracketUnit: 'furlongs' }).bracketUnit).toBe('ticks');
+        expect(normalizeSettings({ bracketUnit: 'cash' }).bracketUnit).toBe('cash');
+    });
+
+    it('refuses a distance that is not one', () => {
+        const d = DEFAULT_PAPER_SETTINGS;
+        expect(normalizeSettings({ bracketStop: -5 }).bracketStop).toBe(d.bracketStop);
+        expect(normalizeSettings({ bracketTarget: 'soon' }).bracketTarget).toBe(d.bracketTarget);
     });
 });

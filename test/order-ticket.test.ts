@@ -4,8 +4,10 @@
 // above the market, a stop on the winning side, a size nobody worked out. The panel greys a
 // button for each of these, and a greyed button is not a test.
 import { describe, it, expect } from 'vitest';
-import { emptyTicket, ticketOrder, ticketPlan, ticketRefusal } from '../app/renderer/replay/orderTicket';
-import type { TicketAccount, TicketDraft } from '../app/renderer/replay/orderTicket';
+import {
+    MAX_QUICK_SIZES, bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPlan, ticketRefusal,
+} from '../app/renderer/replay/orderTicket';
+import type { BracketSettings, TicketAccount, TicketDraft } from '../app/renderer/replay/orderTicket';
 import type { RiskSettings } from '../app/renderer/replay/replayOrders';
 
 /** 10,000 in the account, the market at 100. */
@@ -197,5 +199,91 @@ describe('a margined account', () => {
         const plan = ticketPlan(ticket({ stopLoss: 99.9 }), partial, risk);
         expect(plan.margin).toBeNull();
         expect(plan.size).toBe((10_000 * 1) / 100);
+    });
+});
+
+describe('the levels an auto-bracketed ticket opens with', () => {
+    const ON: BracketSettings = { on: true, unit: 'ticks', stop: 40, target: 80 };
+
+    it('puts the stop on the losing side and the target on the winning one', () => {
+        // A quarter-point instrument: 40 ticks is 10, 80 is 20.
+        const long = bracketLevels(100, 'buy', ON, 0.25);
+        expect(long.stopLoss).toBe(90);
+        expect(long.takeProfit).toBe(120);
+
+        // The same distances, mirrored — a short is wrong ABOVE where it went in.
+        const short = bracketLevels(100, 'sell', ON, 0.25);
+        expect(short.stopLoss).toBe(110);
+        expect(short.takeProfit).toBe(80);
+    });
+
+    it('counts a cash distance in what the market is quoted in', () => {
+        // Not ticks: 40 means forty of the price's own units, whatever the increment is.
+        const levels = bracketLevels(100, 'buy', { ...ON, unit: 'cash' }, 0.25);
+        expect(levels.stopLoss).toBe(60);
+        expect(levels.takeProfit).toBe(180);
+    });
+
+    it('places nothing in ticks on an instrument whose increment is unknown', () => {
+        // The whole point of a tick distance is the instrument's own grid. Without it there
+        // is no length to the distance, and a fallback of 1 would be a stop nobody chose.
+        expect(bracketLevels(100, 'buy', ON, null)).toEqual({ stopLoss: null, takeProfit: null });
+        expect(bracketLevels(100, 'buy', ON, 0)).toEqual({ stopLoss: null, takeProfit: null });
+    });
+
+    it('lands a cash distance on the instrument’s own grid', () => {
+        // 33.3 off 100 is 66.7, which a half-point instrument cannot quote.
+        const levels = bracketLevels(100, 'buy', { on: true, unit: 'cash', stop: 33.3, target: 33.3 }, 0.5);
+        expect(levels.stopLoss).toBe(66.5);
+        expect(levels.takeProfit).toBe(133.5);
+    });
+
+    it('places nothing at all when it is switched off', () => {
+        expect(bracketLevels(100, 'buy', { ...ON, on: false }, 0.25)).toEqual({ stopLoss: null, takeProfit: null });
+    });
+
+    it('places nothing without a price to measure from', () => {
+        // A resting order whose entry has not been typed yet.
+        expect(bracketLevels(0, 'buy', ON, 0.25)).toEqual({ stopLoss: null, takeProfit: null });
+    });
+
+    it('leaves out the half whose distance is zero', () => {
+        // A target of nothing is not a target on top of the entry; it is no target.
+        const levels = bracketLevels(100, 'buy', { ...ON, target: 0 }, 0.25);
+        expect(levels.stopLoss).toBe(90);
+        expect(levels.takeProfit).toBeNull();
+    });
+
+    it('refuses a level the distance would put at or below zero', () => {
+        // A stop further away than the price itself is not a price.
+        const levels = bracketLevels(10, 'buy', { on: true, unit: 'cash', stop: 20, target: 5 }, null);
+        expect(levels.stopLoss).toBeNull();
+        expect(levels.takeProfit).toBe(15);
+    });
+});
+
+describe('the sizes offered on the ticket', () => {
+    it('sorts and de-duplicates, because the row is read left to right', () => {
+        expect(normalizeQuickSizes([10, 3, 1, 3, 5])).toEqual([1, 3, 5, 10]);
+    });
+
+    it('reads a typed list, spaces and all', () => {
+        expect(normalizeQuickSizes(' 1 , 3 ,5 '.split(','))).toEqual([1, 3, 5]);
+    });
+
+    it('drops what is not a size', () => {
+        // Zero, negatives and words are not quantities anybody can trade.
+        expect(normalizeQuickSizes([1, 0, -2, 'abc', null, 5])).toEqual([1, 5]);
+    });
+
+    it('says nothing rather than nothing usable', () => {
+        // Null is what leaves the sizes as they were — an empty row could not be got back.
+        expect(normalizeQuickSizes([])).toBeNull();
+        expect(normalizeQuickSizes(['', 'x', -1])).toBeNull();
+    });
+
+    it('stops at a row that can still be aimed at', () => {
+        const many = Array.from({ length: MAX_QUICK_SIZES + 5 }, (_, i) => i + 1);
+        expect(normalizeQuickSizes(many)).toHaveLength(MAX_QUICK_SIZES);
     });
 });
