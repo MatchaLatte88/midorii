@@ -1,10 +1,14 @@
 import { applyThemeTokens, ensureUIHost, injectStyles } from '../../../src/ui';
 import { resolveTheme } from '../../../src/core/theme';
+import { mountTradeDock } from '../replay/tradeDock';
 import { mountTradeSidebar } from '../replay/tradeSidebar';
 import type { VelaWorkspace } from '../../../src/workspace';
 import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIndicator';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { wireOrderEntry } from '../replay/replayOrders';
+import { makeOverlayCard } from '../replay/overlayCards';
+import { loadOverlayDisplay, onOverlayDisplayChange } from '../replay/overlayDisplay';
+import { mountQuickPanel, type QuickPanel } from '../replay/quickPanel';
 import { formatMoney } from '../format';
 import type { CapitalController } from './CapitalController';
 import type { LiveTradeRecord } from './CapitalController';
@@ -18,18 +22,26 @@ import type { ThemeName, VelaTheme } from '../../../src';
  * The live account, put on the chart and taken off again.
  *
  * The counterpart of `paperMount`, and deliberately less than it. The panels a paper account
- * brings — the dock, the ticket's History tab, the account's own statistics — all read a
- * TRADE HISTORY, and a venue does not hand one over: it reports what is open now. Rather than
- * filling those with computed stand-ins, they are left off, and what is here is only what the
- * venue actually answers for.
+ * brings that read a TRADE HISTORY — the ticket's History tab, the account's own statistics —
+ * are left off, because a venue does not hand one over: it reports what is open now. Rather
+ * than filling those with computed stand-ins, what is here is only what the venue actually
+ * answers for. The dock is here, since what is open now is exactly what it lists — minus the
+ * four buttons that need an engine behind them, which this account has none of.
  *
  * What is always on screen
  * ------------------------
- * A band saying which account this is. Not a setting, not dismissible, and red when the money
- * is real — the difference between demo and live is one word in a file nobody looks at twice,
- * and the chart is where that word has consequences. Beside it the two figures a live account
- * is judged by (what it is worth, what is left to trade with) and the one control that must
- * never be more than one press away.
+ * A band saying which account this is, red when the money is real — the difference between
+ * demo and live is one word in a file nobody looks at twice, and the chart is where that word
+ * has consequences. Beside it the two figures a live account is judged by (what it is worth,
+ * what is left to trade with) and the one control that must never be more than one press away.
+ *
+ * It moves and it closes, like the other cards on the chart — but not all of it goes. What a
+ * band like this is FOR is the one word that says whose money this is, and that word is true
+ * whether or not somebody wants a band on their chart, so it stays behind as a line of small
+ * caps in the same corner: quiet on a demo account, red on a real one. What leaves with the
+ * band is the two figures and Close all, and both have another door (the panel beside the
+ * chart flattens; the Trade menu names the account). The restore button in the corner brings
+ * the whole thing back.
  */
 
 const STYLE_ID = 'midorii-live';
@@ -37,7 +49,10 @@ const CSS = `
 .midorii-live {
     position: absolute;
     top: calc(var(--vela-price-pane-top, 0px) + 10px);
-    right: calc(var(--vela-scale-gutter, 0px) + 10px);
+    /* The last term is the room the restore button takes when it is on screen — see
+       replay/overlayCards.ts. Zero the rest of the time, and ignored once the band is
+       dragged. */
+    right: calc(var(--vela-scale-gutter, 0px) + 10px + var(--midorii-overlay-inset, 0px));
     z-index: 5;
     display: flex;
     align-items: center;
@@ -49,7 +64,6 @@ const CSS = `
     box-shadow: var(--vela-shadow);
     user-select: none;
 }
-/* The one card in the app that keeps the pointer: it carries the way out. */
 .midorii-live-badge {
     padding: 3px 8px;
     border-radius: 999px;
@@ -99,6 +113,30 @@ const CSS = `
     max-width: 15ch;
 }
 .midorii-live-note.warn { color: var(--vela-danger); }
+
+/* What is left of the band once it is put away: the one thing on it that is true whether or
+   not anybody wants a band on their chart. Quiet in size and loud only in colour — a line of
+   small caps in the corner is not in the way of reading a chart, and on a real account it is
+   the difference between knowing and assuming. */
+.midorii-live-mark {
+    position: absolute;
+    top: calc(var(--vela-price-pane-top, 0px) + 10px);
+    right: calc(var(--vela-scale-gutter, 0px) + 10px + var(--midorii-overlay-inset, 0px));
+    z-index: 5;
+    /* The height of the buttons it stands beside, so the words sit on their centre line
+       rather than on their top edge. */
+    height: 24px;
+    display: flex;
+    align-items: center;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--vela-fg-faint);
+    user-select: none;
+    cursor: default;
+}
+.midorii-live-mark[data-live="1"] { color: var(--vela-danger); }
 `;
 
 /** How often to ask whether the venue's ledgers have caught up with a reconstructed exit.
@@ -107,6 +145,8 @@ const SETTLE_INTERVAL_MS = 5 * 60_000;
 
 export interface CapitalMountOptions {
     workspace: VelaWorkspace;
+    /** The column the chart lives in — the dock mounts at the bottom of it. */
+    stack: HTMLElement;
     /** The row the chart lives in. */
     main: HTMLElement;
     controller: CapitalController;
@@ -185,6 +225,8 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
         tick: () => tickSizeOf(opts.epic) ?? null,
         quickSizes: () => opts.settings().quickSizes,
         onQuickSizes: (next) => opts.onSettings({ ...opts.settings(), quickSizes: next }),
+        sizing: () => opts.settings().sizingMode,
+        onSizing: (next) => opts.onSettings({ ...opts.settings(), sizingMode: next }),
     });
     /**
      * Turn reconstructed exits into facts, whenever the venue's ledgers have caught up.
@@ -240,7 +282,30 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
      * theme variables the workspace writes on its own root do not reach it. */
     ensureUIHost(sidebar.el, resolveTheme(opts.theme));
     off.push(chart.on('theme:changed', (theme) => applyThemeTokens(sidebar.el, theme)));
-    off.push(() => sidebar.el.remove());
+    off.push(() => {
+        sidebar.dispose();
+        sidebar.el.remove();
+    });
+
+    /* ── what is open, under the chart ────────────────────────────────────
+     *
+     * The replay's own dock, on the venue's book. Four of its buttons are not offered here
+     * and the dock does not draw them: taking half off, reversing, break-even and trailing
+     * are things an ENGINE does to a position it owns, and this one belongs to Capital.com.
+     * What is left — the stop, the target, closing, cancelling — is every instruction the
+     * venue actually accepts, and each one goes through the same controller an order does. */
+    const dock = mountTradeDock(opts.stack, {
+        closePosition: (id) => guarded(ws, () => controller.closeOne(id)),
+        protect: (levels, id) => guarded(ws, () => controller.protect(levels, id)),
+        cancelOrder: (id) => guarded(ws, () => controller.cancelOrder(id)),
+        cancelAll: () => guarded(ws, () => controller.cancelAll()),
+        // One instruction per position: the venue has no "flatten" of its own, exactly as
+        // the card's own Close all does it.
+        flatten: () => {
+            for (const position of controller.positions()) guarded(ws, () => controller.closeOne(position.id));
+        },
+    });
+    off.push(() => dock.el.remove());
 
     // ── the two ways in through the chart itself ─────────────────────────
     off.push(wireOrderEntry({
@@ -323,7 +388,64 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
     if (cell) cell.appendChild(card);
     else console.warn('[midorii] no chart cell to mount the live account band into');
 
+    /* Which account this is, in one word, for when the band is not on the chart. It is not a
+     * smaller band and does not try to be: no figures, no controls, nothing to press — just
+     * the fact that would otherwise leave with the band. */
+    const mark = doc.createElement('div');
+    mark.className = 'midorii-live-mark';
+    mark.dataset.live = opts.live ? '1' : '0';
+    mark.textContent = opts.live ? 'Live money' : 'Demo';
+    mark.title = opts.live
+        ? 'Orders from this chart are real orders on a real account. The account band is put '
+            + 'away — bring it back from the corner, or from Settings → Customization.'
+        : 'Real prices, money that is not real. The account band is put away — bring it back '
+            + 'from the corner, or from Settings → Customization.';
+    mark.hidden = true;
+    if (cell) cell.appendChild(mark);
+
+    /* Buy / size / Sell on the plot, the same panel a replay and a paper account get — see
+     * `quickPanel.ts`. Declared before the band's own card so that card can tell it to move
+     * when the band goes away and the mark takes its place. */
+    let quick: QuickPanel | null = null;
+
+    /* Draggable, closable, and switchable off — see the note at the top of this file for what
+     * closing a LIVE account's band costs, and what the mark above keeps hold of. No `place`
+     * of its own: with nothing dragged the CSS holds it in the corner. */
+    const overlay = cell ? makeOverlayCard(cell, card, {
+        id: 'live',
+        onVisibility: (visible) => {
+            mark.hidden = visible;
+            /* The panel below sits under whichever of the two is in the corner, and neither
+             * a band switched to display:none nor the mark appearing is a resize anything
+             * would hear about. */
+            quick?.reflow();
+        },
+    }) : null;
+    if (overlay) {
+        overlay.setAvailable(loadOverlayDisplay().showLive);
+        off.push(onOverlayDisplayChange((display) => overlay.setAvailable(display.showLive)));
+        off.push(() => overlay.destroy());
+    }
+
+    if (cell) {
+        quick = mountQuickPanel(cell, {
+            price: () => controller.price(),
+            order: (spec) => guarded(ws, () => controller.order(spec)),
+            /* The venue takes two prices and reads nothing else — a distance handed to it is
+             * protection dropped on the way out. See `QuickProtection`. */
+            brackets: 'levels',
+            tick: () => tickSizeOf(opts.epic) ?? null,
+            // Under the band, or under the one line the band leaves behind.
+            anchor: () => (card.hidden ? mark : card),
+        });
+        off.push(() => quick?.destroy());
+    }
+
     const paint = (): void => {
+        /* No account line with it: that summary is a history of what has been done, and this
+         * account keeps none here — the band above carries the two figures a venue answers
+         * for. */
+        dock.render(controller.book());
         /* The account's own money, named on the label. A CFD account holds one currency while
          * its instruments quote in others, so "4,821.55" is a figure and not yet an amount. */
         const ccy = controller.accountCurrency();
@@ -357,6 +479,7 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
     controller.onChange = (): void => {
         paint();
         sidebar.refresh();
+        quick?.refresh();
     };
     paint();
 
@@ -382,6 +505,7 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
             controller.onTradeClosed = null;
             for (const dispose of off) dispose();
             card.remove();
+            mark.remove();
             indicator.remove();
         },
     };

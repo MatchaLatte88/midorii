@@ -12,6 +12,7 @@ import type { DataProvider } from '../src/plugin';
 import type { OHLCV } from '../src/core/model/ohlcv';
 import type { BacktestContext } from '../shared/engine/backtest';
 import { newBot, type BotConfig } from '../app/renderer/bot/botTypes';
+import type { MidoriBotAccount, MidoriBotAccountSnapshot } from '../app/renderer/midori';
 
 const MINUTE = 60_000;
 
@@ -25,11 +26,21 @@ function seedBars(count: number): OHLCV[] {
 
 function fakeProvider(bars: OHLCV[]) {
     let push: ((bar: OHLCV) => void) | null = null;
+    let unsubscribed = false;
     const provider: DataProvider = {
         getBars: () => Promise.resolve(bars),
-        subscribe: (_t, _tf, onBar) => { push = onBar; return () => { push = null; }; },
+        subscribe: (_t, _tf, onBar) => {
+            push = onBar;
+            unsubscribed = false;
+            return () => { push = null; unsubscribed = true; };
+        },
     };
-    return { provider, feed: (b: OHLCV) => push?.(b) };
+    return {
+        provider,
+        feed: (b: OHLCV) => push?.(b),
+        get subscribed() { return push != null; },
+        get unsubscribed() { return unsubscribed; },
+    };
 }
 
 function installStrategy(onBar: (ctx: BacktestContext) => void): void {
@@ -56,7 +67,7 @@ function stub(path: string, value: unknown): void {
 }
 
 /** The disk, as far as these tests are concerned. */
-let accounts: Map<string, { symbol: string; session: unknown; savedAt: number }>;
+let accounts: Map<string, MidoriBotAccount>;
 let storedBots: unknown[];
 let filedRuns: Array<Record<string, unknown>>;
 let journal: Array<Record<string, unknown>>;
@@ -73,7 +84,7 @@ beforeEach(() => {
                 save: (bots: unknown[]) => { storedBots = bots; return Promise.resolve({ savedAt: Date.now() }); },
                 account: {
                     load: (id: string) => Promise.resolve(accounts.get(id) ?? null),
-                    save: (id: string, account: { symbol: string; session: unknown }) => {
+                    save: (id: string, account: MidoriBotAccountSnapshot) => {
                         accounts.set(id, { ...account, savedAt: Date.now() });
                         return Promise.resolve({ savedAt: Date.now() });
                     },
@@ -99,7 +110,19 @@ beforeEach(() => {
                     return Promise.resolve({ added: true });
                 },
             },
-            capital: { environment: () => Promise.resolve({ configured: false, live: false }) },
+            capital: {
+                environment: () => Promise.resolve({ configured: true, env: 'demo', live: false }),
+                account: () => Promise.resolve(null),
+                positions: () => Promise.resolve([]),
+                workingOrders: () => Promise.resolve([]),
+                marketInfo: () => Promise.resolve(null),
+                openPosition: () => Promise.resolve({ accepted: true, dealId: 'position-1' }),
+                amendPosition: () => Promise.resolve({ accepted: true, dealId: 'position-1' }),
+                closePosition: () => Promise.resolve({ accepted: true, dealId: 'position-1' }),
+                createOrder: () => Promise.resolve({ accepted: true, dealId: 'order-1' }),
+                amendOrder: () => Promise.resolve({ accepted: true, dealId: 'order-1' }),
+                cancelOrder: () => Promise.resolve({ accepted: true, dealId: 'order-1' }),
+            },
         },
     };
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -118,10 +141,11 @@ async function tradeAndStop(bot: BotConfig): Promise<BotRunner> {
         if (ctx.index === 9) ctx.buy({ size: 0.01 });
         if (ctx.index === 12 && !ctx.isFlat) ctx.close('test');
     });
-    const feed = fakeProvider(seedBars(10));
+    const firstBarAt = Date.now() - 10 * MINUTE;
+    const feed = fakeProvider(Array.from({ length: 10 }, (_, i) => bar(firstBarAt + i * MINUTE, 100 + i * 0.1)));
     const runner = new BotRunner({ bot, providers: { fake: () => feed.provider } });
     await runner.start();
-    for (let i = 10; i <= 14; i += 1) feed.feed(bar(i * MINUTE, 100 + i));
+    for (let i = 10; i <= 14; i += 1) feed.feed(bar(firstBarAt + i * MINUTE, 100 + i));
     runner.stop();
     return runner;
 }
@@ -189,6 +213,237 @@ describe('a bot keeps its account', () => {
     });
 });
 
+describe('a bot keeps its unattended guards', () => {
+    it('keeps today\'s entry count across a stop and restart', async () => {
+        const bot = testBot({ guards: { maxTradesPerDay: 1, staleFeedSeconds: 0 } });
+        const first = await tradeAndStop(bot);
+        await first.settle();
+        first.dispose();
+
+        expect(accounts.get(bot.id)?.guards?.tradesToday).toBe(1);
+
+        installStrategy(() => undefined);
+        const feed = fakeProvider(seedBars(10));
+        const second = new BotRunner({ bot, providers: { fake: () => feed.provider } });
+        await second.start();
+
+        expect(second.todaysTrades).toBe(1);
+        expect(second.refusal()).toMatch(/trades for today/i);
+        second.stop();
+        await second.settle();
+    });
+
+    it('resets the daily count after UTC midnight but keeps a cooldown that crosses it', async () => {
+        installStrategy(() => undefined);
+        const bot = testBot({ guards: { cooldownMinutes: 120, staleFeedSeconds: 0 } });
+        const first = new BotRunner({
+            bot,
+            providers: { fake: () => fakeProvider(seedBars(10)).provider },
+        });
+        await first.start();
+        first.stop();
+        await first.settle();
+        first.dispose();
+
+        const now = Date.now();
+        const stored = accounts.get(bot.id)!;
+        accounts.set(bot.id, {
+            ...stored,
+            guards: {
+                dayKey: '2026-09-08',
+                dayOpenEquity: 11_000,
+                tradesToday: 7,
+                lastLossAt: now - 30 * MINUTE,
+            },
+        });
+
+        const second = new BotRunner({
+            bot,
+            providers: { fake: () => fakeProvider(seedBars(10)).provider },
+        });
+        await second.start();
+        expect(second.todaysTrades).toBe(0);
+        expect(second.refusal()).toMatch(/cooling off after a loss/i);
+        second.stop();
+        await second.settle();
+
+        expect(accounts.get(bot.id)?.guards).toMatchObject({
+            dayKey: '2026-09-09',
+            tradesToday: 0,
+            lastLossAt: now - 30 * MINUTE,
+        });
+    });
+
+    it('counts a resting entry when it fills, not when it is merely placed', async () => {
+        installStrategy((ctx) => {
+            if (ctx.index === 9) ctx.order({ side: 'buy', type: 'limit', size: 1, limitPrice: 95 });
+        });
+        const bot = testBot({ guards: { maxTradesPerDay: 1, maxOpenPositions: 2, staleFeedSeconds: 0 } });
+        const firstBarAt = Date.now() - 10 * MINUTE;
+        const feed = fakeProvider(Array.from({ length: 10 }, (_, i) => (
+            bar(firstBarAt + i * MINUTE, 100 + i * 0.1)
+        )));
+        const runner = new BotRunner({ bot, providers: { fake: () => feed.provider } });
+        await runner.start();
+
+        feed.feed(bar(firstBarAt + 10 * MINUTE, 101));
+        expect(runner.restingOrders()).toBe(1);
+        expect(runner.todaysTrades).toBe(0);
+
+        feed.feed({
+            time: firstBarAt + 11 * MINUTE,
+            open: 101,
+            high: 102,
+            low: 94,
+            close: 96,
+            volume: 100,
+        });
+        expect(runner.todaysTrades).toBe(1);
+        expect(runner.refusal()).toMatch(/trades for today/i);
+        runner.stop();
+        await runner.settle();
+    });
+
+    it('refuses to start when its durable state cannot be read', async () => {
+        installStrategy(() => undefined);
+        const feed = fakeProvider(seedBars(10));
+        stub('bots.account.load', () => Promise.reject(new Error('runtime JSON is corrupt')));
+        const runner = new BotRunner({ bot: testBot(), providers: { fake: () => feed.provider } });
+
+        await expect(runner.start()).rejects.toThrow(/runtime JSON is corrupt/);
+        expect(runner.status).toBe('failed');
+        expect(runner.barCount).toBe(0);
+    });
+});
+
+describe('a live bot owns only its confirmed venue ids', () => {
+    it('will not initialize ownership over pre-existing exposure on the same market', async () => {
+        installStrategy(() => undefined);
+        stub('capital.positions', () => Promise.resolve([{ market: { epic: 'EURUSD' } }]));
+        const runner = new BotRunner({
+            bot: testBot({ venue: 'capital', symbol: 'capital:EURUSD' }),
+            providers: { capital: () => fakeProvider(seedBars(10)).provider },
+        });
+
+        await expect(runner.start()).rejects.toThrow(/cannot safely assign pre-existing exposure/i);
+        expect(runner.status).toBe('failed');
+    });
+
+    it('persists an empty, verified ownership book before it begins trading', async () => {
+        installStrategy(() => undefined);
+        const bot = testBot({ venue: 'capital', symbol: 'capital:EURUSD' });
+        const runner = new BotRunner({
+            bot,
+            providers: { capital: () => fakeProvider(seedBars(10)).provider },
+        });
+
+        await runner.start();
+        runner.stop();
+        await runner.settle();
+
+        expect(accounts.get(bot.id)).toMatchObject({
+            symbol: 'capital:EURUSD',
+            capital: {
+                initialized: true,
+                positionDealIds: [],
+                workingOrderDealIds: [],
+                uncertain: false,
+            },
+        });
+        expect('session' in accounts.get(bot.id)!).toBe(false);
+    });
+
+    it('counts and persists a newly confirmed live entry', async () => {
+        installStrategy((ctx) => {
+            if (ctx.index === 9) ctx.buy({ size: 1000 });
+        });
+        const bot = testBot({
+            venue: 'capital',
+            symbol: 'capital:EURUSD',
+            guards: { maxTradesPerDay: 1, staleFeedSeconds: 0 },
+        });
+        const firstBarAt = Date.now() - 10 * MINUTE;
+        const feed = fakeProvider(Array.from(
+            { length: 10 },
+            (_, i) => bar(firstBarAt + i * MINUTE, 1.09 + i * 0.0001),
+        ));
+        const runner = new BotRunner({ bot, providers: { capital: () => feed.provider } });
+
+        await runner.start();
+        feed.feed(bar(firstBarAt + 10 * MINUTE, 1.092));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(runner.todaysTrades).toBe(1);
+        expect(runner.refusal()).toMatch(/trades for today/i);
+        runner.stop();
+        await runner.settle();
+        expect(accounts.get(bot.id)).toMatchObject({
+            guards: { tradesToday: 1 },
+            capital: { positionDealIds: ['position-1'] },
+        });
+    });
+
+    it('waits for an in-flight venue create before its stopped state is settled', async () => {
+        installStrategy((ctx) => {
+            if (ctx.index === 9) ctx.buy({ size: 1000 });
+        });
+        let answer!: (confirmation: Record<string, unknown>) => void;
+        stub('capital.openPosition', () => new Promise((resolve) => { answer = resolve; }));
+        const bot = testBot({ venue: 'capital', symbol: 'capital:EURUSD' });
+        const firstBarAt = Date.now() - 10 * MINUTE;
+        const feed = fakeProvider(Array.from(
+            { length: 10 },
+            (_, i) => bar(firstBarAt + i * MINUTE, 1.09 + i * 0.0001),
+        ));
+        const runner = new BotRunner({ bot, providers: { capital: () => feed.provider } });
+        await runner.start();
+
+        feed.feed(bar(firstBarAt + 10 * MINUTE, 1.092));
+        runner.stop();
+        let settled = false;
+        const stopping = runner.settle().then(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toBe(false);
+
+        answer({ accepted: true, dealId: 'position-late' });
+        await stopping;
+        expect(accounts.get(bot.id)?.capital).toMatchObject({
+            positionDealIds: ['position-late'],
+            uncertain: false,
+        });
+    });
+
+    it('reads the current Capital.com environment when it starts', async () => {
+        installStrategy(() => undefined);
+        stub('capital.environment', () => Promise.resolve({ configured: true, env: 'live', live: true }));
+        const runner = new BotRunner({
+            bot: testBot({ venue: 'capital', symbol: 'capital:EURUSD' }),
+            providers: { capital: () => fakeProvider(seedBars(10)).provider },
+        });
+
+        await runner.start();
+        expect(runner.log.list().some((entry) => entry.text.includes('live money'))).toBe(true);
+        runner.stop();
+        await runner.settle();
+    });
+
+    it('does not start when the Capital.com account cannot be read safely', async () => {
+        installStrategy(() => undefined);
+        const feed = fakeProvider(seedBars(10));
+        stub('capital.account', () => Promise.reject(new Error('account endpoint offline')));
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const runner = new BotRunner({
+            bot: testBot({ venue: 'capital', symbol: 'capital:EURUSD' }),
+            providers: { capital: () => feed.provider },
+        });
+
+        await expect(runner.start()).rejects.toThrow(/could not be read/i);
+        expect(runner.status).toBe('failed');
+        expect(feed.subscribed).toBe(false);
+        warn.mockRestore();
+    });
+});
+
 describe('a live bot writes every closed trade to the journal', () => {
     /** One finished trade, as CapitalController reports one. */
     function closed(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -219,7 +474,6 @@ describe('a live bot writes every closed trade to the journal', () => {
         const runner = new BotRunner({
             bot: testBot({ venue: 'capital', symbol: 'capital:EURUSD' }),
             providers: { capital: () => feed.provider },
-            live: false,
         });
         await runner.start();
         return runner;
@@ -260,12 +514,14 @@ describe('a live bot writes every closed trade to the journal', () => {
 
         expect(journal).toHaveLength(1);
         runner.stop();
+        await runner.settle();
+        expect(accounts.get('bot_test')?.guards?.lastLossAt).toBe(Date.now());
     });
 });
 
 describe('an account is filed before it is thrown away', () => {
     function engine(): BotEngine {
-        return new BotEngine({ providers: { fake: () => fakeProvider(seedBars(10)).provider }, live: () => false });
+        return new BotEngine({ providers: { fake: () => fakeProvider(seedBars(10)).provider } });
     }
 
     it('files a deleted bot\'s account as a run', async () => {
@@ -398,5 +654,188 @@ describe('an account is filed before it is thrown away', () => {
         await vi.advanceTimersByTimeAsync(0);
 
         expect(accounts.has('bot_ghost')).toBe(false);
+    });
+});
+
+describe('the engine lifecycle', () => {
+    it('loads a stored stopped paper account for display without opening a feed', async () => {
+        const bot = testBot();
+        const stored = await tradeAndStop(bot);
+        await stored.settle();
+        stored.dispose();
+        storedBots = [bot];
+        let subscriptions = 0;
+        const engine = new BotEngine({
+            providers: {
+                fake: () => ({
+                    getBars: () => Promise.resolve(seedBars(10)),
+                    subscribe: () => { subscriptions += 1; return () => undefined; },
+                }),
+            },
+        });
+
+        await engine.load();
+
+        expect(engine.runner(bot.id)).toBeNull();
+        expect(engine.displayRunner(bot.id)?.paperController?.broker.trades).toHaveLength(1);
+        expect(engine.displayRunner(bot.id)?.log.last()?.text).toMatch(/account restored/i);
+        expect(subscriptions).toBe(0);
+    });
+
+    it('keeps a stopped account and activity as a read-only display without keeping its feed alive', async () => {
+        installStrategy(() => undefined);
+        const feed = fakeProvider(seedBars(10));
+        const bot = testBot();
+        storedBots = [bot];
+        const engine = new BotEngine({ providers: { fake: () => feed.provider } });
+        await engine.load();
+        await engine.start(bot.id);
+        const active = engine.runner(bot.id);
+
+        expect(active).not.toBeNull();
+        expect(feed.subscribed).toBe(true);
+        await engine.stop(bot.id);
+
+        const readout = engine.displayRunner(bot.id);
+        expect(engine.runner(bot.id)).toBeNull();
+        expect(readout).toBe(active);
+        expect(readout?.paperController).not.toBeNull();
+        expect(readout?.log.last()?.text).toBe('Stopped.');
+        expect(feed.unsubscribed).toBe(true);
+
+        await engine.start(bot.id);
+        expect(engine.displayRunner(bot.id)).toBe(engine.runner(bot.id));
+        expect(engine.displayRunner(bot.id)).not.toBe(readout);
+        await engine.stop(bot.id);
+    });
+
+    it('coalesces concurrent loads into one read and one bot list', async () => {
+        let releaseLoad: (bots: unknown[]) => void = () => undefined;
+        let loadCalls = 0;
+        stub('bots.load', () => {
+            loadCalls += 1;
+            return new Promise((resolve) => { releaseLoad = resolve; });
+        });
+        const engine = new BotEngine({ providers: {} });
+
+        const firstLoad = engine.load();
+        const secondLoad = engine.load();
+        expect(loadCalls).toBe(1);
+        releaseLoad([testBot()]);
+        await Promise.all([firstLoad, secondLoad]);
+
+        expect(engine.ready).toBe(true);
+        expect(engine.list()).toHaveLength(1);
+    });
+
+    it('coalesces duplicate starts and cannot be re-enabled by a start that was stopped', async () => {
+        installStrategy(() => undefined);
+        let releaseHistory: (bars: OHLCV[]) => void = () => undefined;
+        let subscriptions = 0;
+        const provider: DataProvider = {
+            getBars: () => new Promise((resolve) => { releaseHistory = resolve; }),
+            subscribe: () => {
+                subscriptions += 1;
+                return () => undefined;
+            },
+        };
+        const bot = testBot();
+        storedBots = [bot];
+        const engine = new BotEngine({ providers: { fake: () => provider } });
+        await engine.load();
+
+        const firstStart = engine.start(bot.id);
+        const secondStart = engine.start(bot.id);
+        await vi.waitFor(() => expect(engine.status(bot.id)).toBe('starting'));
+        await engine.stop(bot.id);
+        releaseHistory(seedBars(10));
+        await Promise.all([firstStart, secondStart]);
+
+        expect(engine.runner(bot.id)).toBeNull();
+        expect(engine.find(bot.id)?.enabled).toBe(false);
+        expect(subscriptions).toBe(0);
+    });
+
+    it('can start a fresh runner while the cancelled history request is still pending', async () => {
+        installStrategy(() => undefined);
+        let releaseOldHistory: (bars: OHLCV[]) => void = () => undefined;
+        let providerBuilds = 0;
+        let oldSubscriptions = 0;
+        let freshSubscriptions = 0;
+        const stalled: DataProvider = {
+            getBars: () => new Promise((resolve) => { releaseOldHistory = resolve; }),
+            subscribe: () => {
+                oldSubscriptions += 1;
+                return () => undefined;
+            },
+        };
+        const fresh: DataProvider = {
+            getBars: () => Promise.resolve(seedBars(10)),
+            subscribe: () => {
+                freshSubscriptions += 1;
+                return () => undefined;
+            },
+        };
+        const bot = testBot();
+        storedBots = [bot];
+        const engine = new BotEngine({
+            providers: { fake: () => (providerBuilds++ === 0 ? stalled : fresh) },
+        });
+        await engine.load();
+
+        const cancelledStart = engine.start(bot.id);
+        await vi.waitFor(() => expect(engine.status(bot.id)).toBe('starting'));
+        await engine.stop(bot.id);
+        await engine.start(bot.id);
+
+        expect(engine.status(bot.id)).toBe('running');
+        expect(freshSubscriptions).toBe(1);
+        releaseOldHistory(seedBars(10));
+        await cancelledStart;
+
+        expect(engine.status(bot.id)).toBe('running');
+        expect(engine.find(bot.id)?.enabled).toBe(true);
+        expect(oldSubscriptions).toBe(0);
+        await engine.stop(bot.id);
+    });
+
+    it('waits for the final account write during shutdown and preserves resume intent', async () => {
+        installStrategy(() => undefined);
+        const feed = fakeProvider(seedBars(10));
+        const bot = testBot();
+        storedBots = [bot];
+        const engine = new BotEngine({ providers: { fake: () => feed.provider } });
+        await engine.load();
+        await engine.start(bot.id);
+
+        let releaseSave: () => void = () => undefined;
+        let saveStarted = false;
+        let saveCalls = 0;
+        stub('bots.account', {
+            ...(globalThis as unknown as {
+                window: { midori: { bots: { account: Record<string, unknown> } } };
+            }).window.midori.bots.account,
+            save: () => {
+                saveCalls += 1;
+                if (saveCalls > 1) return Promise.resolve({ savedAt: Date.now() });
+                return new Promise((resolve) => {
+                    saveStarted = true;
+                    releaseSave = () => resolve({ savedAt: Date.now() });
+                });
+            },
+        } as never);
+
+        let finished = false;
+        const shutdown = engine.shutdown().then(() => { finished = true; });
+        await vi.waitFor(() => expect(saveStarted).toBe(true));
+        expect(finished).toBe(false);
+        expect(engine.find(bot.id)?.enabled).toBe(true);
+
+        releaseSave();
+        await shutdown;
+
+        expect(finished).toBe(true);
+        expect(engine.runner(bot.id)).toBeNull();
+        expect(engine.find(bot.id)?.enabled).toBe(true);
     });
 });

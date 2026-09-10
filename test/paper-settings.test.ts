@@ -75,6 +75,15 @@ describe('settings coming back from storage', () => {
         expect(out.riskMode).toBe('fixed');
         expect(out.riskValue).toBe(250);
     });
+
+    it('brings back the way the ticket was last sized, and defaults it to units', () => {
+        // Set by using the panel rather than by typing it anywhere, so a record written by a
+        // version that had no such field — and one carrying nonsense — both mean the default.
+        expect(normalizeSettings({ sizingMode: 'risk' }).sizingMode).toBe('risk');
+        expect(normalizeSettings({ sizingMode: 'fixed' }).sizingMode).toBe('fixed');
+        expect(normalizeSettings({}).sizingMode).toBe('fixed');
+        expect(normalizeSettings({ sizingMode: 'units' }).sizingMode).toBe('fixed');
+    });
 });
 
 describe('how finely a gap is rechecked', () => {

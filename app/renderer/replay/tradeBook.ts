@@ -142,6 +142,74 @@ export function tradeHistory(trades: readonly ClosedTrade[]): HistoryRow[] {
     return rows;
 }
 
+/** The position fields a venue row reads. Both venue controllers' positions satisfy it. */
+export interface VenuePosition {
+    id: number;
+    /** Signed: above zero is long, below is short. */
+    size: number;
+    entryPrice: number;
+    openedAt: number;
+    stopLoss: number | null;
+    takeProfit: number | null;
+}
+
+/** The order fields a venue row reads. */
+export interface VenueOrder {
+    id: number;
+    side: 'buy' | 'sell';
+    /** Where it waits. */
+    price: number;
+    size: number;
+    /** `limit` or `stop`, in the app's own vocabulary. */
+    kind: 'limit' | 'stop';
+}
+
+/**
+ * What a VENUE says is open, as the same rows.
+ *
+ * The counterpart of {@link tradeBook} for an account no engine is behind. Three of the row's
+ * figures cannot be filled in and are left null rather than invented: R and the stop's result
+ * both need the risk a trade OPENED with, which a venue does not record, and a break-even
+ * refusal is a thing only an engine has an opinion about. The unrealized figure comes in from
+ * the caller, because where it comes from differs in kind — Capital.com states its own, and
+ * a spot balance has none until somebody computes one.
+ *
+ * Resting orders come through unfiltered, unlike an engine's: a venue's protective legs are
+ * held apart from its working orders already, in the controller, so there is nothing here to
+ * sort out.
+ */
+export function venueBook<P extends VenuePosition>(
+    positions: readonly P[],
+    orders: readonly VenueOrder[],
+    unrealized: (position: P) => number,
+): TradeBook {
+    return {
+        positions: positions.map((p): PositionRow => ({
+            id: p.id,
+            side: p.size > 0 ? 'long' : 'short',
+            size: Math.abs(p.size),
+            entryPrice: p.entryPrice,
+            openedAt: p.openedAt,
+            stopLoss: p.stopLoss,
+            takeProfit: p.takeProfit,
+            trailing: false,
+            entryTag: null,
+            unrealized: unrealized(p),
+            r: null,
+            stopResult: null,
+            breakEvenRefusal: null,
+        })),
+        orders: orders.map((o): OrderRow => ({
+            id: o.id,
+            side: o.side,
+            type: o.kind,
+            size: o.size,
+            price: o.price,
+            tag: null,
+        })),
+    };
+}
+
 export function tradeBook(broker: BookSource): TradeBook {
     const positions = broker.positions.map((p): PositionRow => {
         const size = Math.abs(p.size);

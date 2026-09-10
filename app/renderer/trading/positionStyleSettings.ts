@@ -1,5 +1,6 @@
 import type { IndicatorHandle } from '../../../src';
 import type { HostSettingsRow, VelaWorkspace } from '../../../src/workspace';
+import { contributeChartSettings } from '../shell/chartSettings';
 import { STYLE_INPUT } from '../replay/replayIndicator';
 import {
     LINE_WIDTHS, ZONE_OPACITIES, loadPositionStyle, onPositionStyleChange, opacityLabel,
@@ -137,13 +138,15 @@ export function wirePositionStyle(opts: PositionStyleOptions): { style: () => Po
         },
     ];
 
-    workspace.setAppSettingsSections([{ title: 'Trading', id: 'trading', rows }]);
+    /* Through the registry rather than straight at the workspace: this tab comes and goes with
+     * an account, and the dialog has other tabs that must not go with it. */
+    contributeChartSettings(workspace, 'trading', { title: 'Trading', id: 'trading', rows });
 
     return {
         style: () => style,
         dispose: () => {
             unsubscribe();
-            workspace.setAppSettingsSections([]);
+            contributeChartSettings(workspace, 'trading', null);
         },
     };
 }

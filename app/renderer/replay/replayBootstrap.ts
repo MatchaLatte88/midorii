@@ -1,4 +1,4 @@
-import { DARK_THEME } from '../../../src';
+import type { VelaTheme } from '../../../src';
 import { applyThemeTokens, ensureUIHost } from '../../../src/ui';
 import { VelaWorkspace } from '../../../src/workspace';
 import { barIndexAt } from '../../../shared/engine/replaySession.js';
@@ -17,6 +17,8 @@ import { REPLAY_INDICATOR_TYPE, registerReplayIndicator } from './replayIndicato
 import { wireOrderEntry } from './replayOrders';
 import { wirePositionLevels } from './replayLevels';
 import { wirePositionStyle } from '../trading/positionStyleSettings';
+import { wireOverlaySettings } from './overlaySettings';
+import { shareChartDoc } from '../shell/sharedChartDoc';
 import { loadReplayWindow } from './replayWindow';
 
 /**
@@ -49,6 +51,7 @@ async function mount(
     container: HTMLElement,
     cfg: { symbol: string; timeframe: string; clock: number; bars: ReplayBar[] },
     makeController: (provider: ReplayProvider, bars: ReplayBar[], startIndex: number) => ReplayController,
+    theme: VelaTheme,
 ): Promise<MountedReplay> {
     const archive = new LocalArchiveProvider();
     // Underscore, not hyphen: Vela parses a symbol's `provider:` prefix as
@@ -75,15 +78,23 @@ async function mount(
     stack.appendChild(main);
     container.appendChild(stack);
 
+    /* The app's ONE chart document, worn here too — a session opens looking like the chart
+     * it was started from rather than on the factory defaults. `remembers: false`: the market
+     * is the one that was SET UP, never the one a previous session was left on. */
+    const doc = shareChartDoc('replay', { symbol: `${providerName}:${cfg.symbol}`, timeframe: cfg.timeframe }, { remembers: false });
+
     const ws = new VelaWorkspace(chartHost, {
         layout: false,
         live: true,
-        theme: 'dark',
+        theme,
         symbol: `${providerName}:${cfg.symbol}`,
         timeframe: cfg.timeframe,
         brand: BRAND,
         providers: { [providerName]: () => provider },
+        persist: doc.key,
+        storage: doc.storage,
     });
+    doc.attach(ws);
     await ws.chart.ready();
 
     const controller = makeController(provider, cfg.bars, barIndexAt(cfg.bars, cfg.clock - 1));
@@ -96,9 +107,11 @@ async function mount(
     controller.attachIndicator(indicator);
     // How those visuals look, and the Trading tab in the chart settings that says so.
     wirePositionStyle({ workspace: ws, indicator });
+    // Which cards this replay's chart puts on its plot. Its own workspace, so its own tab.
+    wireOverlaySettings(ws);
 
     // The ticket beside the plot: the way in that does not go through a drawing.
-    const sidebar = showTicket(ws, main, controller);
+    const sidebar = showTicket(ws, main, controller, theme);
 
     // Vela's own position tool is the other way in — drawn like any other drawing, traded only
     // when its right-click menu says so, and sized by the panel's risk settings either way.
@@ -144,7 +157,7 @@ function guarded(ws: VelaWorkspace, run: () => void): void {
  * the workspace writes on its own root do not reach it. They are re-applied when the chart's
  * theme changes, which is a thing the settings dialog can do mid-session.
  */
-function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayController): TradeSidebar {
+function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayController, theme: VelaTheme): TradeSidebar {
     const sidebar = mountTradeSidebar(main, {
         account: () => ({ equity: controller.session.broker.equity, price: controller.session.bar.close }),
         counts: () => {
@@ -158,7 +171,7 @@ function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayCont
         },
     });
 
-    ensureUIHost(sidebar.el, DARK_THEME);
+    ensureUIHost(sidebar.el, theme);
     ws.chart.on('theme:changed', (theme) => applyThemeTokens(sidebar.el, theme));
     return sidebar;
 }
@@ -239,8 +252,9 @@ function followChartTimeframe(ws: VelaWorkspace, controller: ReplayController): 
     });
 }
 
-/** Start a fresh replay at `startTime`, on the default timeframe. */
-export async function startReplay(container: HTMLElement, cfg: ReplaySetup): Promise<MountedReplay> {
+/** Start a fresh replay at `startTime`, on the default timeframe. `theme` is the palette
+ *  the app is currently wearing — a session is built in it rather than corrected into it. */
+export async function startReplay(container: HTMLElement, cfg: ReplaySetup, theme: VelaTheme): Promise<MountedReplay> {
     const timeframe = DEFAULT_TIMEFRAME;
     const { bars } = await loadReplayWindow(cfg.symbol, timeframe, cfg.startTime);
     return mount(
@@ -251,6 +265,7 @@ export async function startReplay(container: HTMLElement, cfg: ReplaySetup): Pro
             symbol: cfg.symbol, timeframe,
             onPlayStateChange: () => syncControls(),
         }),
+        theme,
     );
 }
 
@@ -263,7 +278,7 @@ export async function startReplay(container: HTMLElement, cfg: ReplaySetup): Pro
  * It comes back on the timeframe it was put down on, including the bar it was
  * standing inside if the clock had stopped part-way through one.
  */
-export async function resumeReplay(container: HTMLElement, sessionId: string): Promise<MountedReplay> {
+export async function resumeReplay(container: HTMLElement, sessionId: string, theme: VelaTheme): Promise<MountedReplay> {
     const record = await window.midori.replay.loadSession(sessionId);
     if (!record) throw new Error(`No stored replay session ${sessionId}.`);
 
@@ -278,5 +293,6 @@ export async function resumeReplay(container: HTMLElement, sessionId: string): P
             restoredSessionId: record.id,
             onPlayStateChange: () => syncControls(),
         }),
+        theme,
     );
 }

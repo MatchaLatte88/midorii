@@ -137,8 +137,8 @@ export const PREMARKET_SHADE = withAlpha(WARNING, 0.08);
 export const POSTMARKET_SHADE = withAlpha(ACCENT, 0.08);
 export const EXTENDED_SHADE = POSTMARKET_SHADE;
 
-/** Ambient background blobs: two large radial washes at opposite corners of the plot,
- *  painted at the very bottom of the backdrop canvas — under the session bands, under
+/** Ambient background blobs: four large radial washes, one bleeding in from each corner
+ *  of the plot, painted at the very bottom of the backdrop canvas — under the session bands, under
  *  the grid, under everything. Purely cosmetic (they carry no data), so they are NOT
  *  gated on the "wait for bars" check the grid uses: an empty chart shows them too.
  *  Alpha belongs in the color itself, like the session washes. */
@@ -152,14 +152,23 @@ export interface BlobLayer {
 export interface BlobStyle {
     /** The wash bleeding in from beyond the top-left corner. */
     topLeft: BlobLayer;
+    /** The wash bleeding in from beyond the top-right corner. */
+    topRight: BlobLayer;
+    /** The wash bleeding in from beyond the bottom-left corner. */
+    bottomLeft: BlobLayer;
     /** The wash bleeding in from beyond the bottom-right corner. */
     bottomRight: BlobLayer;
 }
 
 /** Blob strengths — faint enough that candles and gridlines read unchanged over them,
- *  the stronger one top-left (the corner the eye starts from). */
-export const BLOB_ALPHA_TOP_LEFT = 0.14;
-export const BLOB_ALPHA_BOTTOM_RIGHT = 0.11;
+ *  the stronger one top-left (the corner the eye starts from), the rest stepping down
+ *  so four washes together stay as quiet as the original two. */
+export const BLOB_ALPHA: Record<keyof BlobStyle, number> = {
+    topLeft: 0.14,
+    topRight: 0.12,
+    bottomLeft: 0.1,
+    bottomRight: 0.11,
+};
 
 /**
  * The default color of one blob: the theme's own accent at that blob's strength, falling
@@ -169,7 +178,7 @@ export const BLOB_ALPHA_BOTTOM_RIGHT = 0.11;
  * actually picks pins them.
  */
 export function blobAccentColor(theme: Pick<VelaTheme, 'accent'>, layer: keyof BlobStyle): string {
-    return withAlpha(theme.accent ?? ACCENT, layer === 'topLeft' ? BLOB_ALPHA_TOP_LEFT : BLOB_ALPHA_BOTTOM_RIGHT);
+    return withAlpha(theme.accent ?? ACCENT, BLOB_ALPHA[layer]);
 }
 
 export interface ChartStyle {
@@ -228,6 +237,8 @@ export function defaultChartStyle(): ChartStyle {
         sessions: { premarketColor: PREMARKET_SHADE, postmarketColor: POSTMARKET_SHADE, extendedColor: EXTENDED_SHADE },
         blobs: {
             topLeft: { visible: true, color: null },
+            topRight: { visible: true, color: null },
+            bottomLeft: { visible: true, color: null },
             bottomRight: { visible: true, color: null },
         },
     };
@@ -339,10 +350,12 @@ export interface ChartConfig {
         postmarketColor: string;
         extendedColor: string;
     };
-    /** Ambient background blobs — the two corner washes under the grid, each with its
+    /** Ambient background blobs — the four corner washes under the grid, each with its
      *  own on/off and color. */
     blobs: {
         topLeft: { visible: boolean; color: string };
+        topRight: { visible: boolean; color: string };
+        bottomLeft: { visible: boolean; color: string };
         bottomRight: { visible: boolean; color: string };
     };
     /** Draw-order keys — what paints in front of what. The candles' own key plus one per
@@ -581,6 +594,8 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
     const sessions = asObject(p.sessions);
     const blobs = asObject(p.blobs);
     const blobTL = asObject(blobs.topLeft);
+    const blobTR = asObject(blobs.topRight);
+    const blobBL = asObject(blobs.bottomLeft);
     const blobBR = asObject(blobs.bottomRight);
     const stacking = asObject(p.stacking);
     const stackSeries = asObject(stacking.series);
@@ -684,6 +699,14 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
             topLeft: {
                 visible: isBool(blobTL.visible) ? blobTL.visible : base.blobs.topLeft.visible,
                 color: isColor(blobTL.color) ? blobTL.color : base.blobs.topLeft.color,
+            },
+            topRight: {
+                visible: isBool(blobTR.visible) ? blobTR.visible : base.blobs.topRight.visible,
+                color: isColor(blobTR.color) ? blobTR.color : base.blobs.topRight.color,
+            },
+            bottomLeft: {
+                visible: isBool(blobBL.visible) ? blobBL.visible : base.blobs.bottomLeft.visible,
+                color: isColor(blobBL.color) ? blobBL.color : base.blobs.bottomLeft.color,
             },
             bottomRight: {
                 visible: isBool(blobBR.visible) ? blobBR.visible : base.blobs.bottomRight.visible,

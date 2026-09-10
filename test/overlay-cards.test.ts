@@ -4,7 +4,8 @@
 // is the part worth a test. See app/renderer/replay/overlayCards.ts.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-    clampPlacement, loadOverlayLayout, normalizeOverlayLayout, saveCardPlacement,
+    clampPlacement, loadClosedCards, loadOverlayLayout, normalizeClosedCards,
+    normalizeOverlayLayout, saveCardClosed, saveCardPlacement,
 } from '../app/renderer/replay/overlayCards';
 import {
     DEFAULT_OVERLAY_DISPLAY, loadOverlayDisplay, normalizeOverlayDisplay, onOverlayDisplayChange,
@@ -27,9 +28,13 @@ const CARD = { width: 336, height: 66 };
 const CELL = { width: 1000, height: 600 };
 
 describe('normalizeOverlayLayout', () => {
-    it('keeps a position both cards can be placed by', () => {
-        expect(normalizeOverlayLayout({ account: { left: 12, top: 40 }, quick: { left: 12, top: 120 } }))
-            .toEqual({ account: { left: 12, top: 40 }, quick: { left: 12, top: 120 } });
+    it('keeps a position every card can be placed by', () => {
+        const stored = {
+            account: { left: 12, top: 40 },
+            quick: { left: 12, top: 120 },
+            quote: { left: 400, top: 500 },
+        };
+        expect(normalizeOverlayLayout(stored)).toEqual(stored);
     });
 
     it('reads a missing, empty or unparseable record as no layout at all', () => {
@@ -101,11 +106,16 @@ describe('the stored layout', () => {
         expect(loadOverlayLayout()).toEqual({});
     });
 
-    it('remembers one card without disturbing the other', () => {
+    it('remembers one card without disturbing the others', () => {
         saveCardPlacement('account', { left: 30, top: 60 });
         saveCardPlacement('quick', { left: 30, top: 150 });
+        saveCardPlacement('quote', { left: 400, top: 500 });
         saveCardPlacement('account', { left: 31, top: 61 });
-        expect(loadOverlayLayout()).toEqual({ account: { left: 31, top: 61 }, quick: { left: 30, top: 150 } });
+        expect(loadOverlayLayout()).toEqual({
+            account: { left: 31, top: 61 },
+            quick: { left: 30, top: 150 },
+            quote: { left: 400, top: 500 },
+        });
     });
 
     it('forgets a card on null, which puts it back where it is placed by default', () => {
@@ -122,28 +132,89 @@ describe('the stored layout', () => {
     });
 });
 
+describe('the cards that were put away', () => {
+    beforeEach(() => stubStorage());
+    afterEach(() => vi.restoreAllMocks());
+
+    it('starts with every card on the chart', () => {
+        expect(loadClosedCards()).toEqual(new Set());
+    });
+
+    it('remembers a dismissal across a restart, and taking it back', () => {
+        saveCardClosed('quote', true);
+        saveCardClosed('account', true);
+        expect(loadClosedCards()).toEqual(new Set(['account', 'quote']));
+        saveCardClosed('quote', false);
+        expect(loadClosedCards()).toEqual(new Set(['account']));
+    });
+
+    it('does not double up on a card closed twice', () => {
+        saveCardClosed('account', true);
+        saveCardClosed('account', true);
+        expect(JSON.parse(localStorage.getItem('midorii-overlay-closed') ?? '[]')).toEqual(['account']);
+    });
+
+    it('reads only ids a card answers to', () => {
+        // A record that could hide something with no way back is worse than an empty one.
+        expect(normalizeClosedCards(['account', 'ticket', 42, null])).toEqual(['account']);
+        expect(normalizeClosedCards('account')).toEqual([]);
+        expect(normalizeClosedCards({ account: true })).toEqual([]);
+        expect(normalizeClosedCards(null)).toEqual([]);
+    });
+
+    it('reads a corrupted record as nothing hidden rather than throwing at mount', () => {
+        localStorage.setItem('midorii-overlay-closed', '{ not json');
+        const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+        expect(loadClosedCards()).toEqual(new Set());
+        expect(quiet).toHaveBeenCalled(); // reported, never swallowed
+    });
+
+    it('is kept apart from where the cards sit', () => {
+        // Two questions, two records: a card can be put away having never been dragged, and a
+        // corrupted position must not be able to take a dismissal down with it.
+        saveCardPlacement('account', { left: 30, top: 60 });
+        saveCardClosed('account', true);
+        expect(loadOverlayLayout()).toEqual({ account: { left: 30, top: 60 } });
+        expect(loadClosedCards()).toEqual(new Set(['account']));
+    });
+});
+
 describe('chart card settings', () => {
     beforeEach(() => stubStorage());
     afterEach(() => vi.restoreAllMocks());
 
-    it('shows the account card until somebody says otherwise', () => {
-        expect(DEFAULT_OVERLAY_DISPLAY.showAccount).toBe(true);
-        expect(loadOverlayDisplay()).toEqual({ showAccount: true });
+    const ALL_ON = { showAccount: true, showQuick: true, showLive: true };
+
+    it('shows every card until somebody says otherwise', () => {
+        expect(DEFAULT_OVERLAY_DISPLAY).toEqual(ALL_ON);
+        expect(loadOverlayDisplay()).toEqual(ALL_ON);
     });
 
     it('takes anything a stored record cannot mean as the default', () => {
-        expect(normalizeOverlayDisplay({ showAccount: 'no' })).toEqual({ showAccount: true });
-        expect(normalizeOverlayDisplay(null)).toEqual({ showAccount: true });
+        expect(normalizeOverlayDisplay({ showAccount: 'no' })).toEqual(ALL_ON);
+        expect(normalizeOverlayDisplay(null)).toEqual(ALL_ON);
     });
 
-    it('round-trips the switch, and tells a chart that is already open', () => {
+    it('reads a record written before a switch existed as that switch being on', () => {
+        // Anybody who set the account card off in an earlier version keeps that answer, and
+        // the switches that came later start where they start rather than at false.
+        expect(normalizeOverlayDisplay({ showAccount: false }))
+            .toEqual({ showAccount: false, showQuick: true, showLive: true });
+    });
+
+    it('switches the cards independently of one another', () => {
+        saveOverlayDisplay({ ...ALL_ON, showLive: false });
+        expect(loadOverlayDisplay()).toEqual({ showAccount: true, showQuick: true, showLive: false });
+    });
+
+    it('round-trips a switch, and tells a chart that is already open', () => {
         const heard: boolean[] = [];
         const off = onOverlayDisplayChange((d) => heard.push(d.showAccount));
-        saveOverlayDisplay({ showAccount: false });
-        expect(loadOverlayDisplay()).toEqual({ showAccount: false });
+        saveOverlayDisplay({ ...ALL_ON, showAccount: false });
+        expect(loadOverlayDisplay().showAccount).toBe(false);
         expect(heard).toEqual([false]);
         off();
-        saveOverlayDisplay({ showAccount: true });
+        saveOverlayDisplay(ALL_ON);
         expect(heard).toEqual([false]); // unsubscribed, and no longer listening
     });
 });

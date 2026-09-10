@@ -40,6 +40,7 @@ export class ShortcutsHelp {
         this.list = doc.createElement('div');
         this.dialog = new Dialog({
             title: 'Keyboard shortcuts',
+            eyebrow: 'Help',
             host,
             closeOnInteractOutside: true,
             content: (body) => body.appendChild(this.list),

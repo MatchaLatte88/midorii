@@ -55,6 +55,40 @@ describe('what the quick panel would send', () => {
     });
 });
 
+describe('what a venue is sent instead', () => {
+    // Capital.com, Bybit and Binance all read two prices and nothing else. A distance handed
+    // to one of them is protection dropped on the way out — silently, on an order that has
+    // already gone — so the panel works the levels out before the order leaves.
+    it('turns the distances into levels, on the losing side of the entry', () => {
+        const draft = quick({ size: 0.5, riskCash: 50, rrr: 2 });
+        const plan = quickPlan(draft, PRICE);
+        expect(quickOrder(draft, 'buy', plan, { as: 'levels' }).bracket)
+            .toEqual({ stopLoss: 89_900, takeProfit: 90_200 });
+        expect(quickOrder(draft, 'sell', plan, { as: 'levels' }).bracket)
+            .toEqual({ stopLoss: 90_100, takeProfit: 89_800 });
+    });
+
+    it('puts a computed level on the instrument\'s own grid', () => {
+        const draft = quick({ size: 0.3, riskCash: 50 });
+        const spec = quickOrder(draft, 'buy', quickPlan(draft, PRICE), { as: 'levels', tick: 0.5 });
+        // 50 over 0.3 units is 166.666…, which is not a price any venue would take.
+        expect(spec.bracket).toEqual({ stopLoss: 89_833.5 });
+    });
+
+    it('still sends an unprotected order bare', () => {
+        const draft = quick({ size: 1 });
+        expect(quickOrder(draft, 'buy', quickPlan(draft, PRICE), { as: 'levels' }).bracket).toBeNull();
+    });
+
+    it('refuses to fall back to distances when there is no price to measure from', () => {
+        const draft = quick({ size: 1, riskCash: 50 });
+        // Unreachable through the panel — quickPlan already refuses — and loud rather than
+        // quiet, because the quiet version is an unprotected live order.
+        expect(() => quickOrder(draft, 'buy', quickPlan(draft, 0), { as: 'levels' }))
+            .toThrow(/needs a price/);
+    });
+});
+
 describe('when the quick panel refuses', () => {
     it('asks for a size before anything else', () => {
         expect(quickPlan(quick(), PRICE).refusal).toBe('Type a size first.');

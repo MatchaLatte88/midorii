@@ -10,7 +10,7 @@
  * The secret never goes back to the renderer. A screen that edits credentials does not need
  * to READ them — it needs to know whether they are set and to be able to replace them — so
  * `readPublic` answers exactly that and nothing more. There is no channel that hands the
- * password back out, which means there is no bug that can accidentally put it on screen or
+ * secret back out, which means there is no bug that can accidentally put it on screen or
  * in a log.
  *
  * Where encryption is unavailable (a Linux box with no keyring), storing is REFUSED rather
@@ -106,10 +106,10 @@ export async function readSecret(dir, provider) {
  * Store one provider's credentials, encrypted.
  *
  * `identifier` and `env` are kept in the clear because a screen has to show them; the API key
- * and the password are encrypted together as one blob, so neither can be read without the
+ * and the password or secret key are encrypted together as one blob, so neither can be read without the
  * OS key.
  */
-export async function saveCredentials(dir, provider, { identifier, env, apiKey, password }) {
+export async function saveCredentials(dir, provider, { identifier = null, env, apiKey, password, secretKey }) {
   if (!encryptionAvailable()) {
     throw new Error(
       'This machine cannot encrypt stored secrets, so Midorii will not write them to disk. '
@@ -117,7 +117,10 @@ export async function saveCredentials(dir, provider, { identifier, env, apiKey, 
     );
   }
   const record = (await readFileRecord(dir)) ?? { version: VERSION, brokers: {} };
-  const blob = safeStorage.encryptString(JSON.stringify({ apiKey, password })).toString('base64');
+  const privatePart = { apiKey };
+  if (password != null) privatePart.password = password;
+  if (secretKey != null) privatePart.secretKey = secretKey;
+  const blob = safeStorage.encryptString(JSON.stringify(privatePart)).toString('base64');
   record.brokers[provider] = {
     identifier,
     env: env === 'live' ? 'live' : 'demo',

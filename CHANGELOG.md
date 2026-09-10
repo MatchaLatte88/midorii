@@ -3,9 +3,54 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
-## [Unreleased]
+## [v0.4.0]
 
 ### Added
+
+- **Buy / size / Sell floats over a venue chart too, and can be switched off from either
+  panel.** The quick panel a replay and a paper account already have is now on a Capital.com,
+  Bybit or Binance Spot chart as well: a size, a side, and it is on — under the account band,
+  draggable and closable like every other card there. Its protection reaches those venues as
+  two prices rather than as offsets from the fill, because a venue reads nothing else, and the
+  risk box says so: the levels are set from the last price, so the trade costs about what was
+  typed rather than exactly it. Whether the panel is on the chart at all is now asked in two
+  places — the ticket beside the chart, under Extra settings, and the chart's own gear under
+  Chart cards. One setting behind both, so throwing either moves the other.
+
+- **A bot in the list answers a right-click.** Edit, Duplicate and Delete on the bot under the
+  pointer, without selecting it first — right-clicking a bot to tidy it away should not put its
+  market on the chart on the way. Duplicate copies the settings into a bot of its own: a new
+  key, stopped whatever the original is doing, and none of the original's account, because an
+  account belongs to the bot that traded it. Delete is the one the Settings tab already had,
+  which files the account as a run before the bot goes.
+
+- **Bybit can be charted and traded — spot pairs and USDT perpetuals.** Bybit joins the symbol
+  picker and the download dialog as a market source that needs no key: `BTCUSDT` is the spot
+  pair and `BTCUSDT.P` the perpetual, the same suffix Binance's contracts already use. Add an
+  API key under Broker connection and the Trade menu offers whichever of the two the chart is
+  on. The ticket places market, limit and stop orders, and the perpetual side is the first
+  venue here that can be short: a position carries its stop and target as attributes of itself,
+  so one call sets both and there is no moment in which it stands unprotected. Spot works the
+  way spot works — it sells only what the account holds, and its protection is a resting order
+  that has to be replaced rather than amended. Demo and live are both offered and are stored
+  with the key, because Bybit issues them from separate accounts on separate hosts; a live key
+  puts a red band on the chart and asks for the word to be typed before the first order.
+
+- **What is open is listed under the chart on a venue account too, and the list can be pulled
+  up.** A Capital.com or Binance Spot chart now carries the same Positions dock a replay and a
+  paper account have: what is open, what is waiting, the stop and the target as fields to type
+  in, and closing or cancelling either one at a time or all at once. Four of its buttons — take
+  half, reverse, break-even, trail — are not drawn there, because they are things an engine does
+  to a position it owns and these belong to the venue. On every screen that shows the dock, the
+  seam along its top edge drags: pull it up to see more rows, double-click it to put it back.
+  The height is remembered, and an empty dock stays one line whatever it was dragged to.
+
+- **Binance Spot Demo accounts can be traded from the chart.** Add a demo API key in Broker
+  connection, select a Binance spot market, and arm “Binance Spot — demo” from the Trade menu.
+  The ticket places market, limit, and stop orders against demo funds, reads balances and
+  open orders back from the venue, and keeps attached stop-loss and take-profit orders at the
+  venue. Spot sells only assets the account holds; it cannot short, use leverage, or connect
+  to Binance's production trading endpoint.
 
 - **The ticket is laid out the way an order ticket is laid out.** The two-sided price is at the
   top of the panel and pressing a side is how the direction is chosen, so the price you are
@@ -46,7 +91,10 @@ Vela's — the charting library Midorii is built on and forked from.
   by hand. The rules it trades are the rules a backtest ran — the same strategy object, not a
   second version of it — and it sees a bar only once that bar has closed, exactly as a backtest
   does. A bot pointed at Capital.com sends real orders, and is never resumed by itself on
-  startup: a real account is armed by a person, every time.
+  startup: a real account is armed by a person, every time. A new order is marked as
+  unresolved before it leaves for the venue; stopping waits for its verdict, and after an
+  interrupted request the bot refuses another entry until the venue account is safe to
+  assign again.
 
 - **A bot's account survives, and is filed rather than binned.** What a bot has traded is kept
   between sittings, so stopping one — or closing the app for the night — no longer loses its
@@ -82,7 +130,9 @@ Vela's — the charting library Midorii is built on and forked from.
   else on the screen tells those apart. So refusals are recorded beside the orders, in
   sentences, with a repeated one counted rather than repeated. There is deliberately no way to
   place a trade from this screen — the buttons under the chart can only close what the bot
-  opened.
+  opened. Stopping a bot keeps its last account, positions, orders, and activity visible for
+  review while disconnecting its feed and decision loop. Its settings also stay steady while
+  they are edited, so typing no longer replaces the focused field after each character.
 
 - **Trade a Capital.com account from the chart.** The Trade menu now offers the account your
   `CAPITAL_*` credentials point at, beside paper trading, and everything the chart already
@@ -162,15 +212,29 @@ Vela's — the charting library Midorii is built on and forked from.
   and its stop and target already leave theirs. The line does not move and the alert still
   fires at exactly the same price. The number is simply not said twice.
 
-- **The account card and the quick ticket can be moved, and put away.** Both float over the
-  top-right corner of the chart, which is often exactly where the market is. Drag either one
-  anywhere on the plot — by the card itself, not by the boxes and buttons on it — and it stays
-  where it was dropped, on this chart and on the next session. Each has a small close button on
-  its corner; while anything is closed, a button in the top right brings it all back. Because
-  the cards can now be dragged, a press on one moves the card rather than panning the chart
-  behind it. Under Settings → Customization → Chart cards the account card can be switched off
-  for good, for anyone who reads the account in the panel below the chart and wants the corner
-  back — the quick ticket then moves up into it.
+- **The cards on the chart can be moved, and put away.** The account card, the quick Buy/Sell
+  panel, the bid/ask readout and a live account's band all float over corners of the plot,
+  which is often exactly where the market is. Drag any of them anywhere on the chart — by the
+  card itself, not by the boxes and buttons on it — and it stays where it was dropped, on this
+  chart and on the next session. A card is always kept whole on the plot, so one that no longer
+  fits after the trade panel opens or the window shrinks moves in far enough to stay readable,
+  and goes back where it was put once the room returns. Each has a small close button on its
+  corner, and a card put away stays away — across a restart, not just for the session; while
+  anything is closed, a button in the top right brings it all back — beside the chart's own
+  maximize button rather than under it, and the two now match: same size, same surface, same
+  line. Because the cards can now be dragged, a press on one moves the card rather than panning
+  the chart behind it.
+
+  The chart's own gear has a Chart cards tab with a switch for each of them, which is the
+  difference between "not right now" and "not at all": a closed card leaves that restore button
+  behind, a card switched off leaves nothing. It sits with the rest of what a chart looks like,
+  because a card is a thing lying on a chart and the gear is two inches from it. (The bid/ask
+  card is switched from there too, and keeps its place under Settings → Customization → Bid and
+  ask beside the two other ways of showing the same price — one setting, two doors.) The live account's band is the one that
+  never takes the whole truth with it — put away or switched off, the word for whose money this
+  is stays in the corner of the chart, quiet on a demo account and red on a real one. What goes
+  with the band is the two figures and Close all, and the panel beside the chart still
+  flattens.
 
 - **The account card says which account it is.** A line over the four figures naming what is
   being traded — paper trading, or a replay. The same card serves both and the figures look
@@ -178,7 +242,70 @@ Vela's — the charting library Midorii is built on and forked from.
   remember. A live Capital.com account is unaffected: it has its own band on the chart, which
   already says in as many words whether the money is real.
 
+### Changed
+
+- **Every chart in the app wears one look.** The Chart tab, the Trading Bot tab and a replay
+  session each used to keep chart settings of their own — a replay kept none at all and opened
+  on the factory defaults every time — so a candle colour, a grid, a scale or an indicator set
+  on one was set on exactly one. They now share a single chart document: dress any of them and
+  the other two are dressed with it, whether they are open at the time or built later. What
+  stays each screen's own is the market, because a bot's symbol is the bot's business and a
+  replay's is the session's, and the position, alert and quote lines the app draws itself,
+  each of which belongs to the chart whose account is behind it. A replay now also opens in
+  the palette the app is wearing rather than starting dark and correcting itself, and the look
+  an existing install was left in carries over rather than resetting.
+
+- **The ticket opens on a typed size, and stays on whichever way you last sized.** Sizing from
+  the stop — say where the trade is wrong and how much that may cost, and let the size follow —
+  used to be what every fresh ticket asked for, which meant a person who trades in units
+  answered the same question on every order and again after every restart. Units are now what
+  a ticket opens on, `Risk` is still the same one press away, and the press is remembered: the
+  panel comes back the way it was left, on this account and on the next session. Picking a
+  quick size counts as saying units, because it is.
+
+- **Midorii opens in the trade mode it was left in — every mode, not just paper.** The Trade
+  menu already remembered a paper account across restarts; now a Capital.com, Bybit or Binance
+  Spot account is remembered the same way, and Just Watching stays Just Watching. What the
+  memory does NOT do is arm anything: a venue mode comes back only as far as its arm dialog,
+  which still names the account and still asks — and on a live-money key still wants the word
+  typed — on this start and on every start after it. Say no, or open the app on a market that
+  account cannot trade, or remove the key, and the chart stays on Just Watching without
+  forgetting where it was: the next start offers it again.
+
 ### Fixed
+
+- **A Binance Spot size can no longer be snapped UP onto a very fine step.** The ticket rounds a
+  size onto the market's step before sending it, and the rounding is meant to be a floor, so
+  snapping can only ever ask for less than was typed — never for more than the balance behind
+  it. It read the step's precision by counting the digits after the decimal point, which a step
+  fine enough for JavaScript to print as `1e-7` does not have: the size was then rounded to a
+  whole coin, and `(0.5).toFixed(0)` is `1`. No Binance pair is quoted that finely today, so
+  nothing was ever mis-sent; the guarantee is now true whatever the venue lists tomorrow.
+
+- **Switching to paper trading from a venue no longer leaves the venue on the chart.** Picking
+  Paper trading while a Capital.com or Binance Spot account was armed started the paper account
+  without putting the venue one down: its reconcile timer kept running, and because a position
+  is drawn by a single-instance indicator, both accounts wrote the same drawing. The figures on
+  the entry line — the size, the open profit, the R — were then whichever account had pushed
+  last, so a losing trade could read as a winning one. One account at a time, as the two venue
+  modes already did it.
+
+- **Trading bots now stop cleanly even while they are still starting.** Starting or stopping
+  the same bot more than once no longer creates an unreachable market feed or turns a stopped
+  bot back on after a delayed history request finishes. Bots also keep running when their tab
+  has never been opened, and app shutdown waits for their latest runtime state to be
+  saved before the window closes.
+
+- **Capital.com bots now manage only the trades they opened.** Each bot remembers its confirmed
+  positions and working orders, carries ownership across a filled resting order, and leaves
+  manual trades and other bots alone on the same market. A first start with pre-existing
+  exposure, or a create request whose outcome is unknown, stops safely until the market can be
+  checked.
+
+- **Bot risk limits now survive stops and app restarts.** Daily entry counts, opening equity,
+  and the cooldown after a loss carry across the same UTC day. A missing state file still starts
+  fresh, while corrupt or unsupported state now refuses the start instead of silently clearing
+  a limit.
 
 - **A live trade is no longer sized against the wrong side of the price.** The candles on a
   CFD chart are drawn from the bid, and the live account was measuring every plan against

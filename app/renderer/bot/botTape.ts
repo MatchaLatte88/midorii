@@ -51,7 +51,7 @@ const MARKS: Record<BotLogEntry['kind'], string> = {
 };
 
 export interface BotTape {
-    /** Draw one runner's log, or the empty state when nothing is running. */
+    /** Draw a runner's live or retained log, or the empty state when neither exists. */
     render(runner: BotRunner | null): void;
 }
 

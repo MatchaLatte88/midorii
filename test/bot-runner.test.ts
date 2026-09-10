@@ -102,6 +102,29 @@ afterEach(() => {
 });
 
 describe('starting', () => {
+    it('does not open a feed after it is stopped while history is still loading', async () => {
+        installStrategy('test-strategy', () => undefined);
+        let releaseHistory: (bars: OHLCV[]) => void = () => undefined;
+        let subscriptions = 0;
+        const provider: DataProvider = {
+            getBars: () => new Promise((resolve) => { releaseHistory = resolve; }),
+            subscribe: () => {
+                subscriptions += 1;
+                return () => undefined;
+            },
+        };
+        const runner = makeRunner(provider, testBot());
+
+        const starting = runner.start();
+        await vi.waitFor(() => expect(runner.status).toBe('starting'));
+        runner.stop();
+        releaseHistory(seedBars(10));
+        await starting;
+
+        expect(runner.status).toBe('stopped');
+        expect(subscriptions).toBe(0);
+    });
+
     it('seeds the history without the bar that is still forming', async () => {
         installStrategy('test-strategy', () => undefined);
         const bars = seedBars(10);

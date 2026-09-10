@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { tradeBook, type BookOrder, type BookPosition, type BookSource } from '../app/renderer/replay/tradeBook';
+import { tradeBook, venueBook, type BookOrder, type BookPosition, type BookSource } from '../app/renderer/replay/tradeBook';
 
 const HOUR = 3_600_000;
 
@@ -133,5 +133,43 @@ describe('replay trade book — orders', () => {
 
     it('has nothing to say about an empty account', () => {
         expect(tradeBook(broker())).toEqual({ positions: [], orders: [] });
+    });
+});
+
+describe('venue trade book', () => {
+    const open = {
+        id: 3,
+        size: -0.4,
+        entryPrice: 78_400,
+        openedAt: HOUR,
+        stopLoss: 78_900,
+        takeProfit: 77_400,
+    };
+
+    it('reads the side off the signed size and reports the size positive', () => {
+        const [row] = venueBook([open], [], () => 0).positions;
+        expect(row).toMatchObject({ id: 3, side: 'short', size: 0.4, entryPrice: 78_400 });
+    });
+
+    it('takes the open result from the caller rather than computing one', () => {
+        // Capital.com states its own; a spot balance has none until somebody computes it.
+        const [row] = venueBook([open], [], () => -128.5).positions;
+        expect(row!.unrealized).toBe(-128.5);
+    });
+
+    it('leaves the three figures a venue cannot answer for null', () => {
+        // R and the stop's result both need the risk the trade OPENED with, which a venue
+        // does not record; a break-even refusal is an engine's opinion, and there is none.
+        const [row] = venueBook([open], [], () => 0).positions;
+        expect(row).toMatchObject({ r: null, stopResult: null, breakEvenRefusal: null, trailing: false });
+    });
+
+    it('lists a resting order at the price it waits on, under its own kind', () => {
+        const [row] = venueBook([], [{ id: 11, side: 'buy', price: 77_000, size: 0.1, kind: 'stop' }], () => 0).orders;
+        expect(row).toMatchObject({ id: 11, side: 'buy', type: 'stop', size: 0.1, price: 77_000, tag: null });
+    });
+
+    it('has nothing to say about an empty account', () => {
+        expect(venueBook([], [], () => 0)).toEqual({ positions: [], orders: [] });
     });
 });

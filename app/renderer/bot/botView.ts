@@ -1,4 +1,4 @@
-import { applyThemeTokens, ensureUIHost, injectStyles, overlayScrollbarCss } from '../../../src/ui';
+import { Menu, applyThemeTokens, ensureUIHost, injectStyles, overlayScrollbarCss } from '../../../src/ui';
 import { resolveTheme } from '../../../src/core/theme';
 import type { ThemeName, VelaTheme } from '../../../src';
 import type { DataProvider } from '../../../src/plugin';
@@ -10,12 +10,13 @@ import type { AccountFigures } from '../replay/accountFigures';
 import { mountTradeDock, type TradeDock } from '../replay/tradeDock';
 import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIndicator';
 import { button, ensureFigureStyles } from '../runs/runViews';
+import { shareChartDoc } from '../shell/sharedChartDoc';
 import { STRATEGIES } from '../strategies';
 import { BotEngine } from './BotEngine';
 import { setBotChart } from './botChart';
 import type { BotRunner } from './BotRunner';
 import { mountBotForm, type BotForm } from './botForm';
-import { newBot, type BotConfig } from './botTypes';
+import { botId, newBot, type BotConfig } from './botTypes';
 import { botTape } from './botTape';
 
 /**
@@ -76,6 +77,9 @@ ${overlayScrollbarCss('.midorii-bot-list')}
 }
 .midorii-bot-item:hover { background: var(--vela-hover); }
 .midorii-bot-item[data-active='1'] { background: var(--vela-active); }
+/* The row an open right-click menu is about — a ring rather than a wash, so it still reads
+   as itself while the pointer has moved off it and onto the menu. */
+.midorii-bot-item[data-menu='1'] { box-shadow: inset 0 0 0 1px var(--vela-border-strong); }
 .midorii-bot-item-head { display: flex; align-items: center; gap: 6px; }
 .midorii-bot-item b { flex: 1 1 auto; font-size: 13px; font-weight: 600; color: var(--vela-fg-bright);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -84,6 +88,7 @@ ${overlayScrollbarCss('.midorii-bot-list')}
 .midorii-bot-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--vela-fg-faint); }
 .midorii-bot-dot[data-state='running'] { background: var(--vela-up, #089981); }
 .midorii-bot-dot[data-state='starting'] { background: var(--vela-warning, #d9822b); }
+.midorii-bot-dot[data-state='stopping'] { background: var(--vela-warning, #d9822b); }
 .midorii-bot-dot[data-state='failed'] { background: var(--vela-danger, #f23645); }
 
 .midorii-bot-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
@@ -137,6 +142,10 @@ ${overlayScrollbarCss('.midorii-bot-tape')}
 .midorii-bot-fig b.down { color: var(--vela-down, #f23645); }
 `;
 
+/** The market this screen's chart opens on before a bot has been selected — selecting one
+ *  switches it to whatever that bot trades. */
+const BOT_MARKET = { symbol: 'binance:BTCUSDT', timeframe: '5' };
+
 /** Which half of a bot's screen is showing. */
 type Pane = 'live' | 'settings';
 
@@ -162,6 +171,8 @@ const EMPTY_ACCOUNT: AccountFigures = {
 export interface BotViewOptions {
     /** Every market source the app can reach — the bots build their own instances. */
     providers: Record<string, () => DataProvider>;
+    /** The app-owned engine. It runs before and independently of this optional screen. */
+    engine: BotEngine;
     /** The app's palette, read fresh: this view builds a chart of its own. */
     theme: () => ThemeName | VelaTheme;
     /** How something that happened without a click reaches a person. */
@@ -173,8 +184,6 @@ export interface BotViewHandle {
     refresh(): Promise<void>;
     /** Dress the view's own chart in the app's current palette. */
     setTheme(theme: VelaTheme): void;
-    /** The engine, so the app can resume bots at startup and stop them at shutdown. */
-    readonly engine: BotEngine;
 }
 
 /** Mount the Trading Bot tab into `host`. */
@@ -185,26 +194,27 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
     registerTradeIndicator();
 
     let capitalConfigured = false;
-    void window.midori.capital.environment()
-        .then((env) => { capitalConfigured = env.configured; paint(); })
-        .catch((err: unknown) => console.error('[midorii] could not read the Capital.com environment', err));
+    async function refreshCapitalEnvironment(): Promise<void> {
+        try {
+            capitalConfigured = (await window.midori.capital.environment()).configured;
+        } catch (err) {
+            console.error('[midorii] could not read the Capital.com environment', err);
+        }
+    }
+    void refreshCapitalEnvironment().then(() => paint());
 
-    const engine = new BotEngine({
-        providers: opts.providers,
-        live: () => liveCredentials,
-        onChange: () => schedulePaint(),
-        notify: opts.notify,
-    });
-    let liveCredentials = false;
-    void window.midori.capital.environment()
-        .then((env) => { liveCredentials = env.live; })
-        .catch(() => undefined);
+    const engine = opts.engine;
+    engine.subscribe(() => schedulePaint());
 
     let selected = '';
     let pane: Pane = 'live';
     let form: BotForm | null = null;
     /** Which bot the form is currently pointed at, so it is only rebuilt on a real change. */
     let formFor = '';
+    let formBot: BotConfig | null = null;
+    let formReadOnly = false;
+    let formAccountTrades = 0;
+    let formCapitalConfigured = false;
 
     /* ── the frame ───────────────────────────────────────────────────────── */
 
@@ -279,19 +289,22 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
 
     function ensureChart(): VelaWorkspace {
         if (ws) return ws;
+        /* The app's ONE chart document — dressed here is dressed on the Chart tab and in a
+         * replay too. Only the market stays this screen's own, which is the bot's, not a
+         * person's: selecting a bot below switches it. See shell/sharedChartDoc.ts. */
+        const doc = shareChartDoc('bot', BOT_MARKET);
         ws = new VelaWorkspace(chartHost, {
             layout: false,
             live: true,
             theme: opts.theme(),
-            symbol: 'binance:BTCUSDT',
-            timeframe: '5',
+            symbol: BOT_MARKET.symbol,
+            timeframe: BOT_MARKET.timeframe,
             brand: BRAND,
             providers: opts.providers,
-            /* Its own document, separate from the Chart tab's: the indicators and drawings
-             * somebody puts on a bot's chart are about that bot, and a shared one would put
-             * them on the live chart too. */
-            persist: 'midorii-bot-workspace',
+            persist: doc.key,
+            storage: doc.storage,
         });
+        doc.attach(ws);
 
         /* Claimed before anything else, so the app's own topbar actions know not to project
          * onto it — the Trade menu most of all, which on a bot's chart would wire a second
@@ -387,7 +400,7 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
             ));
         }
 
-        const runner = engine.runner(bot.id);
+        const runner = engine.displayRunner(bot.id);
         const key = runner ? `${bot.id}:${runner.status}` : '';
         if (key === indicatorFor) return;
 
@@ -430,6 +443,10 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
                 selected = bot.id;
                 paint();
             };
+            item.oncontextmenu = (e) => {
+                e.preventDefault();
+                openListMenu(bot, item, e.clientX, e.clientY);
+            };
             list.appendChild(item);
         }
     }
@@ -450,7 +467,7 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
         head.replaceChildren();
         if (!bot) return;
 
-        const runner = engine.runner(bot.id);
+        const runner = engine.displayRunner(bot.id);
         const status = engine.status(bot.id);
 
         const title = doc.createElement('div');
@@ -468,13 +485,17 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
                 : `Running · watching for a setup · ${runner?.barCount ?? 0} bars`;
         } else if (status === 'starting') {
             sub.textContent = 'Starting…';
+        } else if (status === 'stopping') {
+            sub.textContent = 'Stopping · saving the latest account state…';
+        } else if (runner?.paperController || runner?.capitalController) {
+            sub.textContent = 'Stopped · last account and activity retained for review';
         } else {
             sub.textContent = `Stopped · ${STRATEGIES[bot.strategy]?.name ?? bot.strategy} on ${bot.symbol || 'no market'}`;
         }
         title.append(name, sub);
         head.appendChild(title);
 
-        if (runner && status === 'running') {
+        if (runner && (runner.paperController || runner.capitalController)) {
             const figs = doc.createElement('span');
             figs.className = 'midorii-bot-figs';
             const equity = runner.equity();
@@ -505,8 +526,78 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
 
         const toggle = button(status === 'stopped' || status === 'failed' ? 'Start' : 'Stop',
             status === 'stopped' || status === 'failed' ? 'primary' : 'danger');
+        toggle.disabled = status === 'stopping';
         toggle.onclick = () => void toggleBot(bot);
         head.appendChild(toggle);
+    }
+
+    /* ── the list's right-click menu ─────────────────────────────────────── */
+
+    /**
+     * Delete / Edit / Duplicate on a bot in the list.
+     *
+     * The three things somebody does to a bot they are not currently watching, without
+     * having to select it first and walk to the Settings tab for two of them. Nothing here
+     * can START a bot — the same asymmetry the rest of this screen keeps: the ways in stay
+     * deliberate, the ways to tidy up do not have to be.
+     *
+     * The menu does NOT change the selection. Right-clicking a bot to delete it should not
+     * first put its market on the chart; the row it is about carries a ring instead.
+     */
+    let listMenu: Menu | null = null;
+    /** The bot the open menu is about, and the row wearing the ring for it. */
+    let menuFor = '';
+    let menuRow: HTMLElement | null = null;
+
+    function ensureListMenu(): Menu {
+        if (listMenu) return listMenu;
+        listMenu = new Menu({
+            host: (root.closest('.vela-ui') as HTMLElement | null) ?? doc.body,
+            items: [],
+            placement: 'bottom-start',
+            // Pointer-anchored action menu — the same shape the chart's own right-click menu uses.
+            checkmarks: true,
+            onOpenChange: (open) => {
+                if (open) return;
+                if (menuRow) delete menuRow.dataset.menu;
+                menuRow = null;
+            },
+            onSelect: (id) => {
+                /* Read back rather than closed over: a repaint between the right-click and the
+                 * press is ordinary here, and the object the list drew may no longer be the
+                 * stored one. A bot deleted in the meantime simply has nothing to act on. */
+                const bot = engine.find(menuFor);
+                if (!bot) return;
+                if (id === 'edit') {
+                    selected = bot.id;
+                    pane = 'settings';
+                    paint();
+                } else if (id === 'duplicate') {
+                    void duplicateBot(bot);
+                } else if (id === 'delete') {
+                    void deleteBot(bot);
+                }
+            },
+        });
+        return listMenu;
+    }
+
+    function openListMenu(bot: BotConfig, row: HTMLElement, x: number, y: number): void {
+        menuFor = bot.id;
+        if (menuRow) delete menuRow.dataset.menu;
+        menuRow = row;
+        row.dataset.menu = '1';
+
+        const menu = ensureListMenu();
+        menu.setItems([
+            { id: 'edit', label: 'Edit', icon: 'gear' },
+            { id: 'duplicate', label: 'Duplicate', icon: 'clone' },
+            /* Last and set apart: the only one of the three that destroys something. What it
+             * destroys is the account, not the record — see BotEngine.remove, which files a
+             * run before it goes. */
+            { id: 'delete', label: 'Delete', icon: 'trash', separatorBefore: true },
+        ]);
+        menu.openAt(x, y);
     }
 
     /* ── acting ──────────────────────────────────────────────────────────── */
@@ -528,6 +619,49 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
         } catch (err) {
             opts.notify(err instanceof Error ? err.message : String(err), 'error');
         }
+    }
+
+    /**
+     * Make a second bot from an existing one's settings.
+     *
+     * The copy is a bot, not a clone. It gets a key of its own, it starts stopped whatever
+     * the original was doing, and it brings none of the original's account or history with
+     * it — those belong to the bot that traded them, and a duplicate showing trades it never
+     * made would be a lie the first time anybody read its equity.
+     *
+     * It opens on Settings, because the reason to duplicate a bot is almost always to change
+     * one thing about it.
+     */
+    async function duplicateBot(bot: BotConfig): Promise<void> {
+        const copy: BotConfig = {
+            ...bot,
+            id: botId(),
+            name: copyName(bot.name),
+            // Copied one level down: the form writes whole objects back, but a shared
+            // reference here would make editing the copy edit the original's settings too.
+            params: { ...bot.params },
+            guards: { ...bot.guards },
+            enabled: false,
+            createdAt: Date.now(),
+        };
+        try {
+            await engine.add(copy);
+            selected = copy.id;
+            pane = 'settings';
+            paint();
+        } catch (err) {
+            opts.notify(err instanceof Error ? err.message : String(err), 'error');
+        }
+    }
+
+    /** A name for the copy that is not the original's: “X copy”, then “X copy 2”. Names are
+     *  never keys — this is so the list can be read, not so it stays unique. */
+    function copyName(name: string): string {
+        const taken = new Set(engine.list().map((b) => b.name));
+        const base = `${name} copy`;
+        let candidate = base;
+        for (let n = 2; taken.has(candidate); n += 1) candidate = `${base} ${n}`;
+        return candidate;
     }
 
     async function toggleBot(bot: BotConfig): Promise<void> {
@@ -618,7 +752,8 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
         }
 
         paintHead(bot);
-        const running = engine.status(bot.id) === 'running' || engine.status(bot.id) === 'starting';
+        const status = engine.status(bot.id);
+        const running = status === 'running' || status === 'starting' || status === 'stopping';
 
         livePane.hidden = pane !== 'live';
         settingsPane.hidden = pane !== 'settings';
@@ -632,26 +767,51 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
              * visible. The tab switch calls refresh(), which paints again with a real box. */
             if (!host.hidden) {
                 syncChart(bot);
-                paintLive(engine.runner(bot.id));
+                paintLive(engine.displayRunner(bot.id), status !== 'running');
             }
-        } else if (formFor !== bot.id || !form) {
-            formFor = bot.id;
-            settingsInner.replaceChildren();
-            form = mountBotForm(doc, {
-                bot,
-                readOnly: running,
-                capitalConfigured,
-                accountTrades: engine.runner(bot.id)?.paperController?.broker.trades.length ?? 0,
-                onSave: saveBot,
-                onDelete: () => void deleteBot(bot),
-                onResetAccount: () => void resetAccount(bot),
-            });
-            settingsInner.appendChild(form.el);
+        } else {
+            const accountTrades = engine.displayRunner(bot.id)?.paperController?.broker.trades.length ?? 0;
+            if (formFor !== bot.id || !form) {
+                formFor = bot.id;
+                formBot = bot;
+                formReadOnly = running;
+                formAccountTrades = accountTrades;
+                formCapitalConfigured = capitalConfigured;
+                settingsInner.replaceChildren();
+                form = mountBotForm(doc, {
+                    bot,
+                    readOnly: running,
+                    capitalConfigured,
+                    accountTrades,
+                    onSave: saveBot,
+                    onDelete: () => {
+                        const current = engine.find(bot.id);
+                        if (current) void deleteBot(current);
+                    },
+                    onResetAccount: () => {
+                        const current = engine.find(bot.id);
+                        if (current) void resetAccount(current);
+                    },
+                });
+                settingsInner.appendChild(form.el);
+            } else if (
+                formBot !== bot
+                || formReadOnly !== running
+                || formAccountTrades !== accountTrades
+                || formCapitalConfigured !== capitalConfigured
+            ) {
+                formBot = bot;
+                formReadOnly = running;
+                formAccountTrades = accountTrades;
+                formCapitalConfigured = capitalConfigured;
+                form.reset(bot, running, accountTrades, capitalConfigured);
+            }
         }
     }
 
-    /** The live half: the account card, the dock and the tape, from whatever is running. */
-    function paintLive(runner: BotRunner | null): void {
+    /** The live half: the account card, the dock and the tape, including the retained readout
+     *  after a runner has stopped. */
+    function paintLive(runner: BotRunner | null, readOnly = false): void {
         if (!runner) {
             /* The card is left alone rather than hidden. It owns its own visibility — a
              * person can put it away with its corner button and the Settings tab can switch
@@ -666,11 +826,21 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
         if (paper) {
             strip?.update(paper.account());
             dock?.render(paper.book(), { stats: paper.stats() });
+        } else if (runner.capitalController) {
+            strip?.update(EMPTY_ACCOUNT);
+            dock?.render(runner.capitalController.book());
         } else {
-            /* A live bot's positions are the venue's, and the venue does not answer in the
-             * engine's shape. The dock is left empty rather than filled with a guess — the
-             * chart's own lines are drawn from the venue's answer and are the truthful view. */
+            strip?.update(EMPTY_ACCOUNT);
             dock?.render({ positions: [], orders: [] });
+        }
+        if (dock) {
+            if (readOnly) dock.el.dataset.readonly = '1';
+            else delete dock.el.dataset.readonly;
+            for (const control of dock.el.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+                '.midorii-dock-btn, .midorii-dock-price',
+            )) {
+                if (readOnly) control.disabled = true;
+            }
         }
         tape.render(runner);
     }
@@ -690,8 +860,8 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
     paint();
 
     return {
-        engine,
         async refresh(): Promise<void> {
+            await refreshCapitalEnvironment();
             if (!engine.ready) {
                 try {
                     await engine.load();

@@ -126,7 +126,7 @@ export class NumberInput {
                 e.preventDefault();
                 e.stopPropagation();
                 /* The release is listened for on the window, not on the button: a form that
-                 * repaints from the value this writes — the bot setup does, on every change —
+                 * repaints from the value this writes while the pointer is still down,
                  * replaces the button under the pointer on the very first step, and a
                  * `pointerup` on a button no longer in the document never arrives. Bound to
                  * the button alone, the repeat below would keep firing forever. */

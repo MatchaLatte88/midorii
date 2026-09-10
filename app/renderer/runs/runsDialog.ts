@@ -158,6 +158,7 @@ export async function openRunsDialog(host: HTMLElement): Promise<void> {
 
         const dialog = new Dialog({
             title: 'Runs',
+            eyebrow: 'Journal',
             host,
             className: 'vela-dialog--runs midorii-runs-panel',
             draggable: true,
@@ -168,7 +169,6 @@ export async function openRunsDialog(host: HTMLElement): Promise<void> {
                 showList();
             },
             footer: (el) => {
-                el.style.cssText += ';display:flex;justify-content:flex-end;gap:8px';
                 el.appendChild(footer);
             },
         });

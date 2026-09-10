@@ -97,11 +97,17 @@ export const VENUE_OPTIONS = [
     { value: 'capital', label: 'Capital.com' },
 ] as const;
 
+/** A key for a new bot. Its own function so a bot made by copying another one is keyed the
+ *  same way as one made from scratch. */
+export function botId(): string {
+    return `bot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
 /** A fresh bot on a strategy's own defaults. */
 export function newBot(strategy: string, symbol: string): BotConfig {
     const spec = STRATEGIES[strategy];
     return {
-        id: `bot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        id: botId(),
         name: spec ? `${spec.name} bot` : 'New bot',
         strategy,
         symbol,

@@ -12,6 +12,8 @@
  * One account per app instance — the same "one shared feed" shape BarStore already
  * uses for the in-renderer providers.
  */
+import { appendFileSync } from 'node:fs';
+
 const DEMO_BASE = 'https://demo-api-capital.backend-capital.com/api/v1';
 const LIVE_BASE = 'https://api-capital.backend-capital.com/api/v1';
 const STREAM_URL = 'wss://api-streaming-capital.backend-capital.com/connect';
@@ -23,6 +25,26 @@ const SESSION_MARGIN_MS = 5 * 60_000;
 const WS_PING_MS = 5 * 60_000;
 /** Reconnect backoff after an unexpected WebSocket close. */
 const WS_RECONNECT_MS = 2_000;
+
+/**
+ * A record of what actually crossed the wire — off unless `MIDORII_CAPITAL_LOG` names a
+ * file to append to.
+ *
+ * A debugging aid rather than a feature, and one that has to be asked for by name. What it
+ * must never contain is the things that open the account: the API key, the custom password,
+ * and the two session tokens. So it is handed the method, the path, the status and the
+ * payloads that are the app's OWN — an order's size and levels, the venue's verdict on it —
+ * and is never handed a header.
+ */
+function wire(event, detail) {
+  const file = process.env.MIDORII_CAPITAL_LOG;
+  if (!file) return;
+  try {
+    appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), event, ...detail })}\n`);
+  } catch {
+    /* A log that cannot be written is not a reason to fail a trade. */
+  }
+}
 
 let creds = null; // { apiKey, identifier, password, env: 'demo' | 'live' }
 let cst = null;
@@ -137,6 +159,7 @@ async function login() {
   });
   const cstHeader = res.headers.get('cst');
   const tokenHeader = res.headers.get('x-security-token');
+  wire('session', { env: creds.env, status: res.status, tokens: !!(cstHeader && tokenHeader) });
   if (!res.ok) throw await sessionFailure(res, creds.env);
   if (!cstHeader || !tokenHeader) throw new Error('Capital.com accepted the login but sent no session tokens.');
   cst = cstHeader;
@@ -162,6 +185,7 @@ async function ensureSession() {
  * would be the second one.
  */
 async function authedFetch(pathAndQuery, { method = 'GET', body } = {}) {
+  const startedAt = Date.now();
   await ensureSession();
   const attempt = () => fetch(`${baseUrl()}${pathAndQuery}`, {
     method,
@@ -180,6 +204,7 @@ async function authedFetch(pathAndQuery, { method = 'GET', body } = {}) {
     res = await attempt();
   }
   if (res.ok) lastUsedAt = Date.now();
+  wire('rest', { method, path: pathAndQuery, status: res.status, ms: Date.now() - startedAt, ...(body !== undefined ? { body } : {}) });
   return res;
 }
 
@@ -280,6 +305,8 @@ export async function capitalPrices(epic, resolution, { from, to, limit } = {}) 
 function sendWs(message) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(message));
+  // The tokens ride along in every message and are deliberately not part of the record.
+  wire('ws.out', { destination: message.destination, payload: message.payload ?? null });
   return true;
 }
 
@@ -354,6 +381,13 @@ async function ensureStream() {
 function handleWsMessage(raw) {
   let msg;
   try { msg = JSON.parse(typeof raw === 'string' ? raw : ''); } catch { return; }
+  /* Recorded before the payload check below, and before the two high-rate destinations are
+   * dealt with: a subscription the venue REFUSED arrives here as a status this function
+   * otherwise drops on the floor, and that is exactly the message worth having kept. Ticks
+   * and candles are left out — they arrive several a second and say nothing about a trade. */
+  if (msg.destination !== 'ohlc.event' && msg.destination !== 'quote') {
+    wire('ws.in', { destination: msg.destination ?? null, status: msg.status ?? null, payload: msg.payload ?? null });
+  }
   if (!msg.payload) return;
 
   if (msg.destination === 'ohlc.event') {
@@ -526,7 +560,9 @@ async function deal(pathAndQuery, options, what) {
     if (!res.ok) throw await failureOf(res, what);
     const { dealReference } = await res.json();
     if (!dealReference) throw new Error(`Capital.com ${what} answered without a deal reference`);
-    return awaitConfirmation(dealReference);
+    const confirmation = await awaitConfirmation(dealReference);
+    wire('deal', { what, dealReference, confirmation });
+    return confirmation;
   });
 }
 

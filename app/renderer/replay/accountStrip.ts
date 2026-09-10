@@ -25,8 +25,9 @@ import { loadOverlayDisplay, onOverlayDisplayChange } from './overlayDisplay';
  *
  * The card takes the pointer, which is the price of being movable — a drag through the
  * top-right corner moves the card rather than the chart. It can be put away for that reason
- * alone: the close button hides it until the corner's restore button asks for it back, and
- * Settings → Customization can keep it off for good.
+ * alone: the close button puts it away — for good, until the corner's restore button asks for
+ * it back — and Settings → Customization takes it off the chart entirely, restore button and
+ * all.
  */
 
 const STYLE_ID = 'midorii-account';

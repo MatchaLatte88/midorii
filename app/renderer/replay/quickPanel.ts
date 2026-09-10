@@ -1,7 +1,8 @@
 import { injectStyles } from '../../../src/ui';
 import { makeOverlayCard } from './overlayCards';
+import { loadOverlayDisplay, onOverlayDisplayChange } from './overlayDisplay';
 import { emptyQuick, quickOrder, quickPlan, stepSize } from './quickTrade';
-import type { QuickDraft } from './quickTrade';
+import type { QuickDraft, QuickProtection } from './quickTrade';
 import type { OrderSpec } from '../../../shared/engine/broker.js';
 
 /**
@@ -34,9 +35,9 @@ const CSS = `
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 7px;
+    padding: 8px;
     border: 1px solid var(--vela-border);
-    border-radius: var(--vela-radius-md);
+    border-radius: var(--vela-radius-xl);
     background: var(--vela-surface-elev);
     box-shadow: var(--vela-shadow);
     user-select: none;
@@ -94,7 +95,7 @@ const CSS = `
     text-align: center;
     outline: none;
 }
-.midorii-quick-size:focus { border-color: var(--vela-focus); }
+.midorii-quick-size:focus { border-color: var(--vela-accent-line); }
 .midorii-quick-size::placeholder { color: var(--vela-fg-faint); font-family: var(--vela-font, system-ui); }
 
 .midorii-quick-small {
@@ -112,7 +113,7 @@ const CSS = `
     text-align: center;
     outline: none;
 }
-.midorii-quick-small:focus { border-color: var(--vela-focus); }
+.midorii-quick-small:focus { border-color: var(--vela-accent-line); }
 .midorii-quick-small::placeholder { color: var(--vela-fg-faint); font-family: var(--vela-font, system-ui); }
 
 .midorii-quick-why {
@@ -135,14 +136,30 @@ export interface QuickPanelOptions {
     price(): number;
     /** Send the order. Refusals from the engine are the caller's to surface. */
     order(spec: OrderSpec): void;
-    /** The account card, so the panel can sit directly under it whatever height it is. */
-    anchor?: HTMLElement | null;
+    /**
+     * The card the panel sits directly under, whatever height it turns out to be.
+     *
+     * A function where the card it sits under can CHANGE — a live account's band leaves a
+     * one-line mark behind when it is put away, and the panel has to sit under whichever of
+     * the two is currently in the corner rather than on top of it.
+     */
+    anchor?: HTMLElement | null | (() => HTMLElement | null);
+    /**
+     * How the protection is written down. `distance` — the default, and what this app's own
+     * engine takes — attaches it to the actual fill; `levels` turns it into two prices for a
+     * venue that can read nothing else. See {@link QuickProtection}.
+     */
+    brackets?: QuickProtection['as'];
+    /** The instrument's own increment, for putting a computed level on the venue's grid. */
+    tick?(): number | null;
 }
 
 export interface QuickPanel {
     readonly el: HTMLElement;
     /** Repaint what depends on the account — the button states. Never touches the boxes. */
     refresh(): void;
+    /** Put it back under its anchor — for when the anchor itself came or went. */
+    reflow(): void;
     destroy(): void;
 }
 
@@ -226,7 +243,13 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
         draft.riskCash = v;
         refresh();
     });
-    risk.title = 'What the stop may cost. Empty sends the order with no stop at all.';
+    /* Where the venue takes prices rather than offsets, the stop is worked out from the last
+     * price instead of from the fill — so the trade costs about this rather than exactly it,
+     * and the box says so rather than letting the number look more exact than it is. */
+    risk.title = opts.brackets === 'levels'
+        ? 'Roughly what the stop may cost — the level is set from the last price, and the fill '
+            + 'lands a spread away from it. Empty sends the order with no stop at all.'
+        : 'What the stop may cost. Empty sends the order with no stop at all.';
     const rrr = box(doc, 'midorii-quick-small', 'RRR', (v) => {
         draft.rrr = v;
         refresh();
@@ -245,8 +268,14 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
      * changed. Only where it STARTS, though. Both are dragged independently, and one that has
      * been dropped somewhere holds its own pixels; `reflow` is what decides which of the two
      * this is, so a moved panel does not jump back under a card that changed height. */
-    const anchor = opts.anchor ?? null;
+    const anchorOf = typeof opts.anchor === 'function' ? opts.anchor : () => opts.anchor as HTMLElement | null ?? null;
+    /* Which element the height is currently being watched on. The anchor is allowed to change
+     * — a band swapped for the mark it leaves behind — and an observer still pointed at the
+     * one that went away would leave the panel hanging where the old card used to end. */
+    let watched: HTMLElement | null = null;
     const place = (): void => {
+        const anchor = anchorOf();
+        watch(anchor);
         // No card, or a card that is switched off: there is nothing to sit under, and the
         // panel takes the corner the card would have had.
         if (!anchor || anchor.offsetParent === null) {
@@ -255,9 +284,21 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
         }
         el.style.top = `${anchor.offsetTop + anchor.offsetHeight + GAP}px`;
     };
-    const card = makeOverlayCard(cell, el, { id: 'quick', place });
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => card.reflow()) : null;
-    if (anchor) observer?.observe(anchor);
+    /** Follow the height of whatever the panel is currently sitting under, and only that. */
+    function watch(anchor: HTMLElement | null): void {
+        if (anchor === watched) return;
+        if (watched) observer?.unobserve(watched);
+        if (anchor) observer?.observe(anchor);
+        watched = anchor;
+    }
+
+    const card = makeOverlayCard(cell, el, { id: 'quick', place });
+    /* Mounted whatever the setting says and then hidden, rather than not mounted at all: the
+     * switch can be thrown mid-session, and a panel that had to be rebuilt would come back
+     * having forgotten both where it was dragged to and the size somebody had typed into it. */
+    card.setAvailable(loadOverlayDisplay().showQuick);
+    const stopWatching = onOverlayDisplayChange((display) => card.setAvailable(display.showQuick));
 
     function refresh(): void {
         const plan = quickPlan(draft, opts.price());
@@ -274,7 +315,7 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
     function send(which: 'buy' | 'sell'): void {
         const plan = quickPlan(draft, opts.price());
         if (plan.refusal != null || plan.size == null) return;
-        opts.order(quickOrder(draft, which, plan));
+        opts.order(quickOrder(draft, which, plan, { as: opts.brackets ?? 'distance', tick: opts.tick?.() ?? null }));
         /* The size stays. It is how this session is being traded — the next entry is usually
          * the same size, and re-typing it while a move runs is exactly what this panel exists
          * to avoid. The risk and the reward:risk stay with it for the same reason. */
@@ -286,8 +327,10 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
     return {
         el,
         refresh,
+        reflow: () => card.reflow(),
         destroy(): void {
             observer?.disconnect();
+            stopWatching();
             card.destroy();
             el.remove();
         },

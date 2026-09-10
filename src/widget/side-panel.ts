@@ -14,7 +14,7 @@
 import { injectStyles } from '../ui/styles';
 import { iconEl } from '../ui/icons';
 
-const STYLE_ID = 'vela-widget-sidepanel';
+const STYLE_ID = 'vela-widget-sidepanel-2';
 
 /** Width (px) a panel takes when it declares none. */
 export const DEFAULT_PANEL_WIDTH = 280;
@@ -36,17 +36,28 @@ const CSS = `
     box-sizing: border-box;
     background: var(--vela-bg);
 }
+/* The header is a chrome band, like a dialog's — and its title is a tracked micro-label
+   rather than a headline: a panel's name is an address ("which column am I looking at"),
+   and the content below it is what deserves the weight. */
 .vela-panel-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 8px 10px 14px;
-    border-bottom: 1px solid var(--vela-border);
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--vela-fg-bright);
+    padding: 0 8px 0 14px;
+    height: 38px;
+    box-sizing: border-box;
+    border-bottom: 1px solid var(--vela-border-faint);
+    background: var(--vela-chrome);
 }
-.vela-panel-title { flex: none; }
+.vela-panel-title {
+    flex: none;
+    font-family: var(--vela-font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--vela-fg-muted);
+}
 .vela-panel-title:empty { display: none; }
 /* The contributed slot claims the space between title and close; its children lay out
    inline and the close button stays pinned right. */
@@ -59,7 +70,7 @@ const CSS = `
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 4px;
+    border-radius: var(--vela-control-radius);
     color: var(--vela-fg-muted);
     font-size: 16px;
 }
@@ -75,13 +86,13 @@ const CSS = `
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 4px;
+    border-radius: var(--vela-control-radius);
     color: var(--vela-fg-muted);
 }
 .vela-panel-pin .vela-icon { width: 15px; height: 15px; }
 .vela-panel-pin:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 .vela-panel-pin[data-on='1'] { color: var(--vela-fg-bright); }
-.vela-panel-body { flex: 1; overflow: auto; padding: 8px; }
+.vela-panel-body { flex: 1; overflow: auto; padding: 12px; }
 .vela-panel-body::-webkit-scrollbar { width: 8px; }
 .vela-panel-body::-webkit-scrollbar-thumb { background: var(--vela-scroll); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
 /* Straddles the panel's inner border so the whole seam is grabbable; it paints only under the

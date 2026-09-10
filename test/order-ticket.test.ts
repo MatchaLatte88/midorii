@@ -17,13 +17,23 @@ const RISK: RiskSettings = { mode: 'percent', value: 1, maxLeverage: 1 };
 
 const ticket = (over: Partial<TicketDraft> = {}): TicketDraft => ({ ...emptyTicket(), ...over });
 
+/** The same, sized the other way: from the stop rather than from a typed number of units. */
+const byRisk = (over: Partial<TicketDraft> = {}): TicketDraft => ticket({ sizing: 'risk', ...over });
+
 /** The refusal for one side of a draft, through the plan the panel would be showing. */
 const refusal = (draft: TicketDraft, side: 'buy' | 'sell', account = ACCOUNT): string | null =>
     ticketRefusal(draft, side, account, ticketPlan(draft, account, RISK));
 
 describe('what the ticket comes to', () => {
+    it('opens on a typed size rather than on risk', () => {
+        // Which of the two was last used is remembered by whoever mounts the panel; with
+        // nothing remembered it is units, the thing a person placing an order already has
+        // in mind. Sizing from the stop is one press away and every rule for it is below.
+        expect(emptyTicket().sizing).toBe('fixed');
+    });
+
     it('sizes a market order off the market and the stop', () => {
-        const plan = ticketPlan(ticket({ stopLoss: 95, takeProfit: 110 }), ACCOUNT, RISK);
+        const plan = ticketPlan(byRisk({ stopLoss: 95, takeProfit: 110 }), ACCOUNT, RISK);
         expect(plan.reference).toBe(100);
         expect(plan.size).toBe(20); // 100 of risk over a distance of 5
         expect(plan.notional).toBe(2000);
@@ -34,7 +44,7 @@ describe('what the ticket comes to', () => {
 
     it('sizes a resting order off its own price, not the market', () => {
         // Entry 90, stop 85: the same distance of 5, but a fill 10 lower.
-        const plan = ticketPlan(ticket({ type: 'limit', entryPrice: 90, stopLoss: 85 }), ACCOUNT, RISK);
+        const plan = ticketPlan(byRisk({ type: 'limit', entryPrice: 90, stopLoss: 85 }), ACCOUNT, RISK);
         expect(plan.reference).toBe(90);
         expect(plan.size).toBe(20);
         expect(plan.notional).toBe(1800);
@@ -42,7 +52,7 @@ describe('what the ticket comes to', () => {
 
     it('says when the leverage cap decided the size rather than the risk', () => {
         // A stop 0.1 away asks for 1,000 units; the account can carry 100.
-        const plan = ticketPlan(ticket({ stopLoss: 99.9 }), ACCOUNT, RISK);
+        const plan = ticketPlan(byRisk({ stopLoss: 99.9 }), ACCOUNT, RISK);
         expect(plan.size).toBe(100);
         expect(plan.capped).toBe(true);
         // And the trade now loses less than the 1% it was allowed to — visibly so.
@@ -98,15 +108,15 @@ describe('when the ticket refuses to be sent', () => {
     });
 
     it('refuses a stop on the winning side and a target on the losing one', () => {
-        const draft = ticket({ stopLoss: 105, takeProfit: 110 });
+        const draft = byRisk({ stopLoss: 105, takeProfit: 110 });
         expect(refusal(draft, 'buy')).toBe('A stop belongs on the losing side of the entry.');
         // For a sell the stop is right, but the target is now on the wrong side.
         expect(refusal(draft, 'sell')).toBe('A target belongs on the winning side of the entry.');
     });
 
     it('will not size against a stop that is not there', () => {
-        expect(refusal(ticket(), 'buy')).toMatch(/Risk sizing needs a stop/);
-        expect(refusal(ticket({ sizing: 'fixed' }), 'buy')).toMatch(/positive number of units/);
+        expect(refusal(byRisk(), 'buy')).toMatch(/Risk sizing needs a stop/);
+        expect(refusal(ticket(), 'buy')).toMatch(/positive number of units/);
     });
 
     it('names what blocks both sides before what blocks one of them', () => {
@@ -177,7 +187,7 @@ describe('a margined account', () => {
         const risk: RiskSettings = { mode: 'percent', value: 1, maxLeverage: 30 };
         // A stop 0.1 away would buy 1,000 units on risk alone; 3,000 of margin at 3.33%
         // of 100 a unit funds about 901.
-        const plan = ticketPlan(ticket({ stopLoss: 99.9 }), MARGINED, risk);
+        const plan = ticketPlan(byRisk({ stopLoss: 99.9 }), MARGINED, risk);
         const ceiling = 3_000 / (0.0333 * 100);
         expect(plan.size!).toBeLessThanOrEqual(ceiling + 1e-9);
         expect(plan.size!).toBeCloseTo(ceiling, 6);
@@ -186,7 +196,7 @@ describe('a margined account', () => {
 
     it('leaves a size the account can fund untouched', () => {
         // A wide stop: 1% of 10,000 over 5 buys 20 units, well inside the margin.
-        const plan = ticketPlan(ticket({ stopLoss: 95 }), MARGINED, RISK);
+        const plan = ticketPlan(byRisk({ stopLoss: 95 }), MARGINED, RISK);
         expect(plan.size).toBe(20);
         expect(plan.capped).toBe(false);
     });
@@ -196,7 +206,7 @@ describe('a margined account', () => {
         // own leverage setting is the only ceiling there is.
         const partial: TicketAccount = { equity: 10_000, price: 100, available: 3_000 };
         const risk: RiskSettings = { mode: 'percent', value: 1, maxLeverage: 1 };
-        const plan = ticketPlan(ticket({ stopLoss: 99.9 }), partial, risk);
+        const plan = ticketPlan(byRisk({ stopLoss: 99.9 }), partial, risk);
         expect(plan.margin).toBeNull();
         expect(plan.size).toBe((10_000 * 1) / 100);
     });

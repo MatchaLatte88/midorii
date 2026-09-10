@@ -54,7 +54,10 @@ export function installQuotes(workspace: VelaWorkspace): void {
 
     /** Put the current quote in front of whoever is meant to be showing it. */
     function paint(): void {
-        if (strip) strip.el.hidden = !(quoting && display.showCard);
+        /* Through the card rather than by setting `hidden` here: the readout is a floating
+         * card now, and its own close button owns that flag. Two hands on it would have this
+         * repaint undo a dismissal on the next tick. */
+        strip?.setAvailable(quoting && display.showCard);
         if (last) {
             strip?.update(last, tick);
             indicator?.setInputs(quoteIndicatorInputs(last.bid, last.ask, display));

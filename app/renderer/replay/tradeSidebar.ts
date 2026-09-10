@@ -2,7 +2,8 @@ import { NumberInput, injectStyles, overlayScrollbarCss } from '../../../src/ui'
 import { formatMoney, formatPercent, formatPrice, formatR, formatSignedMoney, formatSize, formatWhen } from '../format';
 import { equityPath } from '../runs/runStats';
 import { bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPlan, ticketRefusal } from './orderTicket';
-import type { BracketSettings, TicketAccount, TicketDraft } from './orderTicket';
+import type { BracketSettings, TicketAccount, TicketDraft, TicketSizing } from './orderTicket';
+import { loadOverlayDisplay, onOverlayDisplayChange, saveOverlayDisplay } from './overlayDisplay';
 import { DEFAULT_RISK } from './replayOrders';
 import type { RiskSettings } from './replayOrders';
 import type { HistoryRow } from './tradeBook';
@@ -44,9 +45,10 @@ const CSS = `
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    height: 34px;
+    height: 38px;
     padding: 0 4px 0 12px;
     border-bottom: 1px solid var(--vela-border-faint);
+    background: var(--vela-chrome);
 }
 /* Two tabs where the title was. The ticket and the record are read at different moments and
    296px is not wide enough to hold both, so they take turns rather than share. */
@@ -56,9 +58,10 @@ const CSS = `
     display: grid;
     align-items: center;
     box-shadow: inset 0 -2px 0 transparent;
+    font-family: var(--vela-font-mono);
     font-size: 10px;
     font-weight: 600;
-    letter-spacing: 0.09em;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--vela-fg-muted);
     cursor: pointer;
@@ -196,11 +199,14 @@ ${overlayScrollbarCss('.midorii-side-body')}
     justify-content: space-between;
     width: 100%;
     margin: 0 0 8px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--vela-fg-bright);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--vela-fg-muted);
     cursor: pointer;
 }
+.midorii-side-sect:hover { color: var(--vela-fg-bright); }
 .midorii-side-sect em {
     font-style: normal;
     font-size: 11px;
@@ -217,8 +223,12 @@ ${overlayScrollbarCss('.midorii-side-body')}
     gap: 8px;
     min-height: 20px;
     margin: 12px 0 5px;
-    font-size: 11px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
     color: var(--vela-fg-muted);
+    opacity: 0.85;
 }
 .midorii-side-label:first-child { margin-top: 0; }
 .midorii-side-pick {
@@ -226,6 +236,7 @@ ${overlayScrollbarCss('.midorii-side-body')}
     display: flex;
     align-items: center;
     gap: 4px;
+    letter-spacing: 0.06em;
     color: var(--vela-fg-muted);
     cursor: pointer;
 }
@@ -266,10 +277,11 @@ ${overlayScrollbarCss('.midorii-side-body')}
     gap: 6px;
     padding-right: 9px;
     border: 1px solid var(--vela-border-soft);
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-control-radius);
     background: var(--vela-surface-overlay);
+    transition: border-color var(--vela-dur-fast) ease;
 }
-.midorii-side-field:focus-within { border-color: var(--vela-focus); }
+.midorii-side-field:focus-within { border-color: var(--vela-accent-line); }
 .midorii-side-field > input {
     flex: 1 1 auto;
     min-width: 0;
@@ -365,9 +377,9 @@ ${overlayScrollbarCss('.midorii-side-body')}
 
 .midorii-side-out {
     margin-top: 12px;
-    padding: 9px 10px 10px;
+    padding: 10px 12px 11px;
     border: 1px solid var(--vela-border-faint);
-    border-radius: var(--vela-radius-md);
+    border-radius: 12px;
     background: var(--vela-surface-sunken);
 }
 .midorii-side-out .midorii-side-stat:first-child { margin-top: 0; }
@@ -430,7 +442,7 @@ ${overlayScrollbarCss('.midorii-side-body')}
     gap: 2px;
     width: 100%;
     padding: 11px 0 10px;
-    border-radius: var(--vela-radius-md);
+    border-radius: var(--vela-control-radius);
     color: var(--vela-fg-on-fill);
     font-size: 14px;
     font-weight: 700;
@@ -459,7 +471,7 @@ ${overlayScrollbarCss('.midorii-side-body')}
     flex: 1 1 0;
     padding: 5px 0;
     border: 1px solid var(--vela-border-soft);
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-control-radius);
     text-align: center;
     font-size: 11px;
     font-weight: 600;
@@ -524,8 +536,8 @@ ${overlayScrollbarCss('.midorii-side-hist-list')}
 .midorii-side-trade-dir {
     flex: 0 0 auto;
     min-width: 44px;
-    padding: 2px 6px;
-    border-radius: var(--vela-radius-sm);
+    padding: 2px 8px;
+    border-radius: 999px;
     font-size: 9px;
     font-weight: 700;
     letter-spacing: 0.06em;
@@ -599,6 +611,17 @@ export interface TradeSidebarOptions {
     quickSizes?(): readonly number[];
     /** Where an edited list of those sizes goes. Without it the row cannot be edited. */
     onQuickSizes?(next: number[]): void;
+    /**
+     * Which way of saying how big the ticket should open on — read once, at mount.
+     *
+     * Read once and not on every repaint, unlike the settings above it: this one is changed
+     * BY the panel, and re-reading it would mean the account it is stored against could put
+     * the ticket back mid-edit. Absent where nobody remembers it, and then the ticket opens
+     * the way {@link emptyTicket} leaves it.
+     */
+    sizing?(): TicketSizing;
+    /** Where a change to it goes, so the next ticket — and the next session — opens on it. */
+    onSizing?(next: TicketSizing): void;
 }
 
 export interface TradeSidebar {
@@ -615,6 +638,13 @@ export interface TradeSidebar {
     risk(): RiskSettings;
     /** Repaint the derived figures from the account as it stands. Never touches the boxes. */
     refresh(): void;
+    /**
+     * Let go of what the panel listens to outside itself — the chart-card switches it mirrors.
+     *
+     * Separate from taking the element off, because a panel is unmounted every time trading is
+     * switched off and a listener left behind would hold a whole dead panel per switch.
+     */
+    dispose(): void;
 }
 
 /**
@@ -924,7 +954,22 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     injectStyles(STYLE_ID, CSS, doc);
 
     const draft: TicketDraft = emptyTicket();
+    // The way this account was last sized, where whoever mounted the panel kept it.
+    draft.sizing = opts.sizing?.() ?? draft.sizing;
     const risk: RiskSettings = { ...(opts.risk ?? DEFAULT_RISK) };
+
+    /**
+     * Move to one of the two ways of saying how big, and remember having done so.
+     *
+     * How a person sizes is a habit rather than a decision they make per ticket, so the
+     * change is handed back to be stored — every time it actually changes, and never when
+     * it does not, since the store behind it is written through the account's settings.
+     */
+    function setSizing(next: TicketSizing): void {
+        if (draft.sizing === next) return;
+        draft.sizing = next;
+        opts.onSizing?.(next);
+    }
 
     const el = doc.createElement('div');
     el.className = 'midorii-side';
@@ -1034,7 +1079,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     sizingChevron.textContent = '⌄';
     sizingPick.append(sizingName, sizingChevron);
     sizingPick.onclick = () => {
-        draft.sizing = draft.sizing === 'risk' ? 'fixed' : 'risk';
+        setSizing(draft.sizing === 'risk' ? 'fixed' : 'risk');
         refresh();
     };
     const sizingCaption = doc.createElement('div');
@@ -1184,8 +1229,19 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     });
     const leverageCaption = caption(doc, 'Max leverage');
     const leverageField = fieldBox(doc, leverage.el);
+    /* The other panel's switch, kept here as well.
+     *
+     * The quick panel floats over the plot and this one sits beside it; they are the two ways
+     * into the same market and somebody who wants only one of them is looking at both. The
+     * chart's own gear has the same switch under Chart cards — one setting, two doors, and
+     * whichever is thrown the other follows, because they read and write the same record. */
+    const quickSwitch = toggle(doc, (on) => saveOverlayDisplay({ ...loadOverlayDisplay(), showQuick: on }));
+    quickSwitch.set(loadOverlayDisplay().showQuick);
+    const quickCaption = caption(doc, 'Quick Buy / Sell panel', quickSwitch.el);
+    const stopWatchingDisplay = onOverlayDisplayChange((display) => quickSwitch.set(display.showQuick));
+
     const extra = section(doc, 'Extra settings', false);
-    extra.body.append(leverageCaption, leverageField);
+    extra.body.append(leverageCaption, leverageField, quickCaption);
 
     // ── what it comes to ────────────────────────────────────────────────
     const out = doc.createElement('div');
@@ -1356,7 +1412,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
     /** Take a size and mean it: a quick size is a typed size, so the ticket switches to one. */
     function pickSize(size: number): void {
-        draft.sizing = 'fixed';
+        setSizing('fixed');
         draft.fixedSize = size > 0 ? size : null;
         fixed.setValue(size);
         refresh();
@@ -1602,5 +1658,6 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         el,
         risk: () => ({ ...risk }),
         refresh,
+        dispose: stopWatchingDisplay,
     };
 }

@@ -49,38 +49,33 @@ const CSS = `
     border: 1px solid var(--vela-border);
     color: var(--vela-fg-muted);
 }
+/* What the venue says this account is, quoted rather than paraphrased — a recessed card,
+   the shape every other stated fact in the app is printed in. */
 .midorii-arm-account {
     margin: 0 0 16px;
-    padding: 10px 12px;
-    border: 1px solid var(--vela-border);
-    border-radius: var(--vela-radius-md);
-    background: var(--vela-surface-elev);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 11px 13px;
+    border: 1px solid var(--vela-border-faint);
+    border-radius: 12px;
+    background: var(--vela-surface-sunken);
+    font-family: var(--vela-font-mono);
     font-size: 12px;
     color: var(--vela-fg-bright);
 }
 .midorii-arm-type {
     width: 100%;
     box-sizing: border-box;
-    padding: 7px 10px;
+    height: var(--vela-control-h);
+    padding: 0 11px;
     border: 1px solid var(--vela-border);
-    border-radius: var(--vela-radius-md);
-    background: var(--vela-surface);
+    border-radius: var(--vela-control-radius);
+    background: var(--vela-surface-sunken);
     color: var(--vela-fg-bright);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--vela-font-mono);
     font-size: 13px;
+    outline: none;
+    transition: border-color var(--vela-dur-fast) ease;
 }
-.midorii-arm-btn {
-    all: unset;
-    padding: 6px 14px;
-    border: 1px solid var(--vela-border);
-    border-radius: var(--vela-radius-md);
-    font-size: var(--vela-font-size-md);
-    color: var(--vela-fg);
-    cursor: pointer;
-}
-.midorii-arm-btn[data-tone="danger"] { border-color: var(--vela-danger); color: var(--vela-danger); }
-.midorii-arm-btn[disabled] { opacity: 0.45; cursor: default; }
+.midorii-arm-type:focus { border-color: var(--vela-danger-line); }
 `;
 
 /** What has to be typed before a LIVE account can be traded from the chart. */
@@ -122,16 +117,18 @@ export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boo
             resolve(go);
         };
 
-        const button = (text: string, tone?: 'danger'): HTMLButtonElement => {
+        // The kit's footer buttons: plain to step back, and for the one that commits either
+        // the accent (demo — nothing is at stake) or the destructive tone (live), so the two
+        // doors never look alike at the moment they are pressed.
+        const button = (text: string, tone?: 'primary' | 'danger'): HTMLButtonElement => {
             const b = doc.createElement('button');
             b.type = 'button';
-            b.className = 'midorii-arm-btn';
+            b.className = tone ? `vela-dialog-btn vela-dialog-btn-${tone}` : 'vela-dialog-btn';
             b.textContent = text;
-            if (tone) b.dataset.tone = tone;
             return b;
         };
 
-        const go = button(opts.live ? 'Trade this account for real' : 'Start trading the demo account', opts.live ? 'danger' : undefined);
+        const go = button(opts.live ? 'Trade this account for real' : 'Start trading the demo account', opts.live ? 'danger' : 'primary');
         const type = doc.createElement('input');
         type.className = 'midorii-arm-type';
         type.type = 'text';
@@ -148,6 +145,7 @@ export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boo
 
         const dialog = new Dialog({
             title: opts.live ? 'Trade a real account' : 'Trade the demo account',
+            eyebrow: 'Capital.com',
             host,
             align: 'center',
             closeOnInteractOutside: false,
@@ -184,7 +182,6 @@ export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boo
                 if (opts.live) body.append(type);
             },
             footer: (el) => {
-                el.style.cssText += ';display:flex;align-items:center;gap:8px;justify-content:flex-end';
                 const cancel = button('Cancel');
                 cancel.onclick = () => finish(false);
                 el.append(cancel, go);

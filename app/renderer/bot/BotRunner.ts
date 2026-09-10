@@ -9,6 +9,12 @@ import { CapitalController } from '../trading/CapitalController';
 import { PaperController } from '../trading/PaperController';
 import { DEFAULT_PAPER_SETTINGS, type PaperSettings } from '../trading/paperSettings';
 import { recordTrade } from '../trading/liveJournal';
+import type {
+    MidoriBotAccount,
+    MidoriBotAccountSnapshot,
+    MidoriBotCapitalOwnership,
+    MidoriBotGuardRuntime,
+} from '../midori';
 import { botAccountWriter, loadBotAccount } from './botAccountStore';
 import { liveAccount, paperAccount, type BotAccount } from './botAccount';
 import { botContext } from './botContext';
@@ -89,15 +95,13 @@ import {
  *  strategy acts, but a window ending or a feed going quiet is not on a bar boundary. */
 const WATCH_MS = 5_000;
 
-export type BotStatus = 'stopped' | 'starting' | 'running' | 'failed';
+export type BotStatus = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
 
 export interface BotRunnerOptions {
     bot: BotConfig;
     /** Every market source the app can reach — the bot builds its own instance from these,
      *  never the chart's, so it watches its market whatever is on screen. */
     providers: Record<string, () => DataProvider>;
-    /** Whether the Capital.com credentials point at real money, for the log's benefit. */
-    live?: boolean;
     /** Told whenever anything about the bot changed, so a screen can repaint. */
     onChange?: () => void;
 }
@@ -106,7 +110,8 @@ export class BotRunner {
     readonly log = new BotLog();
     private config: BotConfig;
     private readonly providers: Record<string, () => DataProvider>;
-    private readonly isLive: boolean;
+    /** Read from the venue immediately before a Capital.com account is built. */
+    private isLive = false;
 
     private state: BotStatus = 'stopped';
     /** Why it stopped, when it stopped by itself. */
@@ -122,6 +127,15 @@ export class BotRunner {
     private forming: OHLCV | null = null;
     private unsubscribe: (() => void) | null = null;
     private watchdog: ReturnType<typeof setInterval> | null = null;
+    /**
+     * Which lifetime is current.
+     *
+     * Starting crosses two asynchronous boundaries before the feed is opened. A stop can
+     * happen at either one. The number makes the old continuation recognise that it no
+     * longer owns this runner, clean up anything it managed to build, and leave without
+     * subscribing after the stop that cancelled it.
+     */
+    private lifetime = 0;
 
     /** The account on its way to disk — trailing, so a burst of ticks is one write. */
     private readonly writer = botAccountWriter();
@@ -144,10 +158,21 @@ export class BotRunner {
     private dayOpenEquity = 0;
     private tradesToday = 0;
     private lastLossAt: number | null = null;
+    /** Guard state read before the account is marked at the latest price. Applied in seed. */
+    private restoredGuards: MidoriBotGuardRuntime | null = null;
+    /** Venue ids this bot alone may manage. Null for a paper bot. */
+    private capitalOwnership: MidoriBotCapitalOwnership | null = null;
+    /** Runtime writes start only after account and guard restoration have completed. */
+    private runtimeReady = false;
+    /** A resting order can fill during startup, before the restored daily count is applied. */
+    private pendingLiveEntries = 0;
     private lastTickAt: number | null = null;
     /** How many trades the account had booked at the last check, so a newly closed one can
      *  be spotted without the engine having to tell anybody. */
     private seenTrades = 0;
+    /** Filled paper entry orders already included in today's count. Kept across day edges so
+     * historical fills cannot be counted again after midnight. */
+    private seenPaperEntries = new Set<number>();
     /** Whether the window was open at the last watch — a close is an edge, not a state. */
     private wasInsideWindow = true;
 
@@ -156,7 +181,6 @@ export class BotRunner {
     constructor(opts: BotRunnerOptions) {
         this.config = opts.bot;
         this.providers = opts.providers;
-        this.isLive = opts.live === true;
         this.onChange = opts.onChange ?? null;
         this.guards = guardsOf(safeGuardParams(opts.bot));
         this.params = safeParams(opts.bot);
@@ -254,6 +278,14 @@ export class BotRunner {
 
         this.state = 'starting';
         this.failure = null;
+        const lifetime = ++this.lifetime;
+        this.runtimeReady = false;
+        this.pendingLiveEntries = 0;
+        this.restoredGuards = null;
+        this.capitalOwnership = null;
+        this.paper = null;
+        this.capital = null;
+        this.account = null;
         this.changed();
 
         try {
@@ -269,7 +301,15 @@ export class BotRunner {
             }
 
             await this.buildAccount();
+            if (!this.isCurrentStart(lifetime)) {
+                this.teardown();
+                return;
+            }
             await this.seed(provider);
+            if (!this.isCurrentStart(lifetime)) {
+                this.teardown();
+                return;
+            }
 
             this.unsubscribe = provider.subscribe(
                 tickerOf(this.config.symbol),
@@ -286,6 +326,10 @@ export class BotRunner {
             );
         } catch (err) {
             this.teardown();
+            /* A stop owns the outcome now. A late rejection from the history or account
+             * request it cancelled must not turn the stopped runner into a failure, or show
+             * an error for an operation the person deliberately ended. */
+            if (!this.isCurrentStart(lifetime)) return;
             const message = err instanceof Error ? err.message : String(err);
             this.fail(message);
             throw err;
@@ -302,6 +346,9 @@ export class BotRunner {
      * trading decision nobody asked it to make. The log says so, so it cannot be a surprise.
      */
     stop(): void {
+        /* Invalidate a start before looking at the state. Its outstanding account/history
+         * request may finish after this synchronous method returns. */
+        this.lifetime += 1;
         if (this.state === 'stopped') return;
         const holding = this.openPositions();
         const waiting = this.restingOrders();
@@ -310,7 +357,7 @@ export class BotRunner {
          * already complete — nothing about stopping changes what the account did. Not awaited
          * here (stopping is a synchronous act, and the window closing calls this too); a
          * caller that is about to read the account back awaits {@link settle} instead. */
-        this.persistAccount();
+        this.persistRuntime();
         void this.writer.flush();
         this.state = 'stopped';
         if (holding > 0 || waiting > 0) {
@@ -358,7 +405,10 @@ export class BotRunner {
         // The account first: a fill that this tick causes must have happened before the
         // strategy is asked what to do next, exactly as it has in a backtest.
         try {
-            if (this.paper) this.paper.onBar(bar);
+            if (this.paper) {
+                this.paper.onBar(bar);
+                this.notePaperEntries();
+            }
             else this.capital?.mark(bar.close);
         } catch (err) {
             this.log.note('error', `The account refused the update: ${err instanceof Error ? err.message : String(err)}`);
@@ -410,7 +460,6 @@ export class BotRunner {
             return;
         }
 
-        const positionsBefore = this.account?.positions().length ?? 0;
         const ctx = botContext({
             bars: this.bars,
             index: this.bars.length - 1,
@@ -446,12 +495,9 @@ export class BotRunner {
             this.log.note('error', `The strategy failed on this bar: ${err instanceof Error ? err.message : String(err)}`);
         }
 
-        /* An entry against the daily count. Counted from what the account actually holds
-         * rather than from the orders placed: a resting order that never fills is not a
-         * trade, and a strategy that places one every session would otherwise exhaust its
-         * daily allowance without ever being in the market. */
-        const opened = (this.account?.positions().length ?? 0) - positionsBefore;
-        if (opened > 0) this.tradesToday += opened;
+        /* Market entries fill inside the strategy call. Resting entries fill in onFeed before
+         * this method starts. Both paths meet here without counting an unfilled order. */
+        this.notePaperEntries();
 
         this.noteClosedTrades();
         this.trim();
@@ -569,27 +615,69 @@ export class BotRunner {
         this.tradesToday = 0;
         this.dayOpenEquity = this.account?.equity() ?? 0;
         if (!first) this.log.note('info', `A new UTC day — the daily counts start again from ${this.dayOpenEquity.toFixed(2)}.`);
+        this.persistRuntimeNow();
+    }
+
+    /** Apply durable counters once the restored account has its current mark. */
+    private restoreRuntimeDay(at: number): void {
+        const restored = this.restoredGuards;
+        this.restoredGuards = null;
+        this.lastLossAt = restored?.lastLossAt ?? null;
+
+        const key = new Date(at).toISOString().slice(0, 10);
+        if (restored?.dayKey === key) {
+            this.dayKey = key;
+            this.dayOpenEquity = restored.dayOpenEquity;
+            this.tradesToday = restored.tradesToday;
+        } else {
+            /* Retain the old key long enough for rollDay to report a real midnight edge. A
+             * cooldown can span that edge, so lastLossAt deliberately does not reset. */
+            this.dayKey = restored?.dayKey ?? '';
+            this.rollDay(at);
+        }
+
+        if (this.pendingLiveEntries > 0) {
+            this.tradesToday += this.pendingLiveEntries;
+            this.pendingLiveEntries = 0;
+        }
     }
 
     /**
      * Notice trades the account has closed since the last look.
      *
-     * Only the paper engine keeps a trade ledger this can be read off; a live account's
-     * closures are the venue's and reach the journal through CapitalController's own
-     * reconcile. So the cooldown guard is exact on paper and, on a live bot, is armed by
-     * the equity falling rather than by a booked loss — which is stated here rather than
-     * pretended away, because a cooldown that never fires is worse than one that is late.
+     * Only the paper engine keeps a trade ledger this can be read off. A live account's
+     * closures reach the same last-loss timestamp through CapitalController's journal hook.
      */
     private noteClosedTrades(): void {
         const broker = this.paper?.broker;
         if (!broker) return;
         const trades = broker.trades as Array<{ netPnl?: number }>;
+        let changed = false;
         for (let i = this.seenTrades; i < trades.length; i += 1) {
             const pnl = trades[i]?.netPnl ?? 0;
             this.log.note('info', `Trade closed: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`);
-            if (pnl < 0) this.lastLossAt = Date.now();
+            if (pnl < 0) {
+                this.lastLossAt = Date.now();
+                changed = true;
+            }
         }
         this.seenTrades = trades.length;
+        if (changed) this.persistRuntimeNow();
+    }
+
+    /** Count each filled paper entry order once, including pending fills and scale-ins. */
+    private notePaperEntries(): void {
+        const broker = this.paper?.broker;
+        if (!broker) return;
+        let opened = 0;
+        for (const order of broker.orders) {
+            if (order.status !== 'filled' || order.reduceOnly || this.seenPaperEntries.has(order.id)) continue;
+            this.seenPaperEntries.add(order.id);
+            opened += 1;
+        }
+        if (opened === 0) return;
+        this.tradesToday += opened;
+        this.persistRuntimeNow();
     }
 
     /* ── setup and teardown ──────────────────────────────────────────────── */
@@ -603,21 +691,101 @@ export class BotRunner {
         return factory();
     }
 
+    /**
+     * Establish the one safe ownership boundary for a Capital.com bot.
+     *
+     * An existing initialized record is already authoritative, including when the account
+     * also contains manual positions on this market. A new or uncertain record can only be
+     * initialized against an empty market book: no field returned by the venue can prove
+     * which pre-existing exposure came from this bot.
+     */
+    private async prepareCapitalOwnership(stored: MidoriBotAccount | null): Promise<MidoriBotCapitalOwnership> {
+        const previous = stored?.capital;
+        const hasExposure = Boolean(
+            previous?.uncertain
+            || previous?.positionDealIds.length
+            || previous?.workingOrderDealIds.length,
+        );
+        if (stored && stored.symbol !== this.config.symbol && hasExposure) {
+            throw new Error(
+                `This bot still owns or may own Capital.com exposure on ${stored.symbol}. `
+                + 'Clear that exposure before changing its market.',
+            );
+        }
+
+        const reusable = stored?.symbol === this.config.symbol ? previous : undefined;
+        if (reusable?.initialized && !reusable.uncertain) return cloneOwnership(reusable);
+
+        const epic = tickerOf(this.config.symbol).toUpperCase();
+        const [positions, orders] = await Promise.all([
+            window.midori.capital.positions(),
+            window.midori.capital.workingOrders(),
+        ]);
+        const positionCount = positions.filter((row) => row.market.epic.toUpperCase() === epic).length;
+        const orderCount = orders.filter((row) => row.workingOrderData.epic.toUpperCase() === epic).length;
+        if (positionCount > 0 || orderCount > 0) {
+            throw new Error(
+                `Capital.com already has ${positionCount} open ${positionCount === 1 ? 'position' : 'positions'} `
+                + `and ${orderCount} working ${orderCount === 1 ? 'order' : 'orders'} on ${epic}. `
+                + 'This bot cannot safely assign pre-existing exposure to itself. Clear that market at the venue, then start it again.',
+            );
+        }
+        return {
+            initialized: true,
+            positionDealIds: [],
+            workingOrderDealIds: [],
+            uncertain: false,
+        };
+    }
+
+    /** Accept a controller ownership update and count newly proven live entries once. */
+    private acceptCapitalOwnership(ownership: MidoriBotCapitalOwnership): void {
+        const previous = new Set(this.capitalOwnership?.positionDealIds ?? []);
+        const opened = ownership.positionDealIds.filter((dealId) => !previous.has(dealId)).length;
+        this.capitalOwnership = cloneOwnership(ownership);
+        if (opened > 0) {
+            if (this.runtimeReady) this.tradesToday += opened;
+            else this.pendingLiveEntries += opened;
+        }
+        this.persistRuntimeNow();
+    }
+
     /** Build the account this bot trades through. Its own, never the chart's. */
     private async buildAccount(): Promise<void> {
+        /* Every venue needs the durable guards. A read error is allowed to reject this start:
+         * guessing fresh state could bypass a daily loss limit or forget a live deal. */
+        const stored = await loadBotAccount(this.config.id);
+        this.restoredGuards = stored?.guards ?? null;
+
         if (this.config.venue === 'capital') {
+            if (stored?.session != null) {
+                throw new Error(
+                    'This bot still has a paper account on disk. File or reset that account before switching it to Capital.com.',
+                );
+            }
+            const environment = await window.midori.capital.environment();
+            if (!environment.configured) {
+                throw new Error('Capital.com is not connected — add the account under Settings → Broker connection.');
+            }
+            this.isLive = environment.live;
+            this.capitalOwnership = await this.prepareCapitalOwnership(stored);
             this.capital = new CapitalController({
                 epic: tickerOf(this.config.symbol),
                 live: this.isLive,
+                ownership: this.capitalOwnership,
+                onOwnershipChange: (ownership) => this.acceptCapitalOwnership(ownership),
                 notify: (message, kind) => this.log.note(kind === 'error' ? 'error' : 'info', message),
                 onChange: () => this.changed(),
                 /* Every trade this bot closes goes into the same journal the Chart tab writes
                  * to. Not a nicety: the venue serves at most a day of history per request and
                  * loses it with the account, so this journal is the only record anywhere that
                  * a bot moved real money — and a bot trading unwatched is exactly the case
-                 * where nobody is there to notice it went unrecorded. */
+                * where nobody is there to notice it went unrecorded. */
                 onTradeClosed: (trade) => {
-                    if (trade.netPnl < 0) this.lastLossAt = Date.now();
+                    if (trade.netPnl < 0) {
+                        this.lastLossAt = Date.now();
+                        this.persistRuntimeNow();
+                    }
                     void recordTrade(trade)
                         .then((added) => {
                             if (!added) return;
@@ -634,7 +802,13 @@ export class BotRunner {
                         ));
                 },
             });
-            this.capital.start();
+            const accountReady = await this.capital.start();
+            if (!accountReady) {
+                throw new Error(
+                    'The Capital.com account could not be read. The bot was not started because '
+                    + 'it cannot size or own a trade safely without current positions, orders, and funds.',
+                );
+            }
             this.account = liveAccount(this.capital);
             return;
         }
@@ -651,12 +825,16 @@ export class BotRunner {
         /* Whatever this bot was left holding. A failed read stops the start rather than
          * opening a fresh account over weeks of trades that may still be on disk — the one
          * mistake here that cannot be undone. */
-        const stored = await loadBotAccount(this.config.id);
+        if (stored && stored.session == null) {
+            throw new Error(
+                'This bot has live runtime state but no paper account. Reset it before switching the venue to paper.',
+            );
+        }
         this.paper = new PaperController({
             symbol: stored?.symbol ?? this.config.symbol,
             settings,
             restore: stored?.session,
-            onPersist: () => this.persistAccount(),
+            onPersist: () => this.persistRuntime(),
         });
         this.paper.onAccountChange = () => this.changed();
         this.account = paperAccount(this.paper);
@@ -682,9 +860,29 @@ export class BotRunner {
         }
     }
 
-    /** The account as it stands, on its way to disk. */
-    private persistAccount(): void {
-        if (this.paper) this.writer.schedule(this.config.id, this.paper.snapshot());
+    /** The account, guards, and live ownership as they stand, on their way to disk. */
+    private persistRuntime(): void {
+        if (!this.runtimeReady) return;
+        const paper = this.paper?.snapshot();
+        const snapshot: MidoriBotAccountSnapshot = {
+            symbol: paper?.symbol ?? this.config.symbol,
+            ...(paper ? { session: paper.session } : {}),
+            guards: {
+                dayKey: this.dayKey,
+                dayOpenEquity: this.dayOpenEquity,
+                tradesToday: this.tradesToday,
+                lastLossAt: this.lastLossAt,
+            },
+            ...(this.capitalOwnership ? { capital: cloneOwnership(this.capitalOwnership) } : {}),
+        };
+        this.writer.schedule(this.config.id, snapshot);
+    }
+
+    /** Safety counters and ownership changes go to disk without the ordinary tick delay. */
+    private persistRuntimeNow(): void {
+        if (!this.runtimeReady) return;
+        this.persistRuntime();
+        void this.writer.flush();
     }
 
     /**
@@ -696,7 +894,8 @@ export class BotRunner {
      * quietly did nothing.
      */
     async settle(): Promise<void> {
-        this.persistAccount();
+        await this.capital?.settle();
+        this.persistRuntime();
         await this.writer.flush();
     }
 
@@ -736,8 +935,21 @@ export class BotRunner {
 
         this.strategyState = {};
         this.seenTrades = this.paper?.broker.trades.length ?? 0;
-        this.dayKey = '';
-        this.rollDay(Date.now());
+        this.seenPaperEntries = new Set(
+            this.paper?.broker.orders
+                .filter((order) => order.status === 'filled' && !order.reduceOnly)
+                .map((order) => order.id) ?? [],
+        );
+        if (!this.runtimeReady) {
+            this.restoreRuntimeDay(Date.now());
+            this.runtimeReady = true;
+            this.persistRuntime();
+            await this.writer.flush();
+        } else {
+            /* A manual reseed keeps today's counters. It may still be the first call after
+             * midnight, so let the ordinary date edge reset them where needed. */
+            this.rollDay(Date.now());
+        }
         this.wasInsideWindow = insideWindow(this.guards, Date.now());
         this.lastTickAt = null;
     }
@@ -816,9 +1028,14 @@ export class BotRunner {
      * and archives nothing, which is the correct answer for one that never traded.
      */
     async loadStoredAccount(): Promise<void> {
-        if (this.config.venue !== 'paper') return;
         const stored = await loadBotAccount(this.config.id);
         if (!stored) return;
+        if (stored.session == null) {
+            if (this.config.venue === 'paper') {
+                throw new Error('This bot has runtime state but no paper account to file.');
+            }
+            return;
+        }
         this.paper = new PaperController({
             symbol: stored.symbol,
             settings: { ...DEFAULT_PAPER_SETTINGS, balance: this.config.balance },
@@ -867,21 +1084,29 @@ export class BotRunner {
     }
 
     /**
-     * Release everything. The runner is not usable afterwards.
+     * Release every active resource. The account and log remain readable afterwards.
      *
      * Deliberately writes NOTHING. Everything that had to be written down was written by
      * {@link stop} or by {@link settle}, both of which run before this on every path that
      * has an account worth keeping. A write started here would be a write with nobody left
      * to wait for it — and it caused a real bug: `resetAccount` builds a runner purely to
      * READ the stored account, and a disposing write from that one landed after the delete
-     * and put the account straight back, so the reset silently did nothing.
+     * and put the account straight back, so the reset silently did nothing. The engine may
+     * retain the disposed object as a read-only screen model, but never starts or acts through
+     * it again.
      */
     dispose(): void {
+        this.lifetime += 1;
         this.teardown();
         this.writer.cancel();
         this.state = 'stopped';
         this.log.onChange = null;
         this.onChange = null;
+    }
+
+    /** Whether an asynchronous start still owns the right to open the feed. */
+    private isCurrentStart(lifetime: number): boolean {
+        return this.lifetime === lifetime && this.state === 'starting';
     }
 }
 
@@ -907,4 +1132,13 @@ function safeGuardParams(bot: BotConfig): StrategyParams {
     } catch {
         return resolveGuards({});
     }
+}
+
+function cloneOwnership(ownership: MidoriBotCapitalOwnership): MidoriBotCapitalOwnership {
+    return {
+        initialized: ownership.initialized,
+        positionDealIds: [...ownership.positionDealIds],
+        workingOrderDealIds: [...ownership.workingOrderDealIds],
+        uncertain: ownership.uncertain,
+    };
 }

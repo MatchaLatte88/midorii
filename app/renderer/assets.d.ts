@@ -23,3 +23,9 @@ declare module '*?worker' {
 
 /** The app version, stamped in from package.json at build time (see vite.config.ts). */
 declare const __APP_VERSION__: string;
+
+/** An image import: the bundler copies the file out and hands back its URL. */
+declare module '*.png' {
+    const url: string;
+    export default url;
+}

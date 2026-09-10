@@ -1,9 +1,10 @@
 import { app, BrowserWindow, nativeTheme } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { applyStoredCapitalCredentials, registerIpc } from './ipc.js';
+import { applyStoredBinanceSpotCredentials, applyStoredBybitCredentials, applyStoredCapitalCredentials, applyStoredProjectXCredentials, registerIpc } from './ipc.js';
 import { loadEnvLocal } from './loadEnv.js';
 import { TITLEBAR } from './titlebar.js';
+import { guardWindowClose } from './windowCloseGuard.js';
 
 // TODO Phase 4: remove. Keeps userData pointed at the data already downloaded
 // under the old "project-midori" name, so the walking skeleton shows real
@@ -14,13 +15,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_URL = 'http://localhost:5301';
 const isDev = !app.isPackaged;
 
-// Project-root .env.local — CAPITAL_API_KEY / CAPITAL_IDENTIFIER / CAPITAL_PASSWORD /
-// CAPITAL_ENV (see .env.example). Loaded before anything reads process.env.
+// Project-root .env.local — broker credentials (see .env.example). Loaded before anything
+// reads process.env.
 loadEnvLocal(path.join(__dirname, '..', '..'));
 /* Credentials stored through the app take effect over the file. Awaited nowhere: the read
  * is a few milliseconds and everything that needs them is behind a user action, so the
  * window is not held up for it. */
 void applyStoredCapitalCredentials();
+void applyStoredBinanceSpotCredentials();
+void applyStoredBybitCredentials();
+void applyStoredProjectXCredentials();
 
 let win = null;
 
@@ -39,6 +43,11 @@ function createWindow() {
     // macOS still paints its traffic lights over 'hidden' regardless — the topbar
     // leaves them room instead of drawing its own there.
     titleBarStyle: 'hidden',
+    // Frameless leaves the window no title bar of its own to draw a mark in, but the
+    // taskbar and the Alt+Tab switcher still ask for one; without this they show
+    // Electron's default. It sits with the renderer's own assets because that is the
+    // one place both the dev server and the build reach (vite.config.ts roots there).
+    icon: path.join(__dirname, '..', 'renderer', 'assets', 'midorii-logo.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -51,6 +60,7 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  guardWindowClose(win);
 
   win.once('ready-to-show', () => win.show());
   // The custom maximize/restore glyph has no other way to learn about a state

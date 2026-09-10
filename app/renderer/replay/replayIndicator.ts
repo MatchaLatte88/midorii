@@ -34,6 +34,15 @@ export interface ReplayVisualState {
         stopR: number | null;
         targetR: number | null;
     }>;
+    /**
+     * The ISO code the money above is counted in — the ACCOUNT's, not the instrument's.
+     *
+     * Optional because most accounts here are dollars and always were: a paper account, a
+     * replay, a crypto venue that settles in USD. A real broker account is held in one
+     * currency of its owner's choosing, and writing euros with a dollar sign is the kind of
+     * small lie a trading screen does not get to tell.
+     */
+    currency?: string | null;
     orders: Array<{
         id: number;
         side: 'buy' | 'sell';
@@ -74,11 +83,20 @@ export function readLineId(id: string): { positionId: number; level: 'entry' | '
     return { positionId: Number(m[1]), level };
 }
 
-/** `+$224.93` / `−$820.13` — signed, because the sign is the whole point. */
-function money(n: number | null): string {
+/** The mark a currency is written with, for the ones this app is likely to meet. Anything
+ *  else is written as its own code — clumsier than a symbol, and better than the wrong one. */
+const CURRENCY_MARKS: Record<string, string> = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$' };
+
+/** Dollars where nothing says otherwise: every account that predates this argument is one. */
+function currencyMark(code: string | null | undefined): string {
+    if (!code) return '$';
+    return CURRENCY_MARKS[code] ?? `${code} `;
+}
+
+/** `+$224.93` / `−€820.13` — signed, because the sign is the whole point. */
+function money(n: number | null, mark: string): string {
     if (n == null || !Number.isFinite(n)) return '';
-    const sign = n < 0 ? '−' : '+';
-    return `${sign}$${Math.abs(n).toFixed(2)}`;
+    return `${n < 0 ? '−' : '+'}${mark}${Math.abs(n).toFixed(2)}`;
 }
 
 /** `+0.37R`, or nothing at all when the trade opened without a stop to measure against. */
@@ -188,6 +206,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
     const labels: DrawingLabel[] = [];
     const priceLines: PriceLine[] = [];
     const reach = style.extendRight ? 'right' as const : 'none' as const;
+    const mark = currencyMark(state.currency);
 
     for (const p of state.positions) {
         const right = Math.max(nowTime, p.entryTime);
@@ -203,7 +222,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
             price: p.entryPrice,
             color: style.entryColor,
             lineStyle: 'dotted',
-            title: `${p.side === 'buy' ? 'L' : 'S'} ${formatSize(p.size)}  ${money(p.openPnl)}  ${rMultiple(p.openR)}`,
+            title: `${p.side === 'buy' ? 'L' : 'S'} ${formatSize(p.size)}  ${money(p.openPnl, mark)}  ${rMultiple(p.openR)}`,
             /* The line stays neutral and so does its price: the entry is where it is. Only the
              * tag moves with the money, because the money is the only part of it that does. */
             titleColor: pnlColor(p.openPnl, style),
@@ -220,14 +239,14 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
             priceLines.push({
                 id: stopLineId(p.id), paneId: 'price', price: p.stopPrice, color: style.stopColor,
                 lineStyle: style.levelStyle, width: style.lineWidth,
-                title: `SL  ${money(p.stopPnl)}  ${rMultiple(p.stopR)}`, axisTag: true, draggable: true,
+                title: `SL  ${money(p.stopPnl, mark)}  ${rMultiple(p.stopR)}`, axisTag: true, draggable: true,
             });
         }
         if (p.targetPrice != null) {
             priceLines.push({
                 id: targetLineId(p.id), paneId: 'price', price: p.targetPrice, color: style.targetColor,
                 lineStyle: style.levelStyle, width: style.lineWidth,
-                title: `TP  ${money(p.targetPnl)}  ${rMultiple(p.targetR)}`, axisTag: true, draggable: true,
+                title: `TP  ${money(p.targetPnl, mark)}  ${rMultiple(p.targetR)}`, axisTag: true, draggable: true,
             });
         }
     }

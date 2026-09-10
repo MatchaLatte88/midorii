@@ -1,5 +1,6 @@
 import { injectStyles } from '../../../src/ui';
 import { iconAt } from '../../../src/core/icons';
+import logoUrl from '../assets/midorii-logo.png';
 import type { AppThemeName } from './themes';
 
 /**
@@ -25,14 +26,6 @@ const TABS: ReadonlyArray<{ id: AppTab; label: string }> = [
     { id: 'strategies', label: 'Strategies' },
     { id: 'bot', label: 'Trading Bot' },
 ];
-
-/** Placeholder mark until Midorii has a real one — a simple up-candle glyph. */
-const LOGO_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">'
-    + '<rect x="1" y="1" width="22" height="22" rx="6" fill="#089981" fill-opacity="0.16"/>'
-    + '<path d="M9 4.5v3M9 16.5v3M15 3v5M15 14v7" stroke="#089981" stroke-width="1.6" stroke-linecap="round"/>'
-    + '<rect x="7" y="7.5" width="4" height="8" rx="1" fill="#089981"/>'
-    + '<rect x="13" y="8" width="4" height="6" rx="1" fill="#089981"/>'
-    + '</svg>';
 
 /** The same gear the chart's own settings sit behind — one icon for one idea. */
 const GEAR_SVG = iconAt('gear', 15);
@@ -71,7 +64,7 @@ const CSS = `
 .midorii-app-topbar button { -webkit-app-region: no-drag; }
 
 .midorii-topbar-brand { display: inline-flex; align-items: center; gap: 8px; flex: none; padding: 0 14px 0 12px; }
-.midorii-topbar-logo { display: inline-flex; flex: none; }
+.midorii-topbar-logo { display: block; flex: none; height: 30px; width: auto; }
 .midorii-topbar-name { font-size: 13.5px; font-weight: 700; letter-spacing: 0.01em; color: var(--vela-fg-bright); white-space: nowrap; }
 .midorii-topbar-name-dot { color: var(--vela-highlight); }
 
@@ -154,9 +147,13 @@ export function mountAppTopbar(host: HTMLElement, opts: AppTopbarOptions): AppTo
     const brand = doc.createElement('span');
     brand.className = 'midorii-topbar-brand';
 
-    const logo = doc.createElement('span');
+    /* The mark carries no meaning the name beside it does not already carry, so it is
+     * decorative: alt stays empty and screen readers skip straight to "Midorii". */
+    const logo = doc.createElement('img');
     logo.className = 'midorii-topbar-logo';
-    logo.innerHTML = LOGO_SVG;
+    logo.src = logoUrl;
+    logo.alt = '';
+    logo.draggable = false;
 
     const name = doc.createElement('span');
     name.className = 'midorii-topbar-name';

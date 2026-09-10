@@ -25,6 +25,12 @@ contextBridge.exposeInMainWorld('midori', {
     minimize: () => ipcRenderer.send('window:minimize'),
     toggleMaximize: () => ipcRenderer.send('window:toggle-maximize'),
     close: () => ipcRenderer.send('window:close'),
+    readyToClose: () => ipcRenderer.send('window:close-ready'),
+    onCloseRequested: (handler) => {
+      const listener = () => handler();
+      ipcRenderer.on('window:close-requested', listener);
+      return () => ipcRenderer.off('window:close-requested', listener);
+    },
     isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
     /* Fires on every maximize/restore, including ones Windows makes on its own
      * (Aero Snap, a double-click on the drag region) — the maximize button's
@@ -129,9 +135,7 @@ contextBridge.exposeInMainWorld('midori', {
     load: () => ipcRenderer.invoke('bots:load'),
     save: (bots) => ipcRenderer.invoke('bots:save', bots),
 
-    /* Each bot's own paper account, keyed by the bot. Its own namespace rather than
-       `paper`, which holds the one account the Chart tab trades — a bot never shares that,
-       so hand-placed trades and automated ones are never in one ledger. */
+    /* Each bot's durable account, guard, and live-ownership state, keyed by the bot. */
     account: {
       load: (id) => ipcRenderer.invoke('botAccount:load', id),
       save: (id, account) => ipcRenderer.invoke('botAccount:save', id, account),
@@ -206,5 +210,83 @@ contextBridge.exposeInMainWorld('midori', {
       ipcRenderer.on('capital:quote', listener);
       return () => ipcRenderer.off('capital:quote', listener);
     },
+  },
+
+  /** ProjectX futures data — the session, the SignalR socket and the tick-to-bar
+   *  aggregation live in the main process; see app/electron/data/projectx.js. */
+  projectx: {
+    configured: () => ipcRenderer.invoke('projectx:configured'),
+    /* Same rule as every other venue here: the key goes IN and never comes back out. */
+    credentials: {
+      status: () => ipcRenderer.invoke('projectx:credentials-status'),
+      test: (creds) => ipcRenderer.invoke('projectx:credentials-test', creds),
+      save: (creds) => ipcRenderer.invoke('projectx:credentials-save', creds),
+      clear: () => ipcRenderer.invoke('projectx:credentials-clear'),
+    },
+    environment: () => ipcRenderer.invoke('projectx:environment'),
+    accounts: (onlyActive) => ipcRenderer.invoke('projectx:accounts', onlyActive),
+    contracts: (searchText) => ipcRenderer.invoke('projectx:contracts', searchText),
+    bars: (query) => ipcRenderer.invoke('projectx:bars', query),
+    subscribe: (query) => ipcRenderer.invoke('projectx:subscribe', query),
+    unsubscribe: (subscriptionId) => ipcRenderer.invoke('projectx:unsubscribe', subscriptionId),
+    /* Pushed per subscription id, like the Capital.com feeds. The bar is the one being
+     * BUILT from the tape, re-sent on every print rather than only when it closes. */
+    onBar: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('projectx:bar', listener);
+      return () => ipcRenderer.off('projectx:bar', listener);
+    },
+    subscribeQuotes: (query) => ipcRenderer.invoke('projectx:subscribe-quotes', query),
+    unsubscribeQuotes: (subscriptionId) => ipcRenderer.invoke('projectx:unsubscribe-quotes', subscriptionId),
+    onQuote: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('projectx:quote', listener);
+      return () => ipcRenderer.off('projectx:quote', listener);
+    },
+  },
+
+  /** Binance Spot Demo. The base URL is fixed in the main process, and the secret has no
+   *  renderer-facing read method. */
+  binanceSpot: {
+    environment: () => ipcRenderer.invoke('binance-spot:environment'),
+    credentials: {
+      status: () => ipcRenderer.invoke('binance-spot:credentials-status'),
+      test: (creds) => ipcRenderer.invoke('binance-spot:credentials-test', creds),
+      save: (creds) => ipcRenderer.invoke('binance-spot:credentials-save', creds),
+      clear: () => ipcRenderer.invoke('binance-spot:credentials-clear'),
+    },
+    symbolInfo: (symbol) => ipcRenderer.invoke('binance-spot:symbol-info', symbol),
+    account: () => ipcRenderer.invoke('binance-spot:account'),
+    openOrders: (symbol) => ipcRenderer.invoke('binance-spot:open-orders', symbol),
+    trades: (symbol) => ipcRenderer.invoke('binance-spot:trades', symbol),
+    placeOrder: (spec) => ipcRenderer.invoke('binance-spot:place-order', spec),
+    cancelOrder: (spec) => ipcRenderer.invoke('binance-spot:cancel-order', spec),
+    cancelAll: (symbol) => ipcRenderer.invoke('binance-spot:cancel-all', symbol),
+    replaceProtection: (spec) => ipcRenderer.invoke('binance-spot:replace-protection', spec),
+    close: (symbol) => ipcRenderer.invoke('binance-spot:close', symbol),
+  },
+
+  /** Bybit V5 — spot pairs and USDT perpetuals, on the demo host or the live one. Which of
+   *  the two is stored with the key; no call here can choose it. */
+  bybit: {
+    environment: () => ipcRenderer.invoke('bybit:environment'),
+    credentials: {
+      status: () => ipcRenderer.invoke('bybit:credentials-status'),
+      test: (creds) => ipcRenderer.invoke('bybit:credentials-test', creds),
+      save: (creds) => ipcRenderer.invoke('bybit:credentials-save', creds),
+      clear: () => ipcRenderer.invoke('bybit:credentials-clear'),
+    },
+    instrument: (query) => ipcRenderer.invoke('bybit:instrument', query),
+    /** Public candles, oldest first — what the chart provider draws from. */
+    klines: (query) => ipcRenderer.invoke('bybit:klines', query),
+    wallet: () => ipcRenderer.invoke('bybit:wallet'),
+    positions: (symbol) => ipcRenderer.invoke('bybit:positions', symbol),
+    openOrders: (query) => ipcRenderer.invoke('bybit:open-orders', query),
+    executions: (query) => ipcRenderer.invoke('bybit:executions', query),
+    placeOrder: (spec) => ipcRenderer.invoke('bybit:place-order', spec),
+    cancelOrder: (spec) => ipcRenderer.invoke('bybit:cancel-order', spec),
+    cancelAll: (query) => ipcRenderer.invoke('bybit:cancel-all', query),
+    setProtection: (spec) => ipcRenderer.invoke('bybit:set-protection', spec),
+    close: (query) => ipcRenderer.invoke('bybit:close', query),
   },
 });

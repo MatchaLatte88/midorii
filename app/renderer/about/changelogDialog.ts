@@ -57,6 +57,7 @@ export function openChangelog(host: HTMLElement): void {
 
     open = new Dialog({
         title: 'Release notes',
+        eyebrow: 'Midorii',
         host,
         draggable: true,
         align: 'center',

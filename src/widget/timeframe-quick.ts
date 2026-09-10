@@ -48,6 +48,7 @@ export class TimeframeQuick {
         this.hint.className = 'vela-tq-hint';
         this.dialog = new Dialog({
             title: 'Change timeframe',
+            eyebrow: 'Chart',
             host: opts.host,
             draggable: true,
             closeOnInteractOutside: true,

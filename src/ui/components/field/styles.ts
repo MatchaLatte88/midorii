@@ -36,21 +36,22 @@ export const FIELD_CSS = `
 .vela-field-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .vela-field-inline-item { display: flex; align-items: center; gap: 8px; }
 .vela-field-toggle-label { display: flex; align-items: center; gap: 8px; }
+/* Section heading — the same quiet tracked register a modal's eyebrow uses, so the line
+   naming a card and the lines dividing its contents read as one family. */
 .vela-field-section {
     grid-column: 1 / -1;
     margin: 24px 0 0;
     padding-bottom: 8px;
-    font-size: var(--vela-font-size-sm);
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--vela-fg-muted);
+    opacity: 0.75;
 }
 .vela-field-section[data-variant='inputs'] {
     margin: 0;
     padding: 20px 0 8px;
-    font-size: 11px;
-    font-weight: 600;
 }
 .vela-field-section[data-variant='inputs'][data-first] { padding-top: 4px; }
 .vela-field-sep { grid-column: 1 / -1; height: 14px; }

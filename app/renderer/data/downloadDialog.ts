@@ -29,12 +29,9 @@ function row(label: string, control: HTMLElement): HTMLElement {
 
 function button(text: string, primary = false): HTMLButtonElement {
     const b = document.createElement('button');
+    b.type = 'button';
+    b.className = primary ? 'vela-dialog-btn vela-dialog-btn-primary' : 'vela-dialog-btn';
     b.textContent = text;
-    b.style.cssText = `all:unset;padding:6px 16px;border-radius:var(--vela-radius-sm);cursor:pointer;font-weight:600;${
-        primary
-            ? 'background:var(--vela-accent);color:#0b0e14'
-            : 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft)'
-    }`;
     return b;
 }
 
@@ -42,7 +39,7 @@ function dateInput(value: string): HTMLInputElement {
     const el = document.createElement('input');
     el.type = 'date';
     el.value = value;
-    el.style.cssText = 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft);border-radius:var(--vela-radius-sm);padding:5px 8px;font:inherit;outline:none';
+    el.style.cssText = 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft);border-radius:var(--vela-control-radius);padding:0 10px;height:var(--vela-control-h);font:inherit;outline:none';
     return el;
 }
 
@@ -211,6 +208,7 @@ export async function openDownloadDialog(host: HTMLElement): Promise<string | nu
 
         const dialog = new Dialog({
             title: 'Download market data',
+            eyebrow: 'Market data',
             host,
             draggable: true,
             align: 'center',
@@ -229,7 +227,6 @@ export async function openDownloadDialog(host: HTMLElement): Promise<string | nu
                 loadSymbols(source.id);
             },
             footer: (el) => {
-                el.style.cssText += ';display:flex;justify-content:flex-end;gap:8px';
                 el.append(fromFile, close, start);
             },
         });

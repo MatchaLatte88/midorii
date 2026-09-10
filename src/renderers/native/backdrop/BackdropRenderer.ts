@@ -1,22 +1,25 @@
 import { parseRgb, withAlpha } from '../../../core/color';
 import type { VelaTheme } from '../../../core/options';
 import type { CoordinateSystem } from '../core/CoordinateSystem';
-import { blobAccentColor } from '../core/chartConfig';
+import { blobAccentColor, type BlobStyle } from '../core/chartConfig';
 import { percentScaleFor, type SceneGraph } from '../core/SceneGraph';
 import { paneAxisTicks, timeTicks } from '../chrome/ticks';
 import { tzOffsetMs } from '../chrome/tz';
 
 /**
- * The two ambient blobs, as fractions of the data area — a proportional translation of
+ * The four ambient blobs, as fractions of the data area — a proportional translation of
  * the CSS `radial-gradient(ellipse <w> <h> at <x> <y>, …)` pair they came from, so a
  * narrow pane and a wide one get the same look instead of the same pixel radii. Each
  * center sits just OUTSIDE its corner: what shows is the shoulder of the wash bleeding
- * in, never a circle floating in the plot.
+ * in, never a circle floating in the plot. The two added corners mirror the original
+ * pair rather than repeating it, so opposite corners don't come out visually identical.
  */
-const BLOB_GEOMETRY = [
-    { cx: 0.12, cy: -0.08, rx: 0.78, ry: 1.0 },
-    { cx: 1.04, cy: 1.08, rx: 0.66, ry: 0.89 },
-] as const;
+const BLOB_GEOMETRY: Record<keyof BlobStyle, { cx: number; cy: number; rx: number; ry: number }> = {
+    topLeft: { cx: 0.12, cy: -0.08, rx: 0.78, ry: 1.0 },
+    topRight: { cx: 0.9, cy: -0.06, rx: 0.66, ry: 0.92 },
+    bottomLeft: { cx: -0.04, cy: 1.06, rx: 0.72, ry: 0.94 },
+    bottomRight: { cx: 1.04, cy: 1.08, rx: 0.66, ry: 0.89 },
+};
 
 /** Where the wash has faded to nothing, as a fraction of the radius (CSS: `transparent 65%`). */
 const BLOB_FADE_STOP = 0.65;
@@ -96,16 +99,13 @@ export class BackdropRenderer {
      *  geometry keyed to what is actually visible. */
     private drawBlobs(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme): void {
         const blobs = scene.style.blobs;
-        if (!blobs.topLeft.visible && !blobs.bottomRight.visible) return;
         const w = coords.width;
         const h = coords.height;
         if (w <= 0 || h <= 0) return;
-        const order = ['topLeft', 'bottomRight'] as const;
-        for (let i = 0; i < BLOB_GEOMETRY.length; i++) {
-            const which = order[i]!;
+        for (const which of Object.keys(BLOB_GEOMETRY) as Array<keyof BlobStyle>) {
             const layer = blobs[which];
             if (!layer.visible) continue;
-            const g = BLOB_GEOMETRY[i]!;
+            const g = BLOB_GEOMETRY[which];
             this.drawBlob(ctx, w, h, g.cx * w, g.cy * h, g.rx * w, g.ry * h, layer.color ?? blobAccentColor(theme, which));
         }
     }

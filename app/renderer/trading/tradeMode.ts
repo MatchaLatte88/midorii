@@ -10,6 +10,11 @@ import { clearPaperAccount, loadActiveBroker, loadPaperAccount, paperWriter, sav
 import { CapitalController } from './CapitalController';
 import { mountCapitalTrading, type CapitalMount } from './capitalMount';
 import { askToArm } from './capitalArmDialog';
+import { BinanceSpotController } from './BinanceSpotController';
+import { mountBinanceSpotTrading, type BinanceSpotMount } from './binanceSpotMount';
+import { BybitController } from './BybitController';
+import { mountBybitTrading, type BybitMount } from './bybitMount';
+import { categoryOf, venueSymbol } from '../providers/BybitProvider';
 
 /**
  * The Trade menu — which broker, if any, the chart is wired to.
@@ -23,11 +28,12 @@ import { askToArm } from './capitalArmDialog';
  * second where the credentials for one exist. They are the same shape of entry on purpose —
  * what changes underneath is only where the orders go — but they are not the same kind of
  * thing, and the menu does not pretend otherwise: the live entry says which account it is,
- * asks before it opens, and is never restored on startup the way paper is.
+ * and asks before it opens — on the first start and on every start after, including the one
+ * that comes back to it because it is where the app was left.
  */
 
 /** Which broker the chart is wired to. */
-export type TradeBroker = 'off' | 'paper' | 'capital';
+export type TradeBroker = 'off' | 'paper' | 'capital' | 'binance-spot' | 'bybit';
 
 export interface TradeModeOptions {
     workspace: VelaWorkspace;
@@ -92,9 +98,18 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     let mount: PaperMount | null = null;
     let live: CapitalController | null = null;
     let liveMount: CapitalMount | null = null;
+    let spot: BinanceSpotController | null = null;
+    let spotMount: BinanceSpotMount | null = null;
+    let bybit: BybitController | null = null;
+    let bybitMount: BybitMount | null = null;
     /** Whether the credentials point at a real-money account, once the main process has
      *  been asked. Undefined until then — the menu entry waits rather than guessing. */
     let capital: { configured: boolean; live: boolean } | null = null;
+    let binanceSpot: { configured: boolean } | null = null;
+    /** The same question for Bybit, and its answer carries the same warning: `live` here
+     *  means orders from this chart are real orders. Undefined until the main process has
+     *  been asked. */
+    let bybitVenue: { configured: boolean; live: boolean } | null = null;
     const writer = paperWriter();
 
     /** Reading the account off disk is a round trip, and the menu can be clicked again
@@ -133,7 +148,147 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 separatorBefore: true,
             });
         }
+        if (binanceSpot?.configured) {
+            list.push({
+                id: 'binance-spot',
+                label: 'Binance Spot — demo',
+                checked: broker === 'binance-spot',
+                separatorBefore: !capital?.configured,
+            });
+        }
+        /* One entry for both of Bybit's products, because the chart already says which of
+         * them is meant: BTCUSDT is the pair, BTCUSDT.P is the contract. Two entries would
+         * put a choice in the menu that the symbol has already made, and one of them would
+         * be an entry that can only refuse. */
+        if (bybitVenue?.configured) {
+            const product = bybitProduct();
+            list.push({
+                id: 'bybit',
+                label: [
+                    'Bybit',
+                    product,
+                    `— ${bybitVenue.live ? 'live money' : 'demo'}`,
+                ].filter(Boolean).join(' '),
+                checked: broker === 'bybit',
+                separatorBefore: !capital?.configured && !binanceSpot?.configured,
+            });
+        }
         return list;
+    }
+
+    /** Wire the chart to Binance's demo Spot account. Production has no path into this mode. */
+    async function startBinanceSpot(): Promise<void> {
+        if (broker === 'binance-spot' || starting) return;
+        const symbol = ws.chart.market.symbol ?? '';
+        const resolved = ws.chart.data.resolve(symbol);
+        if (resolved?.provider !== 'binance' || resolved.ticker.endsWith('.P')) {
+            ws.toast('Binance Spot Demo needs a Binance Spot market on the chart — choose a symbol without the .P futures suffix.', 'error');
+            return;
+        }
+        starting = true;
+        try {
+            const [info, account] = await Promise.all([
+                window.midori.binanceSpot.symbolInfo(resolved.ticker),
+                window.midori.binanceSpot.account(),
+            ]);
+            const quote = account.balances.find((row) => row.asset === info.quoteAsset);
+            const quoteBalance = Number(quote?.free ?? 0) + Number(quote?.locked ?? 0);
+            const go = await askToArm(ws.root, {
+                live: false,
+                epic: info.symbol,
+                accountName: 'Binance Spot Demo',
+                currency: info.quoteAsset,
+                balance: quoteBalance,
+            });
+            if (!go) return;
+
+            stop();
+            spot = new BinanceSpotController({
+                symbol: info.symbol,
+                info,
+                notify: (message, kind) => ws.toast(message, kind === 'success' ? 'success' : kind),
+            });
+            spotMount = mountBinanceSpotTrading({
+                workspace: ws,
+                stack: opts.stack,
+                main: opts.main,
+                controller: spot,
+                settings: () => settings,
+                onSettings: (next) => void applySettings(next).catch(report),
+                theme: opts.theme(),
+            });
+            broker = 'binance-spot';
+            saveActiveBroker(broker);
+        } finally {
+            starting = false;
+        }
+    }
+
+    /** Which Bybit product the chart is currently on, or null when it is not on one. */
+    function bybitProduct(): 'perpetual' | 'spot' | null {
+        const resolved = ws.chart.data.resolve(ws.chart.market.symbol ?? '');
+        if (resolved?.provider !== 'bybit') return null;
+        return categoryOf(resolved.ticker) === 'linear' ? 'perpetual' : 'spot';
+    }
+
+    /**
+     * Wire the chart to Bybit — whichever of its two products the chart is showing.
+     *
+     * Bound to the market on screen and refused off it, for the reason the Capital.com entry
+     * gives: the account trades ONE instrument, and a chart on something else has nothing to
+     * send. The product is not asked for either — `BTCUSDT` is the spot pair and `BTCUSDT.P`
+     * the perpetual, so the symbol has already answered it.
+     */
+    async function startBybit(): Promise<void> {
+        if (broker === 'bybit' || starting) return;
+        const symbol = ws.chart.market.symbol ?? '';
+        const resolved = ws.chart.data.resolve(symbol);
+        if (resolved?.provider !== 'bybit') {
+            ws.toast('Bybit trading needs a Bybit market on the chart — pick one from the symbol list first.', 'error');
+            return;
+        }
+        starting = true;
+        try {
+            const ticker = resolved.ticker.toUpperCase();
+            // What the suffix means is the provider's to say, not a second copy of it here.
+            const category = categoryOf(ticker);
+            const env = await window.midori.bybit.environment();
+            const [info, wallet] = await Promise.all([
+                window.midori.bybit.instrument({ category, symbol: venueSymbol(ticker) }),
+                window.midori.bybit.wallet().catch(() => null),
+            ]);
+            const account = wallet?.list?.[0] ?? null;
+            const go = await askToArm(ws.root, {
+                live: env.live,
+                epic: ticker,
+                accountName: `Bybit ${env.live ? '' : 'Demo '}unified account · ${category === 'linear' ? 'USDT perpetual' : 'spot'}`,
+                // The unified account states one total, and Bybit denominates it in USD.
+                currency: account ? 'USD' : null,
+                balance: account ? Number(account.totalEquity) : null,
+            });
+            if (!go) return;
+
+            stop(); // whatever was on comes off first — one account at a time
+            bybit = new BybitController({
+                ticker,
+                info,
+                live: env.live,
+                notify: (message, kind) => ws.toast(message, kind === 'success' ? 'success' : kind),
+            });
+            bybitMount = mountBybitTrading({
+                workspace: ws,
+                stack: opts.stack,
+                main: opts.main,
+                controller: bybit,
+                settings: () => settings,
+                onSettings: (next) => void applySettings(next).catch(report),
+                theme: opts.theme(),
+            });
+            broker = 'bybit';
+            saveActiveBroker(broker);
+        } finally {
+            starting = false;
+        }
     }
 
     /**
@@ -180,6 +335,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             });
             liveMount = mountCapitalTrading({
                 workspace: ws,
+                stack: opts.stack,
                 main: opts.main,
                 controller: live,
                 settings: () => settings,
@@ -189,10 +345,10 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 theme: opts.theme(),
             });
             broker = 'capital';
-            /* Deliberately NOT remembered across restarts, unlike paper. A real account must
-             * be armed by a person each time the app starts — a chart that comes back up
-             * already wired to live money is one nobody consciously pointed at it. */
-            saveActiveBroker('off');
+            /* Remembered across restarts like every other mode — but the memory only gets
+             * the chart as far as the arm dialog. What actually wires it to live money is
+             * still a person answering that dialog, this start and every start after it. */
+            saveActiveBroker(broker);
         } finally {
             starting = false;
         }
@@ -214,6 +370,14 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             ws.toast(`The stored paper account could not be read: ${err instanceof Error ? err.message : String(err)}`, 'error');
             return;
         }
+
+        /* Whatever was on comes off first — one account at a time, exactly as the two venue
+         * modes already do it. Without this a venue mount stayed live underneath: its
+         * reconcile timer went on running, and — because the position drawing is a
+         * single-instance native indicator — `addNativeIndicator` handed the paper account
+         * the venue's OWN instance back. Two controllers then wrote one drawing, so the
+         * figures on the chart were whichever account had pushed last. */
+        stop();
 
         /* Undefined only before the chart has resolved a market at all — which is not a
          * moment anybody can click this menu in, but the account has to be bound to
@@ -256,6 +420,22 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             liveMount?.unmount();
             liveMount = null;
             live = null;
+            broker = 'off';
+            saveActiveBroker('off');
+            return;
+        }
+        if (broker === 'binance-spot') {
+            spotMount?.unmount();
+            spotMount = null;
+            spot = null;
+            broker = 'off';
+            saveActiveBroker('off');
+            return;
+        }
+        if (broker === 'bybit') {
+            bybitMount?.unmount();
+            bybitMount = null;
+            bybit = null;
             broker = 'off';
             saveActiveBroker('off');
             return;
@@ -373,6 +553,8 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 if (id === 'off') stop();
                 else if (id === 'paper') void startPaper().catch(report);
                 else if (id === 'capital') void startCapital().catch(report);
+                else if (id === 'binance-spot') void startBinanceSpot().catch(report);
+                else if (id === 'bybit') void startBybit().catch(report);
             },
             onTrailing: (id) => {
                 if (id === 'paper') openSettings();
@@ -389,6 +571,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         label: 'Trade',
         when: opts.when,
         run: (ctx) => {
+            void refreshVenues();
             if (menuOpen || Date.now() - closedAt < REOPEN_GUARD_MS) {
                 menu?.close();
                 return;
@@ -404,22 +587,52 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         },
     });
 
-    /* Whether there is a real account to offer at all, and which kind. Asked once at
-     * startup: the menu is rebuilt from `items()` every time it opens, so the entry appears
-     * as soon as this lands and stays absent on a machine with no credentials. */
-    void window.midori.capital.environment()
-        .then((env) => { capital = { configured: env.configured, live: env.live }; })
-        .catch((err: unknown) => console.error('[midorii] could not read the Capital.com environment', err));
+    /* Read again whenever the menu opens as well as at startup. Credentials can be saved in
+     * Settings after this handle was installed, and the newly connected venue should appear
+     * without making somebody restart the app. */
+    const refreshVenues = async (): Promise<void> => {
+        const [capitalResult, spotResult, bybitResult] = await Promise.allSettled([
+            window.midori.capital.environment(),
+            window.midori.binanceSpot.environment(),
+            window.midori.bybit.environment(),
+        ]);
+        if (capitalResult.status === 'fulfilled') {
+            capital = { configured: capitalResult.value.configured, live: capitalResult.value.live };
+        }
+        if (spotResult.status === 'fulfilled') binanceSpot = { configured: spotResult.value.configured };
+        if (bybitResult.status === 'fulfilled') {
+            bybitVenue = { configured: bybitResult.value.configured, live: bybitResult.value.live };
+        }
+        if (menuOpen) menu?.setItems(items());
+    };
+    const venuesRead = refreshVenues();
 
-    /* Back into the mode this machine was left in, once the chart has a market and a
-     * price to hand — which is also when the account can be caught up over whatever
-     * happened while the app was shut. Anything the restore refuses (a market nothing
-     * serves any more) leaves the chart on Just Watching, which is the safe end of it. */
-    if (loadActiveBroker() === 'paper') {
+    /*
+     * Back into the mode this machine was left in, once the chart has a market and a price
+     * to hand — which is also when a paper account can be caught up over whatever happened
+     * while the app was shut.
+     *
+     * The MODE is remembered; being wired up is not. Paper comes back on its own, and a
+     * venue comes back only as far as its arm dialog — so the app can open where it was
+     * left without any account ever having been armed by a memory instead of by a person.
+     * A venue whose credentials have since gone, a market nothing serves any more, or a
+     * dialog answered no all leave the chart on Just Watching, which is the safe end of it,
+     * and none of them forget the mode: the next start offers it again.
+     */
+    const resume = loadActiveBroker();
+    if (resume && resume !== 'off') {
         void ws.chart.ready()
-            .then(() => startPaper())
-            .catch((err: unknown) => console.error('[midorii] could not resume paper trading', err));
-
+            .then(async () => {
+                if (resume === 'paper') return startPaper();
+                /* Which venues this machine still has credentials for is a round trip, and
+                 * a venue it no longer has would reach the dialog only to fail behind it. */
+                await venuesRead;
+                if (resume === 'capital' && capital?.configured) return startCapital();
+                if (resume === 'binance-spot' && binanceSpot?.configured) return startBinanceSpot();
+                if (resume === 'bybit' && bybitVenue?.configured) return startBybit();
+                return undefined;
+            })
+            .catch((err: unknown) => console.error('[midorii] could not resume trading', err));
     }
 
     /* The account is written on a delay so a burst of ticks is one write; a window

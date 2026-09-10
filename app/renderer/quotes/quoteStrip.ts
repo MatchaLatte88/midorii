@@ -1,4 +1,5 @@
 import { injectStyles } from '../../../src/ui';
+import { makeOverlayCard } from '../replay/overlayCards';
 
 /**
  * The two-sided price, on the chart, for markets that quote one.
@@ -9,11 +10,18 @@ import { injectStyles } from '../../../src/ui';
  * Three figures is the whole of it: what you can sell at, what you can buy at, and what
  * standing between the two costs.
  *
- * It anchors to the price pane through the custom properties the renderer publishes for
- * host overlays (`--vela-price-pane-bottom`, `--vela-scale-gutter`), so it sits clear of
+ * It starts anchored to the price pane through the custom properties the renderer publishes
+ * for host overlays (`--vela-price-pane-bottom`, `--vela-scale-gutter`), so it sits clear of
  * the price axis and the time axis at any size without reaching into the chart's DOM. The
  * bottom-right corner because the account card already has the top-right one, the legend
  * the top-left, and the attribution mark the bottom-left.
+ *
+ * That is where it STARTS. Like the other floating cards it can be dragged anywhere over the
+ * plot and dropped there for good, and closed from its own corner — which is the price of
+ * being movable: the card takes the pointer, so a drag through it moves the card rather than
+ * the chart. Closed, it stays closed across restarts and the chart's restore button is what
+ * brings it back; the switch under Settings → Customization takes it off entirely, restore
+ * button and all. See `replay/overlayCards.ts`.
  *
  * Stale is shown, not hidden
  * --------------------------
@@ -37,13 +45,11 @@ const CSS = `
     border-radius: var(--vela-radius-md);
     background: var(--vela-surface-elev);
     box-shadow: var(--vela-shadow);
-    pointer-events: none;
     user-select: none;
     transition: opacity 120ms ease;
 }
 .midorii-quote-col { display: flex; flex-direction: column; gap: 1px; min-width: 58px; }
 .midorii-quote-label {
-    pointer-events: auto;
     align-self: flex-start;
     font-size: 9px;
     font-weight: 600;
@@ -96,9 +102,17 @@ export interface QuoteStrip {
     update(quote: Quote, tick?: number): void;
     /**
      * Say that nothing is arriving — a market with no quote stream, or one that stopped.
-     * Stops the staleness timer too, so this plus `el.remove()` is the whole teardown.
+     * Stops the staleness timer too.
      */
     clear(): void;
+    /**
+     * Whether this chart shows the card at all: the Settings switch, and whether the market
+     * on screen quotes two sides in the first place. A card that is not available is not
+     * offered by the restore button either — there is nothing behind it to restore.
+     */
+    setAvailable(available: boolean): void;
+    /** Release the drag and the card's seat in the restore button. Does not remove `el`. */
+    destroy(): void;
 }
 
 /** `HH:MM:SS` in UTC — the clock everything else in the app is stamped in. To the second
@@ -137,8 +151,8 @@ function column(doc: Document, label: string, hint: string): { el: HTMLElement; 
 }
 
 /**
- * Mount the readout into a chart cell. The caller owns it afterwards — `dispose()` stops
- * its timer and `el.remove()` takes it off.
+ * Mount the readout into a chart cell. The caller owns it afterwards — `clear()` stops its
+ * timer, `destroy()` releases the drag, and `el.remove()` takes it off.
  */
 export function mountQuoteStrip(cell: HTMLElement): QuoteStrip {
     const doc = cell.ownerDocument;
@@ -159,6 +173,11 @@ export function mountQuoteStrip(cell: HTMLElement): QuoteStrip {
 
     el.append(bid.el, ask.el, spread.el);
     cell.appendChild(el);
+
+    /* No `place` of its own: with nothing dragged, the CSS above holds it in the corner, and
+     * the corner it uses is not the one the restore button sits in — so unlike the two cards
+     * up top, this one has no room to make for it. */
+    const card = makeOverlayCard(cell, el, { id: 'quote' });
 
     let staleTimer: ReturnType<typeof setTimeout> | null = null;
     /** When the venue stamped the last quote — what the card names once it goes stale. */
@@ -193,6 +212,12 @@ export function mountQuoteStrip(cell: HTMLElement): QuoteStrip {
             el.classList.remove('stale');
             if (staleTimer) clearTimeout(staleTimer);
             staleTimer = setTimeout(markStale, STALE_MS);
+        },
+        setAvailable(available: boolean): void {
+            card.setAvailable(available);
+        },
+        destroy(): void {
+            card.destroy();
         },
         clear(): void {
             if (staleTimer) { clearTimeout(staleTimer); staleTimer = null; }

@@ -13,6 +13,58 @@ export function overlayScrollbarCss(selector: string, width = 8): string {
     );
 }
 
+export const BUTTON_STYLE_ID = 'vela-ui-button';
+
+/**
+ * The action button, in the three tones a decision comes in: plain (step back), primary
+ * (commit), danger (remove).
+ *
+ * It lives here rather than in the dialog sheet because it outgrew dialogs — the run
+ * library, the settings page and the bot form all end in the same row of buttons, and a
+ * page that never opens a dialog must still be able to wear one. The class keeps its
+ * historical `vela-dialog-btn` name so the markup that already uses it stays valid.
+ *
+ * Neither filled tone is saturated: they are ink on a wash of themselves, which is what
+ * lets one accent stay legible on a night surface and on a paper one without white text.
+ */
+export const BUTTON_CSS = `
+.vela-dialog-btn {
+    cursor: pointer;
+    height: var(--vela-control-h);
+    padding: 0 14px;
+    border-radius: var(--vela-control-radius);
+    border: 1px solid var(--vela-border);
+    background: var(--vela-surface);
+    color: var(--vela-fg);
+    font-weight: 600;
+    font-size: 12px;
+    font-family: inherit;
+    transition: background var(--vela-dur-fast) ease, color var(--vela-dur-fast) ease, opacity var(--vela-dur-fast) ease, border-color var(--vela-dur-fast) ease;
+}
+.vela-dialog-btn:hover:not(:disabled) { background: var(--vela-hover); color: var(--vela-fg-bright); border-color: var(--vela-border-strong); }
+.vela-dialog-btn:disabled { opacity: 0.4; cursor: default; }
+.vela-dialog-btn-primary {
+    border-color: var(--vela-accent-line);
+    background: var(--vela-accent-soft);
+    color: var(--vela-accent-ink);
+}
+.vela-dialog-btn-primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--vela-accent-ink) 18%, transparent);
+    border-color: var(--vela-accent-ink);
+    color: var(--vela-accent-ink);
+}
+.vela-dialog-btn-danger {
+    border-color: var(--vela-danger-line);
+    background: var(--vela-danger-soft);
+    color: var(--vela-danger);
+}
+.vela-dialog-btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--vela-danger) 18%, transparent);
+    border-color: var(--vela-danger);
+    color: var(--vela-danger);
+}
+`;
+
 /** Focus ring shared by typeable fields (combo inputs, textareas). */
 export const FIELD_FOCUS_CSS =
     'outline:none;transition:border-color .12s ease,box-shadow .12s ease;';

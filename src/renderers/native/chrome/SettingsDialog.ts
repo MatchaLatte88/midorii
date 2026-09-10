@@ -87,7 +87,7 @@ function styleLabel(id: string): string {
 }
 
 const SD_STYLE_ID = 'vela-settings-controls';
-const SD_STYLE_REV = '5';
+const SD_STYLE_REV = '6';
 
 /**
  * The dialog's surface palette. It follows the STABLE chrome surface (the tokens written on
@@ -115,7 +115,7 @@ ${overlayScrollbarCss('.vela-sd-pane')}
 .vela-sd-tab{text-align:left;padding:9px 12px;background:transparent;border:none;border-radius:var(--vela-radius-md);color:var(--vela-fg-muted);font-weight:600;font-size:13px;font-family:inherit;cursor:pointer;transition:background var(--vela-dur-fast) ease,color var(--vela-dur-fast) ease;}
 .vela-sd-tab:hover{background:var(--vela-hover);color:var(--vela-fg-bright);}
 .vela-sd-tab.on{background:var(--vela-active);color:var(--vela-fg-bright);}
-.vela-sd-btn{height:30px;padding:0 14px;font-size:var(--vela-font-size-md);color:var(--vela-fg);background:var(--vela-surface-sunken);border:1px solid var(--vela-border);border-radius:var(--vela-radius-md);cursor:pointer;font-family:inherit;transition:background var(--vela-dur-fast) ease,border-color var(--vela-dur-fast) ease,color var(--vela-dur-fast) ease;}
+.vela-sd-btn{height:var(--vela-control-h);padding:0 14px;font-size:var(--vela-font-size-md);font-weight:600;color:var(--vela-fg);background:var(--vela-surface-sunken);border:1px solid var(--vela-border);border-radius:var(--vela-control-radius);cursor:pointer;font-family:inherit;transition:background var(--vela-dur-fast) ease,border-color var(--vela-dur-fast) ease,color var(--vela-dur-fast) ease;}
 .vela-sd-btn:hover{background:var(--vela-hover);border-color:var(--vela-border-strong);color:var(--vela-fg-bright);}
 .vela-sd-close{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;background:transparent;border:none;color:var(--vela-fg-muted);line-height:0;width:30px;height:30px;border-radius:var(--vela-radius-sm);transition:background var(--vela-dur-fast) ease,color var(--vela-dur-fast) ease;}
 .vela-sd-close:hover{background:var(--vela-hover);color:var(--vela-fg-bright);}
@@ -516,6 +516,12 @@ export class SettingsDialog {
         body.append(sid(this.toggleRow('Top-left', config.blobs.topLeft.visible, (v) => this.emit({ blobs: { topLeft: { visible: v } } }), [
             this.swatch(config.blobs.topLeft.color, (v) => this.emit({ blobs: { topLeft: { color: v } } })),
         ]), 'canvas.blobs.top-left'));
+        body.append(sid(this.toggleRow('Top-right', config.blobs.topRight.visible, (v) => this.emit({ blobs: { topRight: { visible: v } } }), [
+            this.swatch(config.blobs.topRight.color, (v) => this.emit({ blobs: { topRight: { color: v } } })),
+        ]), 'canvas.blobs.top-right'));
+        body.append(sid(this.toggleRow('Bottom-left', config.blobs.bottomLeft.visible, (v) => this.emit({ blobs: { bottomLeft: { visible: v } } }), [
+            this.swatch(config.blobs.bottomLeft.color, (v) => this.emit({ blobs: { bottomLeft: { color: v } } })),
+        ]), 'canvas.blobs.bottom-left'));
         body.append(sid(this.toggleRow('Bottom-right', config.blobs.bottomRight.visible, (v) => this.emit({ blobs: { bottomRight: { visible: v } } }), [
             this.swatch(config.blobs.bottomRight.color, (v) => this.emit({ blobs: { bottomRight: { color: v } } })),
         ]), 'canvas.blobs.bottom-right'));
@@ -617,6 +623,7 @@ export class SettingsDialog {
         const ui = new Dialog({
             host: this.container,
             title: 'Chart settings',
+            eyebrow: 'Chart',
             // Non-modal: a live-edit dialog must leave the page interactive — a modal
             // machine locks pointer events on the whole body, killing the chart, the
             // legend, and the body-portaled popovers (color picker, select lists).
@@ -629,7 +636,9 @@ export class SettingsDialog {
             headerStart: burger,
             closeOnBackdrop: true,
             footer: (foot) => {
-                foot.style.cssText = `padding:10px 14px;display:flex;align-items:center;justify-content:flex-start;gap:8px;`;
+                // Only the alignment differs from the shared footer band — this one
+                // starts at the left, being an escape hatch rather than a confirmation.
+                foot.style.justifyContent = 'flex-start';
                 const resetBtn = document.createElement('button');
                 resetBtn.type = 'button';
                 resetBtn.textContent = 'Reset defaults';

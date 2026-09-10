@@ -15,8 +15,10 @@ import {
 import type { TradeModeHandle } from '../trading/tradeMode';
 import { loadAlertDisplay, saveAlertDisplay, type AlertDisplay } from '../alerts/alertDisplay';
 import { loadQuoteDisplay, saveQuoteDisplay, type QuoteDisplay } from '../quotes/quoteDisplay';
-import type { MidoriCapitalAccountSummary, MidoriCapitalCredentialStatus } from '../midori';
-import { loadOverlayDisplay, saveOverlayDisplay, type OverlayDisplay } from '../replay/overlayDisplay';
+import type {
+    MidoriBinanceSpotCredentialStatus, MidoriBybitAccountSummary, MidoriBybitCredentialStatus,
+    MidoriCapitalAccountSummary, MidoriCapitalCredentialStatus,
+} from '../midori';
 import { STARTUP_TABS, loadPrefs, savePrefs, type AppPrefs, type StartupTab } from './prefs';
 
 /**
@@ -57,9 +59,12 @@ const CSS = `
 .midorii-settings-bar {
     flex: none;
     display: flex; align-items: center; gap: 10px;
-    height: 34px; padding: 0 14px;
-    border-bottom: 1px solid var(--vela-border);
-    font-size: 12px; color: var(--vela-fg-muted);
+    height: 38px; padding: 0 14px;
+    border-bottom: 1px solid var(--vela-border-faint);
+    background: var(--vela-chrome);
+    font-family: var(--vela-font-mono);
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--vela-fg-muted);
 }
 .midorii-settings-main { flex: 1 1 auto; min-height: 0; display: flex; }
 
@@ -73,25 +78,35 @@ ${overlayScrollbarCss('.midorii-settings-rail')}
     all: unset;
     display: block; box-sizing: border-box; width: 100%;
     padding: 8px 10px; margin-bottom: 2px;
-    border-radius: var(--vela-radius-sm);
+    border: 1px solid transparent;
+    border-radius: var(--vela-control-radius);
     font-size: 13px; font-weight: 600; color: var(--vela-fg-muted);
     cursor: pointer;
+    transition: background var(--vela-dur-fast) ease, color var(--vela-dur-fast) ease, border-color var(--vela-dur-fast) ease;
 }
 .midorii-settings-tab:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
-.midorii-settings-tab[data-active='1'] { background: var(--vela-active); color: var(--vela-fg-bright); }
+.midorii-settings-tab[data-active='1'] {
+    border-color: var(--vela-accent-line);
+    background: var(--vela-accent-soft);
+    color: var(--vela-accent-ink);
+}
 
 .midorii-settings-body { flex: 1 1 auto; min-width: 0; overflow: auto; }
 ${overlayScrollbarCss('.midorii-settings-body')}
 .midorii-settings-inner { max-width: 820px; margin: 0 auto; padding: 18px 20px 40px; }
 
-.midorii-settings-head { margin: 0 0 4px; font-size: 17px; color: var(--vela-fg-bright); }
+.midorii-settings-head {
+    margin: 0 0 5px;
+    font-size: 20px; font-weight: 600; letter-spacing: -0.02em;
+    color: var(--vela-fg-bright);
+}
 .midorii-settings-lede { margin: 0 0 18px; color: var(--vela-fg-muted); font-size: 12.5px; line-height: 1.6; }
 
 .midorii-settings-card {
-    padding: 14px 16px 18px; margin-bottom: 16px;
-    background: var(--vela-surface);
+    padding: 18px 20px 20px; margin-bottom: 16px;
+    background: var(--vela-surface-elev);
     border: 1px solid var(--vela-border-faint);
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-radius-xl);
 }
 .midorii-settings-card .vela-field-section:first-child { margin-top: 0; }
 
@@ -118,7 +133,7 @@ ${overlayScrollbarCss('.midorii-settings-body')}
     position: absolute; top: 50%; right: 4px; transform: translateY(-50%);
     display: flex; align-items: center; justify-content: center;
     width: 26px; height: 26px;
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-control-radius);
     color: var(--vela-fg-muted);
     cursor: pointer;
 }
@@ -226,7 +241,10 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
     /** What is currently typed into the connection form. Kept across repaints so a half-
      *  entered key is not lost by switching tabs. */
     const brokerDraft = { apiKey: '', identifier: '', password: '', env: 'demo' as 'demo' | 'live' };
-    let overlayDisplay: OverlayDisplay = loadOverlayDisplay();
+    let spotBroker: MidoriBinanceSpotCredentialStatus | null = null;
+    const spotDraft = { apiKey: '', secretKey: '' };
+    let bybitBroker: MidoriBybitCredentialStatus | null = null;
+    const bybitDraft = { apiKey: '', secretKey: '', env: 'demo' as 'demo' | 'live' };
     /**
      * The paper-account form, which is the one thing here that is not applied as it is
      * typed. Kept across a pane switch rather than thrown away: it is never applied without
@@ -421,10 +439,6 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         saveQuoteDisplay(quoteDisplay); // same contract: the chart is listening
     }
 
-    function changeOverlayDisplay(patch: Partial<OverlayDisplay>): void {
-        overlayDisplay = { ...overlayDisplay, ...patch };
-        saveOverlayDisplay(overlayDisplay); // same contract: the chart is listening
-    }
 
     function paintGeneral(): void {
         inner.append(head(
@@ -540,7 +554,9 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
                 + 'alone never says what a buy costs. Three ways of showing it, off '
                 + 'independently: the card in the corner, the two levels across the plot, and '
                 + 'the prices chipped onto the scale beside them. Markets that quote a single '
-                + 'price — every crypto venue here — show none of it either way.'),
+                + 'price — every crypto venue here — show none of it either way. The card is '
+                + 'also switched from the chart’s own gear, under Chart cards, beside the other '
+                + 'things that float over the plot — the same setting through the other door.'),
             boolRow('Show the bid/ask card', quoteDisplay.showCard, (v) => (
                 changeQuoteDisplay({ showCard: v })
             )),
@@ -552,17 +568,6 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
             )),
         ));
 
-        inner.append(card(
-            fieldSection('Chart cards'),
-            note('The account card and the quick ticket float over the plot, and both can be '
-                + 'dragged anywhere on it and closed from their own corner — closed, they come '
-                + 'straight back through the button in the top right. This is the other answer: '
-                + 'somebody who reads the account in the dock below the chart can have the card '
-                + 'gone for good, and the ticket then takes the corner it was using.'),
-            boolRow('Show the account card', overlayDisplay.showAccount, (v) => (
-                changeOverlayDisplay({ showAccount: v })
-            )),
-        ));
     }
 
     /**
@@ -771,6 +776,292 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         }
         panel.append(actions, accounts);
         inner.append(panel);
+
+        /* Binance is a separate, demo-only connection. Its fixed environment is a fact,
+         * not a selector: there is no production endpoint behind this form. */
+        const spotStatus = doc.createElement('p');
+        spotStatus.className = 'midorii-settings-status';
+        const spotFacts = doc.createElement('div');
+        spotFacts.className = 'midorii-settings-note';
+        const saySpot = (text: string, error = false): void => {
+            spotStatus.textContent = text;
+            if (error) spotStatus.dataset.error = '1';
+            else delete spotStatus.dataset.error;
+        };
+        if (spotBroker?.configured) saySpot('Connected · Binance Spot Demo');
+        else if (spotBroker?.envPresent) saySpot('Using Binance Demo credentials from .env.local. Saving here replaces them.');
+        else saySpot('Not connected.');
+
+        const spotField = (label: string, key: 'apiKey' | 'secretKey', placeholder: string): HTMLElement => {
+            const control = buildFieldControl({
+                kind: 'text',
+                value: spotDraft[key],
+                fill: true,
+                placeholder,
+                onChange: (v) => { spotDraft[key] = v; },
+            });
+            const input = control.el.querySelector('input');
+            if (input) input.type = 'password';
+            const wrap = doc.createElement('div');
+            wrap.className = 'midorii-settings-secret';
+            const reveal = doc.createElement('button');
+            reveal.type = 'button';
+            reveal.className = 'midorii-settings-reveal';
+            const paintReveal = (): void => {
+                const shown = input?.type === 'text';
+                reveal.replaceChildren(iconEl(shown ? 'eye-off' : 'eye', doc));
+                reveal.title = `${shown ? 'Hide' : 'Show'} ${label.toLowerCase()}`;
+                reveal.setAttribute('aria-label', reveal.title);
+            };
+            reveal.onclick = () => {
+                if (!input) return;
+                input.type = input.type === 'password' ? 'text' : 'password';
+                paintReveal();
+            };
+            paintReveal();
+            wrap.append(control.el, reveal);
+            return fieldRow({ label, control: wrap, controlWidth: FIELD_WIDTH });
+        };
+
+        const spotSave = button('Connect and save', 'primary');
+        const spotTest = button('Test only');
+        const spotForget = button('Forget', 'danger');
+        const collectSpot = (): { apiKey: string; secretKey: string } | null => {
+            const apiKey = spotDraft.apiKey.trim();
+            const secretKey = spotDraft.secretKey.trim();
+            if (!apiKey || !secretKey) {
+                saySpot('Fill in the demo API key and secret key first.', true);
+                return null;
+            }
+            return { apiKey, secretKey };
+        };
+        const spotBusy = (on: boolean): void => {
+            spotSave.disabled = on;
+            spotTest.disabled = on;
+        };
+        const showSpotAccount = (account: { uid?: number; balances: Array<{ free: string; locked: string }> }): void => {
+            const nonZero = account.balances.filter((row) => Number(row.free) !== 0 || Number(row.locked) !== 0).length;
+            spotFacts.textContent = `${account.uid == null ? 'Spot account' : `UID ${account.uid}`} · ${nonZero} non-zero ${nonZero === 1 ? 'balance' : 'balances'} · trading enabled`;
+        };
+        spotTest.onclick = () => {
+            const creds = collectSpot();
+            if (!creds) return;
+            spotBusy(true);
+            saySpot('Connecting to Binance Spot Demo…');
+            void window.midori.binanceSpot.credentials.test(creds)
+                .then((account) => {
+                    showSpotAccount(account);
+                    saySpot('Works — Spot Demo is reachable. Nothing was saved.');
+                })
+                .catch((err: unknown) => saySpot(err instanceof Error ? err.message : String(err), true))
+                .finally(() => spotBusy(false));
+        };
+        spotSave.onclick = () => {
+            const creds = collectSpot();
+            if (!creds) return;
+            spotBusy(true);
+            saySpot('Connecting to Binance Spot Demo…');
+            void window.midori.binanceSpot.credentials.save(creds)
+                .then((result) => {
+                    showSpotAccount(result.account);
+                    spotDraft.apiKey = '';
+                    spotDraft.secretKey = '';
+                    saySpot('Saved and connected · Binance Spot Demo');
+                    refresh();
+                })
+                .catch((err: unknown) => saySpot(err instanceof Error ? err.message : String(err), true))
+                .finally(() => spotBusy(false));
+        };
+        spotForget.onclick = () => {
+            if (spotForget.dataset.armed !== '1') {
+                spotForget.dataset.armed = '1';
+                spotForget.textContent = 'Forget — click again';
+                return;
+            }
+            void window.midori.binanceSpot.credentials.clear()
+                .then(() => { saySpot('Forgotten.'); refresh(); })
+                .catch((err: unknown) => saySpot(err instanceof Error ? err.message : String(err), true));
+        };
+        spotForget.onmouseleave = () => {
+            spotForget.dataset.armed = '0';
+            spotForget.textContent = 'Forget';
+        };
+
+        const spotRows: HTMLElement[] = [
+            fieldSection('Binance Spot Demo'),
+            note('Create this key on the Binance Demo Trading API Management page. Midorii sends it only to demo-api.binance.com. Spot buys assets you can sell later; it never opens a short or uses leverage.'),
+            spotField('API key', 'apiKey', 'the key from Demo API Management'),
+            spotField('Secret key', 'secretKey', 'the demo key secret'),
+            fieldRow({ label: 'Environment', control: value('Demo only'), controlWidth: FIELD_WIDTH }),
+        ];
+        if (spotBroker && !spotBroker.encryptionAvailable) {
+            const warn = doc.createElement('p');
+            warn.className = 'midorii-settings-warn';
+            warn.textContent = 'This machine has no OS keychain available, so Midorii will not store the secret. Use BINANCE_DEMO_API_KEY and BINANCE_DEMO_SECRET_KEY in .env.local instead.';
+            spotRows.push(warn);
+        }
+        const spotPanel = card(...spotRows);
+        const spotActions = doc.createElement('div');
+        spotActions.className = 'midorii-settings-actions';
+        spotActions.append(spotSave, spotTest, spotStatus);
+        if (spotBroker?.configured) {
+            const end = doc.createElement('div');
+            end.className = 'midorii-settings-actions-end';
+            end.append(spotForget);
+            spotActions.appendChild(end);
+        }
+        spotPanel.append(spotActions, spotFacts);
+        inner.append(spotPanel);
+
+        /* Bybit is the one connection here that offers both — a demo account and a real one —
+         * so, like Capital.com, the environment is a choice rather than a fact, and it is
+         * stored with the key. A demo key only works against the demo host and a live key only
+         * against the live one, so the two belong together: picking the wrong one is not a
+         * degraded connection, it is a refusal at the first call. */
+        const bybitStatus = doc.createElement('p');
+        bybitStatus.className = 'midorii-settings-status';
+        const bybitFacts = doc.createElement('div');
+        bybitFacts.className = 'midorii-settings-note';
+        const sayBybit = (text: string, error = false): void => {
+            bybitStatus.textContent = text;
+            if (error) bybitStatus.dataset.error = '1';
+            else delete bybitStatus.dataset.error;
+        };
+        if (bybitBroker?.configured) sayBybit(`Connected · ${bybitBroker.env === 'live' ? 'LIVE MONEY' : 'demo'}`);
+        else if (bybitBroker?.envPresent) sayBybit('Using Bybit credentials from .env.local. Saving here replaces them.');
+        else sayBybit('Not connected.');
+
+        const bybitField = (label: string, key: 'apiKey' | 'secretKey', placeholder: string): HTMLElement => {
+            const control = buildFieldControl({
+                kind: 'text',
+                value: bybitDraft[key],
+                fill: true,
+                placeholder,
+                onChange: (v) => { bybitDraft[key] = v; },
+            });
+            const input = control.el.querySelector('input');
+            if (input) input.type = 'password';
+            const wrap = doc.createElement('div');
+            wrap.className = 'midorii-settings-secret';
+            const reveal = doc.createElement('button');
+            reveal.type = 'button';
+            reveal.className = 'midorii-settings-reveal';
+            const paintReveal = (): void => {
+                const shown = input?.type === 'text';
+                reveal.replaceChildren(iconEl(shown ? 'eye-off' : 'eye', doc));
+                reveal.title = `${shown ? 'Hide' : 'Show'} ${label.toLowerCase()}`;
+                reveal.setAttribute('aria-label', reveal.title);
+            };
+            reveal.onclick = () => {
+                if (!input) return;
+                input.type = input.type === 'password' ? 'text' : 'password';
+                paintReveal();
+            };
+            paintReveal();
+            wrap.append(control.el, reveal);
+            return fieldRow({ label, control: wrap, controlWidth: FIELD_WIDTH });
+        };
+
+        const bybitSave = button('Connect and save', 'primary');
+        const bybitTest = button('Test only');
+        const bybitForget = button('Forget', 'danger');
+        const collectBybit = (): { apiKey: string; secretKey: string; env: 'demo' | 'live' } | null => {
+            const apiKey = bybitDraft.apiKey.trim();
+            const secretKey = bybitDraft.secretKey.trim();
+            if (!apiKey || !secretKey) {
+                sayBybit('Fill in the API key and secret first.', true);
+                return null;
+            }
+            return { apiKey, secretKey, env: bybitDraft.env };
+        };
+        const bybitBusy = (on: boolean): void => {
+            bybitSave.disabled = on;
+            bybitTest.disabled = on;
+        };
+        const showBybitAccount = (account: MidoriBybitAccountSummary): void => {
+            const products = [account.spot ? 'spot' : null, account.derivatives ? 'derivatives' : null]
+                .filter(Boolean).join(' + ') || 'no trading permission';
+            const equity = account.wallet ? `${Number(account.wallet.totalEquity).toFixed(2)} USD equity` : 'no wallet reported';
+            bybitFacts.textContent = `${account.uid == null ? 'Unified account' : `UID ${account.uid}`} · ${products} · ${equity}`;
+        };
+        bybitTest.onclick = () => {
+            const creds = collectBybit();
+            if (!creds) return;
+            bybitBusy(true);
+            sayBybit(`Connecting to Bybit ${creds.env}…`);
+            void window.midori.bybit.credentials.test(creds)
+                .then((account) => {
+                    showBybitAccount(account);
+                    sayBybit('Works — the key is reachable and may trade. Nothing was saved.');
+                })
+                .catch((err: unknown) => sayBybit(err instanceof Error ? err.message : String(err), true))
+                .finally(() => bybitBusy(false));
+        };
+        bybitSave.onclick = () => {
+            const creds = collectBybit();
+            if (!creds) return;
+            bybitBusy(true);
+            sayBybit(`Connecting to Bybit ${creds.env}…`);
+            void window.midori.bybit.credentials.save(creds)
+                .then((result) => {
+                    showBybitAccount(result.account);
+                    // Out of the form the moment it is safely stored.
+                    bybitDraft.apiKey = '';
+                    bybitDraft.secretKey = '';
+                    sayBybit(`Saved and connected · ${result.env === 'live' ? 'LIVE MONEY' : 'demo'}`);
+                    refresh();
+                })
+                .catch((err: unknown) => sayBybit(err instanceof Error ? err.message : String(err), true))
+                .finally(() => bybitBusy(false));
+        };
+        bybitForget.onclick = () => {
+            if (bybitForget.dataset.armed !== '1') {
+                bybitForget.dataset.armed = '1';
+                bybitForget.textContent = 'Forget — click again';
+                return;
+            }
+            void window.midori.bybit.credentials.clear()
+                .then(() => { sayBybit('Forgotten.'); refresh(); })
+                .catch((err: unknown) => sayBybit(err instanceof Error ? err.message : String(err), true));
+        };
+        bybitForget.onmouseleave = () => {
+            bybitForget.dataset.armed = '0';
+            bybitForget.textContent = 'Forget';
+        };
+
+        const bybitRows: HTMLElement[] = [
+            fieldSection('Bybit'),
+            note('Create the key under API Management on Bybit, with Trade permission for the '
+                + 'products you want. A DEMO key comes from the Demo Trading section and belongs to a '
+                + 'different account with its own keys — it does not work on the live host, and a '
+                + 'live key does not work on the demo one. Spot pairs chart as BTCUSDT and USDT '
+                + 'perpetuals as BTCUSDT.P; whichever the chart is on is what the Trade menu trades.'),
+            bybitField('API key', 'apiKey', 'the key from API Management'),
+            bybitField('Secret key', 'secretKey', 'the key secret'),
+            selectRow('Account', [
+                { value: 'demo', label: 'Demo — real prices, money that is not real' },
+                { value: 'live', label: 'Live — real money' },
+            ], bybitDraft.env, (v) => { bybitDraft.env = v === 'live' ? 'live' : 'demo'; }, FIELD_WIDTH),
+        ];
+        if (bybitBroker && !bybitBroker.encryptionAvailable) {
+            const warn = doc.createElement('p');
+            warn.className = 'midorii-settings-warn';
+            warn.textContent = 'This machine has no OS keychain available, so Midorii will not store the secret. '
+                + 'Use BYBIT_API_KEY, BYBIT_SECRET_KEY and BYBIT_ENV in .env.local instead.';
+            bybitRows.push(warn);
+        }
+        const bybitPanel = card(...bybitRows);
+        const bybitActions = doc.createElement('div');
+        bybitActions.className = 'midorii-settings-actions';
+        bybitActions.append(bybitSave, bybitTest, bybitStatus);
+        if (bybitBroker?.configured) {
+            const end = doc.createElement('div');
+            end.className = 'midorii-settings-actions-end';
+            end.append(bybitForget);
+            bybitActions.appendChild(end);
+        }
+        bybitPanel.append(bybitActions, bybitFacts);
+        inner.append(bybitPanel);
     }
 
     function paintTrading(): void {
@@ -1023,7 +1314,6 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         style = loadPositionStyle();
         alertDisplay = loadAlertDisplay();
         quoteDisplay = loadQuoteDisplay();
-        overlayDisplay = loadOverlayDisplay();
         /* What is stored for the broker, asked fresh: it can be changed from here and read
          * back by the same page, and the answer comes from the main process rather than from
          * anything this page could hold. Repaints when it lands — the pane is drawn from
@@ -1034,6 +1324,18 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
                 if (active === 'brokers') paint();
             })
             .catch((err: unknown) => console.error('[midorii] could not read the broker credential status', err));
+        void window.midori.binanceSpot.credentials.status()
+            .then((next) => {
+                spotBroker = next;
+                if (active === 'brokers') paint();
+            })
+            .catch((err: unknown) => console.error('[midorii] could not read the Binance Spot Demo credential status', err));
+        void window.midori.bybit.credentials.status()
+            .then((next) => {
+                bybitBroker = next;
+                if (active === 'brokers') paint();
+            })
+            .catch((err: unknown) => console.error('[midorii] could not read the Bybit credential status', err));
         /* The paper form is the exception, because it can hold work: an edit nobody has
          * saved yet is kept, and only an UNTOUCHED form is re-read. So changing the account
          * through the chart's own gear shows here on the next visit, and a half-typed

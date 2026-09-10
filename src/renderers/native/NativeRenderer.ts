@@ -736,6 +736,8 @@ export class NativeRenderer implements IChartRenderer {
             sessions: { premarketColor: s.sessions.premarketColor, postmarketColor: s.sessions.postmarketColor, extendedColor: s.sessions.extendedColor },
             blobs: {
                 topLeft: { visible: s.blobs.topLeft.visible, color: s.blobs.topLeft.color ?? blobAccentColor(t, 'topLeft') },
+                topRight: { visible: s.blobs.topRight.visible, color: s.blobs.topRight.color ?? blobAccentColor(t, 'topRight') },
+                bottomLeft: { visible: s.blobs.bottomLeft.visible, color: s.blobs.bottomLeft.color ?? blobAccentColor(t, 'bottomLeft') },
                 bottomRight: { visible: s.blobs.bottomRight.visible, color: s.blobs.bottomRight.color ?? blobAccentColor(t, 'bottomRight') },
             },
         };
@@ -858,6 +860,14 @@ export class NativeRenderer implements IChartRenderer {
             topLeft: {
                 visible: next.blobs.topLeft.visible,
                 color: keepInherit(s.blobs.topLeft.color, next.blobs.topLeft.color, blobAccentColor(prevTheme, 'topLeft')),
+            },
+            topRight: {
+                visible: next.blobs.topRight.visible,
+                color: keepInherit(s.blobs.topRight.color, next.blobs.topRight.color, blobAccentColor(prevTheme, 'topRight')),
+            },
+            bottomLeft: {
+                visible: next.blobs.bottomLeft.visible,
+                color: keepInherit(s.blobs.bottomLeft.color, next.blobs.bottomLeft.color, blobAccentColor(prevTheme, 'bottomLeft')),
             },
             bottomRight: {
                 visible: next.blobs.bottomRight.visible,

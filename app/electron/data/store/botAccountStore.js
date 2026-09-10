@@ -1,10 +1,8 @@
-/* A bot's own paper account on disk — one file per bot, rewritten in place.
+/* A bot's durable runtime on disk — one file per bot, rewritten in place.
  *
- * The counterpart of paperStore, and different from it in the one way that matters: there is
- * exactly one chart paper account and there are as many bot accounts as there are bots. So
- * this is a folder keyed by bot id rather than a single file, and everything else — the
- * atomic write, the answer-null-on-unreadable rule, the reason it is on disk at all — is
- * paperStore's, for paperStore's reasons.
+ * Paper bots keep their account here. Every bot also keeps its UTC-day guard counters, and
+ * Capital.com bots keep the venue ids they have proved they own. The folder is keyed by bot
+ * id because none of that state may cross from one bot to another.
  *
  * Why a bot's account has to survive at all
  * -----------------------------------------
@@ -20,8 +18,8 @@
 import { readFile, writeFile, rename, mkdir, unlink, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-/** The shape this version writes. A record from the future is not guessed at. */
-const VERSION = 1;
+/** The shape this version writes. Version 2 adds guards and live-broker ownership. */
+const VERSION = 2;
 
 /** Ids reach a file name, so they stay plain. The same rule strategyStore applies. */
 const SAFE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
@@ -44,47 +42,118 @@ async function writeAtomic(file, data) {
   await rename(tmp, file);
 }
 
-/**
- * One bot's stored account, or null where there is none.
- *
- * Unreadable answers null rather than throwing, exactly as the chart's account does: the bot
- * has to be startable either way, and an account nobody can read is one that has to be
- * started again. What it must never do is start on half of one.
- */
+function finite(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function readGuards(value) {
+  if (value == null) return undefined;
+  if (
+    typeof value !== 'object'
+    || typeof value.dayKey !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}$/.test(value.dayKey)
+    || !finite(value.dayOpenEquity)
+    || !Number.isInteger(value.tradesToday)
+    || value.tradesToday < 0
+    || !(value.lastLossAt == null || finite(value.lastLossAt))
+  ) {
+    throw new Error('the daily guard state is invalid');
+  }
+  return {
+    dayKey: value.dayKey,
+    dayOpenEquity: value.dayOpenEquity,
+    tradesToday: value.tradesToday,
+    lastLossAt: value.lastLossAt ?? null,
+  };
+}
+
+function readOwnership(value) {
+  if (value == null) return undefined;
+  if (
+    typeof value !== 'object'
+    || typeof value.initialized !== 'boolean'
+    || !Array.isArray(value.positionDealIds)
+    || !value.positionDealIds.every((id) => typeof id === 'string' && id.length > 0)
+    || !Array.isArray(value.workingOrderDealIds)
+    || !value.workingOrderDealIds.every((id) => typeof id === 'string' && id.length > 0)
+    || typeof value.uncertain !== 'boolean'
+  ) {
+    throw new Error('the Capital.com ownership state is invalid');
+  }
+  return {
+    initialized: value.initialized,
+    positionDealIds: [...new Set(value.positionDealIds)],
+    workingOrderDealIds: [...new Set(value.workingOrderDealIds)],
+    uncertain: value.uncertain,
+  };
+}
+
+/** One bot's stored runtime, or null only where no record exists. */
 export async function loadBotAccount(dir, id) {
   let raw;
   try {
     raw = await readFile(accountFile(dir, id), 'utf8');
   } catch (err) {
-    if (err.code !== 'ENOENT') {
-      console.error(`[midorii] could not read the account for bot ${id}`, err);
-    }
-    return null;
+    if (err && typeof err === 'object' && err.code === 'ENOENT') return null;
+    throw new Error(`Could not read the runtime state for bot ${id}: ${messageOf(err)}`, { cause: err });
   }
 
   try {
     const record = JSON.parse(raw);
-    if (record?.version !== VERSION || typeof record.symbol !== 'string' || !record.session) {
-      console.warn(`[midorii] the stored account for bot ${id} is not a record this version can read`);
-      return null;
+    if (record?.version === 1 && typeof record.symbol === 'string' && record.symbol && record.session != null) {
+      return {
+        symbol: record.symbol,
+        session: record.session,
+        savedAt: finite(record.savedAt) ? record.savedAt : 0,
+      };
     }
-    return record;
+    if (record?.version !== VERSION || typeof record.symbol !== 'string' || !record.symbol) {
+      throw new Error(`version ${JSON.stringify(record?.version)} is not supported`);
+    }
+    const guards = readGuards(record.guards);
+    const capital = readOwnership(record.capital);
+    if ('session' in record && record.session == null) {
+      throw new Error('the paper account is invalid');
+    }
+    if (!('session' in record) && !guards && !capital) {
+      throw new Error('the record has no paper account or runtime state');
+    }
+    return {
+      symbol: record.symbol,
+      ...('session' in record ? { session: record.session } : {}),
+      ...(guards ? { guards } : {}),
+      ...(capital ? { capital } : {}),
+      savedAt: finite(record.savedAt) ? record.savedAt : 0,
+    };
   } catch (err) {
-    console.error(`[midorii] the stored account for bot ${id} could not be parsed`, err);
-    return null;
+    throw new Error(`The runtime state for bot ${id} is unreadable: ${messageOf(err)}`, { cause: err });
   }
 }
 
-/** Store one bot's account, replacing what was there. */
+/** Store one bot's runtime, replacing what was there. */
 export async function saveBotAccount(dir, id, account) {
   requireId(id);
-  if (!account || typeof account.symbol !== 'string' || !account.session) {
-    throw new Error('saveBotAccount: this is not an account snapshot');
+  if (!account || typeof account.symbol !== 'string' || !account.symbol) {
+    throw new Error('saveBotAccount: this is not a bot runtime snapshot');
+  }
+  const guards = readGuards(account.guards);
+  const capital = readOwnership(account.capital);
+  if ('session' in account && account.session == null) {
+    throw new Error('saveBotAccount: the paper account is invalid');
+  }
+  if (!('session' in account) && !guards && !capital) {
+    throw new Error('saveBotAccount: the snapshot has no paper account or runtime state');
   }
   const record = {
     version: VERSION,
     symbol: account.symbol,
-    session: account.session,
+    ...('session' in account ? { session: account.session } : {}),
+    ...(guards ? { guards } : {}),
+    ...(capital ? { capital } : {}),
     savedAt: Date.now(),
   };
   await writeAtomic(accountFile(dir, id), record);

@@ -13,11 +13,13 @@ import type { VelaTheme } from '../../src/core/options';
 import { VelaWorkspace } from '../../src/workspace';
 import { BRAND } from './about/brand';
 import { mountAnalysisView, type AnalysisViewHandle } from './analysis/analysisView';
+import { BotEngine } from './bot/BotEngine';
 import { mountBotView, type BotViewHandle } from './bot/botView';
 import { isBotContext } from './bot/botChart';
 import { mountBacktestView, type BacktestViewHandle } from './backtest/backtestView';
 import { mountStrategiesView, type StrategiesViewHandle } from './strategies/strategiesView';
 import { openDownloadDialog } from './data/downloadDialog';
+import { BybitProvider } from './providers/BybitProvider';
 import { CapitalProvider } from './providers/CapitalProvider';
 import { LocalArchiveProvider } from './providers/LocalArchiveProvider';
 import { isReplayContext } from './replay/replayActions';
@@ -27,10 +29,12 @@ import { openRunsDialog } from './runs/runsDialog';
 import { loadPrefs, savePrefs, type AppPrefs } from './settings/prefs';
 import { mountSettingsView, type SettingsViewHandle } from './settings/settingsView';
 import { mountAppTopbar, type AppTab } from './shell/appTopbar';
+import { shareChartDoc } from './shell/sharedChartDoc';
 import { paletteOf, type AppStyle, type AppThemeName } from './shell/themes';
 import { installTradeMenu } from './trading/tradeMode';
 import { installAlerts } from './alerts/installAlerts';
 import { installQuotes } from './quotes/installQuotes';
+import { wireOverlaySettings } from './replay/overlaySettings';
 
 /** Every market source the app can chart: the local archive, then the venues. */
 function providers() {
@@ -39,6 +43,9 @@ function providers() {
         binance: () => new BinanceProvider(),
         coinbase: () => new CoinbaseProvider(),
         hyperliquid: () => new HyperliquidProvider(),
+        // Public market data, so it charts without a key; an account is only needed to
+        // TRADE it. Spot pairs are BTCUSDT, USDT perpetuals BTCUSDT.P.
+        bybit: () => new BybitProvider(),
         // Needs a Capital.com account — see .env.example. Registered either way (so
         // it shows up in the symbol picker's provider filter); getBars/subscribe
         // fail soft with a console warning until CAPITAL_* is set in .env.local.
@@ -107,18 +114,27 @@ chartMain.appendChild(chartHost);
 chartStack.appendChild(chartMain);
 chartRoot.appendChild(chartStack);
 
+/* The market this tab opens on when nothing is remembered for it. A venue symbol rather
+ * than a local one so a fresh install charts something on first run; the picker lists
+ * whatever has been downloaded beside it. */
+const CHART_MARKET = { symbol: 'binance:BTCUSDT', timeframe: '60' };
+
+/* One chart document for every mode: dress the chart here and the bot's and the replay's
+ * are dressed with it. The market stays this tab's own — see shell/sharedChartDoc.ts. */
+const chartDoc = shareChartDoc('chart', CHART_MARKET);
+
 const workspace = new VelaWorkspace(chartHost, {
     layout: false,
     live: true,
     theme: palette(),
-    // A venue symbol rather than a local one so a fresh install charts something
-    // on first run; the picker lists whatever has been downloaded beside it.
-    symbol: 'binance:BTCUSDT',
-    timeframe: '60',
+    symbol: CHART_MARKET.symbol,
+    timeframe: CHART_MARKET.timeframe,
     brand: BRAND,
     providers: providers(),
-    persist: 'midorii-workspace',
+    persist: chartDoc.key,
+    storage: chartDoc.storage,
 });
+chartDoc.attach(workspace);
 
 /* The kit's theme tokens live on the workspace's own root, and the dialogs below open on
  * document.body — outside it. Without this they render with every --vela-* unresolved:
@@ -294,6 +310,10 @@ installAlerts(workspace, providers());
  * the gap between the sides is costing. Absent on markets that quote a single price. */
 installQuotes(workspace);
 
+/* Which cards this chart puts on its plot — behind the chart's own gear, with the rest of what
+ * a chart looks like. A replay wires its own; this is the one every other account trades on. */
+wireOverlaySettings(workspace);
+
 /* The Analysis tab, built the first time it is opened rather than at startup: it reads
  * the run shelf and the paper account off disk, and neither of those is worth a round
  * trip on a chart nobody has asked to analyse yet. Kept afterwards — coming back to it
@@ -322,17 +342,23 @@ function strategies(): StrategiesViewHandle {
     return strategiesView;
 }
 
+/* The trading-bot engine belongs to the app, not to its optional screen. It is built during
+ * bootstrap so saved paper bots can resume without mounting a hidden chart and form. */
+const botProviders = providers();
+const botEngine = new BotEngine({
+    providers: botProviders,
+    notify: (message, kind) => workspace.toast(message, kind === 'success' ? 'success' : kind),
+});
+
 /* The Trading Bot tab.
  *
- * Built on first open like the others, and unlike the others that is only about the SCREEN:
- * the bots themselves are started at launch (see the resume at the foot of this file), so a
- * bot runs whether or not anybody has ever opened the tab it is drawn on. Which is the whole
- * point of a bot, and the reason its engine is reachable through the handle rather than
- * living inside the view. */
+ * Built on first open like the others. The engine above is already running by then; this is
+ * only its screen and subscribes to the app-owned state when it mounts. */
 let botView: BotViewHandle | null = null;
 function bots(): BotViewHandle {
     botView ??= mountBotView(botRoot, {
-        providers: providers(),
+        providers: botProviders,
+        engine: botEngine,
         theme: palette,
         // The bot screen has no toast host of its own — it is not a chart. The live chart's
         // is the app's, and it is on screen whichever tab is open.
@@ -435,13 +461,9 @@ async function openReplay(): Promise<boolean> {
 
     try {
         const replay: MountedReplay = choice.kind === 'new'
-            ? await startReplay(replayRoot, choice.setup)
-            : await resumeReplay(replayRoot, choice.sessionId);
+            ? await startReplay(replayRoot, choice.setup, palette())
+            : await resumeReplay(replayRoot, choice.sessionId, palette());
         mountedReplayWs = replay.ws;
-        /* A replay builds its own workspace on its own default, which is the app's dark
-         * one — right until the app is not wearing that. Dressed here rather than through
-         * the bootstrap's arguments because this is the only place that knows. */
-        replay.ws.setTheme(palette());
         (window as unknown as { __replay: typeof replay }).__replay = replay;
     } catch (err) {
         // Nothing mounted, so put the live chart back rather than leaving an
@@ -475,14 +497,19 @@ if (startupTab !== 'chart') {
 // a real account is armed by a person each time, the same rule the chart's Trade menu
 // follows (see bot/BotEngine.ts's `resume`).
 //
-// The view is built to do it, because the engine lives on the handle; nothing is PAINTED
-// until the tab is opened, so this costs a hidden DOM subtree and the feeds the bots
-// themselves need.
-void bots().refresh()
-    .then(() => botView!.engine.resume())
+// The engine is app-owned, so this does not build the optional Trading Bot screen or its
+// chart. Opening the tab later attaches the screen to the engine that is already running.
+void botEngine.load()
+    .then(() => botEngine.resume())
     .catch((err: unknown) => console.error('[midorii] could not resume the trading bots', err));
 
-/* A window closing mid-bar must not leave a subscription behind. Nothing is CLOSED — a bot
- * that was running is still marked enabled, and its positions keep the stop and target that
- * went out with them. */
-window.addEventListener('beforeunload', () => botView?.engine.stopAll());
+/* The main process holds the close until every bot runtime has been flushed. Definitions stay
+ * enabled, and no position is closed: a running paper bot resumes on the next start. */
+let closing = false;
+window.midori.window.onCloseRequested(() => {
+    if (closing) return;
+    closing = true;
+    void botEngine.shutdown()
+        .catch((err: unknown) => console.error('[midorii] could not finish stopping the trading bots', err))
+        .finally(() => window.midori.window.readyToClose());
+});

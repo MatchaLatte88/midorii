@@ -1,10 +1,13 @@
-export const DRAWER_STYLE_ID = 'vela-ui-drawer';
+export const DRAWER_STYLE_ID = 'vela-ui-drawer-2';
 
 export const DRAWER_CSS = `
 .vela-drawer-backdrop {
     position: fixed;
     inset: 0;
     background: var(--vela-backdrop);
+    /* Same scrim as a dialog's — a sheet and a card interrupt for the same reason. */
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     z-index: var(--vela-z-dialog);
 }
 .vela-drawer-positioner {
@@ -20,11 +23,11 @@ export const DRAWER_CSS = `
    chart must not curtain the host page. */
 [data-layout] .vela-drawer-backdrop, [data-layout] .vela-drawer-positioner { position: absolute; }
 .vela-drawer {
-    background: var(--vela-surface);
+    background: var(--vela-surface-card);
     color: var(--vela-fg);
     border: 1px solid var(--vela-border-strong);
     border-bottom: none;
-    border-radius: 14px 14px 0 0;
+    border-radius: var(--vela-radius-xl) var(--vela-radius-xl) 0 0;
     box-shadow: var(--vela-shadow-dialog);
     font-size: 13px;
     width: 100%;
@@ -59,10 +62,10 @@ export const DRAWER_CSS = `
 }
 .vela-drawer-title {
     flex: none;
-    padding: 0 16px 10px;
-    font-size: 15px;
+    padding: 0 20px 12px;
+    font-size: 17px;
     font-weight: 600;
-    letter-spacing: 0.2px;
+    letter-spacing: -0.02em;
     color: var(--vela-fg-bright);
     user-select: none;
 }

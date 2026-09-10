@@ -138,6 +138,8 @@ describe('defaultChartStyle', () => {
         // so switching the app's palette re-tints them.
         expect(s.blobs).toEqual({
             topLeft: { visible: true, color: null },
+            topRight: { visible: true, color: null },
+            bottomLeft: { visible: true, color: null },
             bottomRight: { visible: true, color: null },
         });
     });
@@ -162,6 +164,8 @@ describe('NativeRenderer.getConfig — defaults resolve to concrete values', () 
         // Resolved from the brand accent, which the built-in themes do not override.
         expect(cfg.blobs).toEqual({
             topLeft: { visible: true, color: 'rgba(41,98,255,0.14)' },
+            topRight: { visible: true, color: 'rgba(41,98,255,0.12)' },
+            bottomLeft: { visible: true, color: 'rgba(41,98,255,0.1)' },
             bottomRight: { visible: true, color: 'rgba(41,98,255,0.11)' },
         });
     });

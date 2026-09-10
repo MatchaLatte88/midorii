@@ -361,12 +361,35 @@ export interface MidoriBot {
     createdAt: number;
 }
 
-/** One bot's stored paper account — a `LiveSession.snapshot()` and the market it trades. */
+/** Daily limits that must survive a stop or restart within the same UTC day. */
+export interface MidoriBotGuardRuntime {
+    dayKey: string;
+    dayOpenEquity: number;
+    tradesToday: number;
+    lastLossAt: number | null;
+}
+
+/** Venue ids proven to belong to one Capital.com bot. */
+export interface MidoriBotCapitalOwnership {
+    /** Distinguishes an empty, verified book from a record created before ownership existed. */
+    initialized: boolean;
+    positionDealIds: string[];
+    workingOrderDealIds: string[];
+    /** An order with no verdict may exist, but cannot be assigned safely. */
+    uncertain: boolean;
+}
+
+/** One bot's durable runtime: paper account, guard counters, and live venue ownership. */
 export interface MidoriBotAccount {
     symbol: string;
-    session: unknown;
+    /** Present for paper bots. Live bots have no local broker session. */
+    session?: unknown;
+    guards?: MidoriBotGuardRuntime;
+    capital?: MidoriBotCapitalOwnership;
     savedAt: number;
 }
+
+export type MidoriBotAccountSnapshot = Omit<MidoriBotAccount, 'savedAt'>;
 
 /** One Capital.com `GET /markets` row — the fields CapitalProvider reads. */
 export interface MidoriCapitalMarket {
@@ -375,6 +398,79 @@ export interface MidoriCapitalMarket {
     instrumentType: string;
     marketStatus: string;
     streamingPricesAvailable: boolean;
+}
+
+/**
+ * One tradeable futures contract.
+ *
+ * `id` is what every other ProjectX call takes — the dated contract (`CON.F.US.ENQ.U26`).
+ * `symbolId` is the root behind it (`F.US.ENQ`), the same across expiries, which is what
+ * makes a rollover recognisable as one instrument rather than two.
+ *
+ * `tickSize` and `tickValue` are not decoration: a futures position's worth is ticks moved
+ * times value per tick, so sizing and P&L are wrong without both.
+ */
+export interface MidoriProjectXContract {
+    id: string;
+    /** The venue's short name, e.g. `NQU6`. */
+    name: string;
+    description: string;
+    tickSize: number;
+    tickValue: number;
+    /** False on an expiry that has rolled off — still returned, not still traded. */
+    activeContract: boolean;
+    symbolId: string;
+}
+
+/** One account the key reaches. `simulated` is undocumented but always present, and is the
+ *  only honest way to tell a practice book from a funded one. */
+export interface MidoriProjectXAccount {
+    id: number;
+    name: string;
+    balance: number;
+    canTrade: boolean;
+    simulated?: boolean;
+    /** Whether it was reached on the live side — set by the probe, not by the gateway. */
+    live?: boolean;
+}
+
+/** A bar as the renderer reads it — already converted out of the gateway's single-letter
+ *  fields and its `+00:00` timestamps. */
+export interface MidoriProjectXBar {
+    /** Open time, epoch milliseconds. */
+    time: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+}
+
+/**
+ * A quote, always complete.
+ *
+ * The feed itself sends deltas — after the opening snapshot, only the fields that moved —
+ * and the main process folds them into the last known state before this crosses the bridge.
+ * A field is null only where nothing has ever been seen for it.
+ */
+export interface MidoriProjectXQuote {
+    contractId: string;
+    last: number | null;
+    bid: number | null;
+    ask: number | null;
+    /** From the feed's `lastUpdated`, epoch milliseconds. */
+    time: number;
+}
+
+export interface MidoriProjectXCredentialStatus {
+    stored?: boolean;
+    userName?: string;
+    live?: boolean;
+    base?: string;
+    encryptionAvailable: boolean;
+    /** Whether the environment is currently supplying credentials — worth showing, because
+     *  it explains a connection that works with nothing stored. */
+    envPresent: boolean;
 }
 
 /** A dealing-rule threshold. `unit` is `'POINTS'` or `'PERCENTAGE'` — a distance rule
@@ -443,6 +539,8 @@ export interface MidoriCapitalPosition {
     position: {
         dealId: string;
         dealReference: string;
+        /** The resting order that created this position, where it entered from the book. */
+        workingOrderId?: string;
         /** Always positive — a short is `direction`, never a negative size. */
         size: number;
         direction: 'BUY' | 'SELL';
@@ -596,6 +694,197 @@ export interface MidoriCapitalBar {
     volume: number;
 }
 
+/** A balance from the Binance Spot Demo account. Decimal strings stay exact across IPC. */
+export interface MidoriBinanceSpotBalance {
+    asset: string;
+    free: string;
+    locked: string;
+}
+
+export interface MidoriBinanceSpotAccount {
+    canTrade: boolean;
+    accountType: string;
+    permissions: string[];
+    balances: MidoriBinanceSpotBalance[];
+    uid?: number;
+    updateTime?: number;
+}
+
+export interface MidoriBinanceSpotSymbolInfo {
+    symbol: string;
+    status: string;
+    baseAsset: string;
+    quoteAsset: string;
+    tickSize: number;
+    stepSize: number;
+    minQty: number;
+    maxQty: number;
+    marketStepSize: number;
+    marketMinQty: number;
+    marketMaxQty: number;
+    minNotional: number;
+    orderTypes: string[];
+    ocoAllowed: boolean;
+    otoAllowed: boolean;
+}
+
+export interface MidoriBinanceSpotOrder {
+    symbol: string;
+    orderId: number;
+    orderListId: number;
+    clientOrderId: string;
+    price: string;
+    origQty: string;
+    executedQty: string;
+    status: string;
+    type: string;
+    side: 'BUY' | 'SELL';
+    stopPrice: string;
+    time: number;
+    updateTime: number;
+}
+
+export interface MidoriBinanceSpotTrade {
+    id: number;
+    orderId: number;
+    orderListId: number;
+    price: string;
+    qty: string;
+    quoteQty: string;
+    commission: string;
+    commissionAsset: string;
+    time: number;
+    isBuyer: boolean;
+}
+
+export interface MidoriBinanceSpotCredentialStatus {
+    configured: boolean;
+    identifier: string | null;
+    env: 'demo';
+    hasSecret: boolean;
+    savedAt?: number | null;
+    encryptionAvailable: boolean;
+    envPresent: boolean;
+}
+
+/** Which of Bybit's two products a call is about. */
+export type MidoriBybitCategory = 'spot' | 'linear';
+
+/**
+ * One Bybit market's rules, already read out of the two shapes the venue states them in —
+ * spot describes a base precision and a minimum order value, linear a quantity step and a
+ * minimum notional. See `parseBybitInstrument` in app/electron/data/bybit.js.
+ */
+export interface MidoriBybitInstrument {
+    category: MidoriBybitCategory;
+    symbol: string;
+    /** The venue's own word: `Trading`, `PreLaunch`, `Delivering`, `Closed`. */
+    status: string;
+    baseAsset: string;
+    quoteAsset: string;
+    /** What a perpetual settles in; null on spot, which settles in the pair itself. */
+    settleAsset: string | null;
+    tickSize: number;
+    stepSize: number;
+    minQty: number;
+    maxQty: number;
+    /** The smallest an order may be worth, in the quote asset. 0 where the venue sets none. */
+    minNotional: number;
+    maxLeverage: number | null;
+}
+
+/** One coin's line in the unified wallet. Decimal strings stay exact across IPC. */
+export interface MidoriBybitWalletCoin {
+    coin: string;
+    equity: string;
+    walletBalance: string;
+    usdValue: string;
+    unrealisedPnl?: string;
+}
+
+export interface MidoriBybitWallet {
+    list: Array<{
+        accountType: string;
+        totalEquity: string;
+        totalAvailableBalance: string;
+        totalWalletBalance: string;
+        coin: MidoriBybitWalletCoin[];
+    }>;
+}
+
+/** One open perpetual position, as the venue states it. */
+export interface MidoriBybitPosition {
+    symbol: string;
+    /** `Buy`, `Sell`, or empty where the position is flat. */
+    side: 'Buy' | 'Sell' | '';
+    size: string;
+    avgPrice: string;
+    positionValue: string;
+    leverage: string;
+    markPrice: string;
+    liqPrice: string;
+    unrealisedPnl: string;
+    /** Empty strings where none is set — the venue does not use null here. */
+    takeProfit: string;
+    stopLoss: string;
+    createdTime: string;
+    updatedTime: string;
+}
+
+export interface MidoriBybitOrder {
+    orderId: string;
+    orderLinkId: string;
+    symbol: string;
+    side: 'Buy' | 'Sell';
+    orderType: 'Market' | 'Limit';
+    price: string;
+    qty: string;
+    leavesQty: string;
+    triggerPrice: string;
+    /** `Stop`, `TakeProfit`, `StopLoss`, `tpslOrder`, … Empty on a plain order. */
+    stopOrderType: string;
+    orderStatus: string;
+    reduceOnly: boolean;
+    takeProfit: string;
+    stopLoss: string;
+    createdTime: string;
+}
+
+export interface MidoriBybitExecution {
+    execId: string;
+    orderId: string;
+    symbol: string;
+    side: 'Buy' | 'Sell';
+    execPrice: string;
+    execQty: string;
+    execValue: string;
+    execFee: string;
+    feeCurrency: string;
+    execType: string;
+    execTime: string;
+}
+
+/** What a Bybit key reaches, without ever handing the key back. */
+export interface MidoriBybitAccountSummary {
+    uid: string | null;
+    note: string | null;
+    readOnly: boolean;
+    uta: boolean;
+    spot: boolean;
+    derivatives: boolean;
+    wallet: MidoriBybitWallet['list'][number] | null;
+}
+
+export interface MidoriBybitCredentialStatus {
+    configured: boolean;
+    identifier: string | null;
+    env: 'demo' | 'live' | null;
+    hasSecret: boolean;
+    savedAt?: number | null;
+    encryptionAvailable: boolean;
+    envPresent: boolean;
+}
+
 // Mirrors what preload.cjs exposes via contextBridge (app/electron/preload.cjs).
 declare global {
     interface Window {
@@ -615,6 +904,10 @@ declare global {
                 minimize(): void;
                 toggleMaximize(): void;
                 close(): void;
+                /** Tell the main process that asynchronous shutdown work has finished. */
+                readyToClose(): void;
+                /** Fires for the title-bar button, Alt+F4, and application shutdown. */
+                onCloseRequested(handler: () => void): () => void;
                 isMaximized(): Promise<boolean>;
                 /** Fires on every maximize/restore, Windows' own (Aero Snap, a
                  *  double-click on the drag region) included. Returns its own unsubscribe. */
@@ -733,10 +1026,10 @@ declare global {
             bots: {
                 load(): Promise<MidoriBot[]>;
                 save(bots: MidoriBot[]): Promise<{ savedAt: number }>;
-                /** Each bot's own paper account, keyed by the bot it belongs to. */
+                /** Each bot's durable account, daily guards, and live venue ownership. */
                 account: {
                     load(id: string): Promise<MidoriBotAccount | null>;
-                    save(id: string, account: { symbol: string; session: unknown }): Promise<{ savedAt: number }>;
+                    save(id: string, account: MidoriBotAccountSnapshot): Promise<{ savedAt: number }>;
                     clear(id: string): Promise<boolean>;
                     /** Drop accounts whose bot is gone; answers how many went. */
                     sweep(keep: readonly string[]): Promise<{ removed: number }>;
@@ -861,6 +1154,155 @@ declare global {
                 unsubscribeQuotes(subscriptionId: string): Promise<void>;
                 /** Returns its own unsubscribe. */
                 onQuote(handler: (payload: { subscriptionId: string; quote: MidoriCapitalQuote }) => void): () => void;
+            };
+            /** Futures data through the ProjectX gateway — the session, the SignalR socket
+             *  and the tick-to-bar aggregation live in the main process; this only ever
+             *  sees bars and quotes. See app/electron/data/projectx.js. */
+            projectx: {
+                /** Whether PROJECTX_USERNAME/PROJECTX_API_KEY are in effect. */
+                configured(): Promise<boolean>;
+                credentials: {
+                    status(): Promise<MidoriProjectXCredentialStatus>;
+                    /** Try them WITHOUT storing, and answer with the accounts they reach. */
+                    test(creds: { userName: string; apiKey: string; base?: string; live?: boolean }): Promise<MidoriProjectXAccount[]>;
+                    /** Try, then store, then put into effect. Rejects without storing where
+                     *  the gateway refuses them. */
+                    save(creds: { userName: string; apiKey: string; base?: string; hub?: string; live?: boolean }): Promise<{
+                        accounts: MidoriProjectXAccount[];
+                        live: boolean;
+                    }>;
+                    clear(): Promise<{ source: string; live: boolean }>;
+                };
+                /**
+                 * Which side of the gateway the credentials reach.
+                 *
+                 * `live` is not a data setting. The gateway refuses the live side outright to
+                 * an account that holds only simulated ones, so anything that can place an
+                 * order has to be able to SAY which book it is wired to.
+                 */
+                environment(): Promise<{ configured: boolean; live: boolean; base: string | null }>;
+                accounts(onlyActive?: boolean): Promise<MidoriProjectXAccount[]>;
+                contracts(searchText: string): Promise<MidoriProjectXContract[]>;
+                bars(query: { contractId: string; timeframe: string; from?: number; to?: number; limit?: number }): Promise<MidoriProjectXBar[]>;
+                /** Resolves to an opaque subscription id — pass it to `unsubscribe`. */
+                subscribe(query: { contractId: string; timeframe: string }): Promise<string>;
+                unsubscribe(subscriptionId: string): Promise<void>;
+                /** Returns its own unsubscribe. The bar is the one being BUILT from the tape,
+                 *  re-sent on every print rather than only when it closes. */
+                onBar(handler: (payload: { subscriptionId: string; bar: MidoriProjectXBar }) => void): () => void;
+                subscribeQuotes(query: { contractId: string }): Promise<string>;
+                unsubscribeQuotes(subscriptionId: string): Promise<void>;
+                onQuote(handler: (payload: { subscriptionId: string; quote: MidoriProjectXQuote }) => void): () => void;
+            };
+            /** Spot trading on Binance's demo host. No production environment is exposed. */
+            binanceSpot: {
+                environment(): Promise<{ configured: boolean; env: 'demo'; live: false }>;
+                credentials: {
+                    status(): Promise<MidoriBinanceSpotCredentialStatus>;
+                    test(creds: { apiKey: string; secretKey: string }): Promise<MidoriBinanceSpotAccount>;
+                    save(creds: { apiKey: string; secretKey: string }): Promise<{
+                        account: MidoriBinanceSpotAccount;
+                        env: 'demo';
+                    }>;
+                    clear(): Promise<{ source: string; env: 'demo' }>;
+                };
+                symbolInfo(symbol: string): Promise<MidoriBinanceSpotSymbolInfo>;
+                account(): Promise<MidoriBinanceSpotAccount>;
+                openOrders(symbol: string): Promise<MidoriBinanceSpotOrder[]>;
+                trades(symbol: string): Promise<MidoriBinanceSpotTrade[]>;
+                placeOrder(spec: {
+                    symbol: string;
+                    side: 'BUY' | 'SELL';
+                    type: 'MARKET' | 'LIMIT' | 'STOP_LOSS';
+                    quantity: number;
+                    price?: number;
+                    stopPrice?: number;
+                    bracket?: { stopLoss?: number; takeProfit?: number };
+                }): Promise<unknown>;
+                cancelOrder(spec: { symbol: string; orderId: number }): Promise<unknown>;
+                cancelAll(symbol: string): Promise<unknown>;
+                replaceProtection(spec: {
+                    symbol: string;
+                    quantity: number;
+                    orders: Array<{ orderId: number; orderListId: number }>;
+                    stopLoss?: number;
+                    takeProfit?: number;
+                }): Promise<unknown>;
+                close(symbol: string): Promise<unknown>;
+            };
+            /**
+             * Bybit V5 — spot pairs and USDT perpetuals through one surface, because the
+             * venue is one API and the product is a parameter of it.
+             *
+             * Which host the credentials reach is stored with them and reported by
+             * {@link environment}; nothing here can choose it.
+             */
+            bybit: {
+                environment(): Promise<{ configured: boolean; env: 'demo' | 'live' | null; live: boolean }>;
+                credentials: {
+                    status(): Promise<MidoriBybitCredentialStatus>;
+                    test(creds: { apiKey: string; secretKey: string; env: 'demo' | 'live' }): Promise<MidoriBybitAccountSummary>;
+                    save(creds: { apiKey: string; secretKey: string; env: 'demo' | 'live' }): Promise<{
+                        account: MidoriBybitAccountSummary;
+                        env: 'demo' | 'live';
+                    }>;
+                    clear(): Promise<{ source: string; env: 'demo' | 'live' }>;
+                };
+                instrument(query: { category: MidoriBybitCategory; symbol: string }): Promise<MidoriBybitInstrument>;
+                /** Public candles, oldest first. Unsigned, and served from the live host in
+                 *  both environments — Bybit's demo module has no price history of its own. */
+                klines(query: {
+                    category: MidoriBybitCategory;
+                    symbol: string;
+                    /** Bybit's own interval vocabulary: minutes as a number, or D/W/M. */
+                    interval: string;
+                    start?: number;
+                    end?: number;
+                    limit?: number;
+                }): Promise<MidoriCapitalBar[]>;
+                wallet(): Promise<MidoriBybitWallet>;
+                /** Perpetual positions only — spot holds balances instead. */
+                positions(symbol: string): Promise<{ list: MidoriBybitPosition[] }>;
+                openOrders(query: { category: MidoriBybitCategory; symbol: string }): Promise<MidoriBybitOrder[]>;
+                executions(query: { category: MidoriBybitCategory; symbol: string }): Promise<MidoriBybitExecution[]>;
+                placeOrder(spec: {
+                    category: MidoriBybitCategory;
+                    symbol: string;
+                    side: 'Buy' | 'Sell';
+                    type: 'Market' | 'Limit';
+                    qty: number;
+                    price?: number;
+                    /** Set to make it a conditional order — a stop entry, or a stop exit. */
+                    triggerPrice?: number;
+                    /** The market price the trigger's direction is read against. */
+                    reference?: number;
+                    reduceOnly?: boolean;
+                    bracket?: { stopLoss?: number; takeProfit?: number };
+                }): Promise<unknown>;
+                cancelOrder(spec: {
+                    category: MidoriBybitCategory;
+                    symbol: string;
+                    orderId: string;
+                    orderFilter?: string;
+                }): Promise<unknown>;
+                cancelAll(query: { category: MidoriBybitCategory; symbol: string }): Promise<unknown>;
+                /**
+                 * Put a stop and a target on what is open, replacing what it had.
+                 *
+                 * `quantity` and `orders` are the spot half: spot protection is a resting
+                 * sell over a stated number of base units, so the old one has to be named to
+                 * be cancelled. A perpetual ignores both — its stop and target are attributes
+                 * of the position, and setting them replaces whatever was there.
+                 */
+                setProtection(spec: {
+                    category: MidoriBybitCategory;
+                    symbol: string;
+                    quantity?: number;
+                    orders?: string[];
+                    stopLoss?: number;
+                    takeProfit?: number;
+                }): Promise<unknown>;
+                close(query: { category: MidoriBybitCategory; symbol: string }): Promise<unknown>;
             };
         };
     }

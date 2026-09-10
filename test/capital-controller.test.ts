@@ -7,7 +7,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CapitalController } from '../app/renderer/trading/CapitalController';
 import type { LiveTradeRecord } from '../app/renderer/trading/CapitalController';
-import type { MidoriCapitalConfirmation, MidoriCapitalPosition, MidoriCapitalWorkingOrder } from '../app/renderer/midori';
+import type {
+    MidoriBotCapitalOwnership,
+    MidoriCapitalConfirmation,
+    MidoriCapitalPosition,
+    MidoriCapitalWorkingOrder,
+} from '../app/renderer/midori';
 
 /** One open position as GET /positions reports it. */
 function venuePosition(over: Partial<MidoriCapitalPosition['position']> = {}, epic = 'EURUSD'): MidoriCapitalPosition {
@@ -98,6 +103,14 @@ const notify = () => {
 
 /** A notify for the cases where nothing is expected to be said. */
 const noop = (): void => {};
+
+const ownership = (over: Partial<MidoriBotCapitalOwnership> = {}): MidoriBotCapitalOwnership => ({
+    initialized: true,
+    positionDealIds: [],
+    workingOrderDealIds: [],
+    uncertain: false,
+    ...over,
+});
 
 beforeEach(() => {
     delete (globalThis as { window?: unknown }).window;
@@ -282,9 +295,9 @@ describe('sizing for the venue', () => {
 });
 
 describe('changing an open position', () => {
-    async function withPosition() {
+    async function withPosition(over: Partial<MidoriCapitalPosition['position']> = {}) {
         const n = notify();
-        const stub = stubVenue({ positions: () => Promise.resolve([venuePosition()]) });
+        const stub = stubVenue({ positions: () => Promise.resolve([venuePosition(over)]) });
         const c = new CapitalController({ epic: 'EURUSD', notify: n.fn });
         c.refreshVisuals();
         await settle();
@@ -295,16 +308,18 @@ describe('changing an open position', () => {
         const { c, calls } = await withPosition();
         c.protect({ stopLoss: 1.09 }, c.positions()[0]!.id);
         await settle();
-        expect(calls.find((x) => x.name === 'amendPosition')!.arg).toEqual({ dealId: 'deal-1', stopLevel: 1.09 });
+        expect(calls.find((x) => x.name === 'amendPosition')!.arg).toEqual({ dealId: 'deal-1', stopLevel: 1.09, profitLevel: null });
     });
 
-    it('leaves the other level alone rather than re-sending it', async () => {
-        const { c, calls } = await withPosition();
+    it('carries the untouched level through rather than dropping it', async () => {
+        const { c, calls } = await withPosition({ stopLevel: 1.08 });
         c.protect({ takeProfit: 1.1 }, c.positions()[0]!.id);
         await settle();
-        const sent = calls.find((x) => x.name === 'amendPosition')!.arg as Record<string, unknown>;
-        // Re-sending a stop the venue already has invites a refusal on its distance rules.
-        expect('stopLevel' in sent).toBe(false);
+        /* `PUT /positions` REPLACES the protection set rather than patching it: a body that
+         * names only the target is a body that takes the stop off. Found the hard way on a
+         * demo account, where setting a target silently removed the stop that was already
+         * there — so the stop has to be restated even though nothing asked to change it. */
+        expect(calls.find((x) => x.name === 'amendPosition')!.arg).toEqual({ dealId: 'deal-1', stopLevel: 1.08, profitLevel: 1.1 });
     });
 
     it('takes a level off when it is explicitly cleared', async () => {
@@ -390,6 +405,192 @@ describe('resting orders', () => {
         stubVenue();
         const c = new CapitalController({ epic: 'EURUSD', notify: noop });
         expect(() => c.cancelOrder(999)).toThrow(/no longer on the book/i);
+    });
+});
+
+describe('one bot\'s venue ownership', () => {
+    it('shows and manages only the positions and orders assigned to that bot', async () => {
+        const positions = [venuePosition({ dealId: 'position-a' }), venuePosition({ dealId: 'position-b' })];
+        const orders = [venueOrder({ dealId: 'order-a' }), venueOrder({ dealId: 'order-b' })];
+        const { calls } = stubVenue({
+            positions: () => Promise.resolve(positions),
+            workingOrders: () => Promise.resolve(orders),
+        });
+        const a = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership({ positionDealIds: ['position-a'], workingOrderDealIds: ['order-a'] }),
+        });
+        const b = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership({ positionDealIds: ['position-b'], workingOrderDealIds: ['order-b'] }),
+        });
+
+        a.refreshVisuals();
+        b.refreshVisuals();
+        await settle();
+        expect(a.positions()).toHaveLength(1);
+        expect(a.orders()).toHaveLength(1);
+        expect(b.positions()).toHaveLength(1);
+        expect(b.orders()).toHaveLength(1);
+
+        a.closeOne(a.positions()[0]!.id);
+        a.cancelAll();
+        await settle();
+        expect(calls.filter((call) => call.name === 'closePosition').map((call) => call.arg)).toEqual(['position-a']);
+        expect(calls.filter((call) => call.name === 'cancelOrder').map((call) => call.arg)).toEqual(['order-a']);
+    });
+
+    it('persists an accepted position before the venue read catches up', async () => {
+        const changes: MidoriBotCapitalOwnership[] = [];
+        stubVenue({
+            openPosition: () => Promise.resolve(accepted({ dealId: 'position-new' })),
+            positions: () => Promise.resolve([]),
+        });
+        const c = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership(),
+            onOwnershipChange: (next) => changes.push(next),
+        });
+
+        c.refreshVisuals();
+        await settle();
+        c.order({ side: 'buy', size: 1000 });
+        await settle();
+        expect(changes[changes.length - 1]?.positionDealIds).toEqual(['position-new']);
+    });
+
+    it('persists an uncertain create before the venue verdict arrives', async () => {
+        const changes: MidoriBotCapitalOwnership[] = [];
+        let answer!: (confirmation: MidoriCapitalConfirmation) => void;
+        const pending = new Promise<MidoriCapitalConfirmation>((resolve) => { answer = resolve; });
+        stubVenue({ openPosition: () => pending });
+        const c = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership(),
+            onOwnershipChange: (next) => changes.push(next),
+        });
+
+        expect(() => c.order({ side: 'buy', size: 1000 })).toThrow(/account state is not current/i);
+        c.refreshVisuals();
+        await settle();
+        c.order({ side: 'buy', size: 1000 });
+        expect(changes[changes.length - 1]).toMatchObject({
+            positionDealIds: [],
+            uncertain: true,
+        });
+
+        answer(accepted({ dealId: 'position-new' }));
+        await settle();
+        expect(changes[changes.length - 1]).toMatchObject({
+            positionDealIds: ['position-new'],
+            uncertain: false,
+        });
+    });
+
+    it('promotes a filled working order through the venue\'s durable link', async () => {
+        const changes: MidoriBotCapitalOwnership[] = [];
+        stubVenue({
+            positions: () => Promise.resolve([venuePosition({
+                dealId: 'position-from-order',
+                workingOrderId: 'order-owned',
+            })]),
+            workingOrders: () => Promise.resolve([]),
+        });
+        const c = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership({ workingOrderDealIds: ['order-owned'] }),
+            onOwnershipChange: (next) => changes.push(next),
+        });
+
+        c.refreshVisuals();
+        await settle();
+        expect(c.positions()).toHaveLength(1);
+        expect(changes[changes.length - 1]).toMatchObject({
+            positionDealIds: ['position-from-order'],
+            workingOrderDealIds: [],
+        });
+    });
+
+    it('retires an old confirmed id once a successful venue read says it is gone', async () => {
+        const changes: MidoriBotCapitalOwnership[] = [];
+        stubVenue({ positions: () => Promise.resolve([]) });
+        const c = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership({ positionDealIds: ['position-old'] }),
+            onOwnershipChange: (next) => changes.push(next),
+        });
+
+        c.refreshVisuals();
+        await settle();
+        expect(changes[changes.length - 1]?.positionDealIds).toEqual([]);
+    });
+
+    it('blocks another entry after a create request loses its verdict', async () => {
+        const changes: MidoriBotCapitalOwnership[] = [];
+        stubVenue({ openPosition: () => Promise.reject(new Error('the request outcome is unknown')) });
+        const c = new CapitalController({
+            epic: 'EURUSD',
+            notify: noop,
+            ownership: ownership(),
+            onOwnershipChange: (next) => changes.push(next),
+        });
+
+        c.refreshVisuals();
+        await settle();
+        c.order({ side: 'buy', size: 1000 });
+        await settle();
+        expect(changes[changes.length - 1]?.uncertain).toBe(true);
+        expect(() => c.order({ side: 'buy', size: 1000 })).toThrow(/outcome could not be identified/i);
+    });
+
+    it('blocks a bot entry when the last account read failed', async () => {
+        let offline = false;
+        stubVenue({
+            account: () => offline
+                ? Promise.reject(new Error('account endpoint offline'))
+                : Promise.resolve({ currency: 'EUR', balance: { balance: 10_000, profitLoss: 0, available: 9_000 } }),
+        });
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, ownership: ownership() });
+        c.refreshVisuals();
+        await settle();
+        expect(c.isStale()).toBe(false);
+
+        offline = true;
+        c.refreshVisuals();
+        await settle();
+        expect(c.isStale()).toBe(true);
+        expect(() => c.order({ side: 'buy', size: 1000 })).toThrow(/account state is not current/i);
+    });
+
+    it('applies the instrument size increment learned from the account read', async () => {
+        const { calls } = stubVenue({
+            marketInfo: () => Promise.resolve({
+                instrument: {
+                    epic: 'EURUSD', name: 'EUR/USD', type: 'CURRENCIES', currency: 'USD',
+                    lotSize: 1, marginFactor: 3.33, marginFactorUnit: 'PERCENTAGE',
+                },
+                snapshot: { marketStatus: 'TRADEABLE', bid: 1.0924, offer: 1.0926 },
+                dealingRules: {
+                    minDealSize: { value: 0.1, unit: 'POINTS' },
+                    minSizeIncrement: { value: 0.1, unit: 'POINTS' },
+                    maxDealSize: { value: 100, unit: 'POINTS' },
+                },
+            }),
+        });
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, ownership: ownership() });
+        c.refreshVisuals();
+        await settle();
+        c.order({ side: 'buy', size: 1.04 });
+        await settle();
+
+        const sent = calls.find((call) => call.name === 'openPosition')?.arg as { size?: number };
+        expect(sent.size).toBe(1);
     });
 });
 

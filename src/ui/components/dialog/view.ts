@@ -1,7 +1,7 @@
 // Dialog VIEW — backdrop + centered panel with header/body, driven by the Zag dialog
 // machine. The body is caller-owned: pass a Node or populate via `body` after creation.
 import { runMachine, spreadProps, type HandleOf } from '../../zag';
-import { injectStyles } from '../../styles';
+import { BUTTON_CSS, BUTTON_STYLE_ID, injectStyles } from '../../styles';
 import { iconEl } from '../../icons';
 import { closeOpenPopovers, eventDismissedPopover, isPopoverOpen } from '../popover';
 import { dialogController, type DialogControllerOptions } from './controller';
@@ -10,6 +10,9 @@ import * as zagDialog from '@zag-js/dialog';
 
 export interface DialogOptions extends DialogControllerOptions {
     title?: string;
+    /** Tracked line above the title naming the part of the program that is asking. A modal
+     *  arrives with no surroundings, and "Settings" alone does not say whose. */
+    eyebrow?: string;
     content?: Node | ((body: HTMLElement) => void);
     host?: HTMLElement;
     /** Drag the dialog by its header (the reference dialogs move; search stays fixed). */
@@ -39,6 +42,7 @@ export class Dialog {
     readonly body: HTMLElement;
     readonly panel: HTMLElement;
     readonly titleEl: HTMLElement;
+    readonly eyebrowEl: HTMLElement;
     readonly positioner: HTMLElement;
     readonly backdrop: HTMLElement;
     readonly footer: HTMLElement | null;
@@ -48,6 +52,8 @@ export class Dialog {
     constructor(opts: DialogOptions = {}) {
         const doc = (opts.host ?? document.body).ownerDocument;
         injectStyles(DIALOG_STYLE_ID, DIALOG_CSS, doc);
+        // The footer buttons live in their own sheet — pages outside dialogs wear them too.
+        injectStyles(BUTTON_STYLE_ID, BUTTON_CSS, doc);
         const host = opts.host ?? doc.body;
 
         this.backdrop = doc.createElement('div');
@@ -93,14 +99,21 @@ export class Dialog {
             header.addEventListener('pointerup', () => (dragging = false));
         }
         if (opts.headerStart) header.appendChild(opts.headerStart);
+        const heading = doc.createElement('div');
+        heading.className = 'vela-dialog-heading';
+        const eyebrow = doc.createElement('div');
+        eyebrow.className = 'vela-dialog-eyebrow';
+        eyebrow.textContent = opts.eyebrow ?? '';
+        this.eyebrowEl = eyebrow;
         const title = doc.createElement('div');
         title.className = 'vela-dialog-title';
         title.textContent = opts.title ?? '';
         this.titleEl = title;
+        heading.append(eyebrow, title);
         const close = doc.createElement('button');
         close.className = 'vela-dialog-close';
         close.appendChild(iconEl('close', doc));
-        header.append(title, close);
+        header.append(heading, close);
 
         this.body = doc.createElement('div');
         this.body.className = 'vela-dialog-body';

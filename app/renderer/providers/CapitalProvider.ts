@@ -74,7 +74,7 @@ export interface CapitalSnapshot {
 }
 
 /** Pull the dealing rules off a market record, keeping "unknown" distinct from "none". */
-function dealingRules(info: MidoriCapitalMarketInfo): CapitalDealing {
+export function capitalDealingRules(info: MidoriCapitalMarketInfo): CapitalDealing {
     const rules = info.dealingRules;
     return {
         // Sizes come back tagged `POINTS`, which is Capital.com's unit for everything and
@@ -166,7 +166,7 @@ export class CapitalProvider implements DataProvider {
                 currency: info.instrument.currency,
                 timezone: 'Etc/UTC',
                 ...(mintick != null ? { mintick, pricescale: Math.round(1 / mintick) } : {}),
-                dealing: dealingRules(info),
+                dealing: capitalDealingRules(info),
             };
         } catch {
             return undefined; // the engine synthesizes a fallback

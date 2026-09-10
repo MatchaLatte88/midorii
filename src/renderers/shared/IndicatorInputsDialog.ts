@@ -105,6 +105,7 @@ export class IndicatorInputsDialog {
         const ui = new Dialog({
             host,
             title: row.title,
+            eyebrow: 'Indicator',
             // Non-modal: live-edit dialog — a modal machine locks pointer events on the
             // whole body, killing the chart and the body-portaled popovers.
             modal: false,

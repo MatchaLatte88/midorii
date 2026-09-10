@@ -35,6 +35,14 @@ export function emptyQuick(): QuickDraft {
 
 export interface QuickPlan {
     size: number | null;
+    /**
+     * The price everything here was worked out against — the last one the session stands on.
+     *
+     * An estimate of the fill and only that: a market order fills at the market plus costs.
+     * Carried because a venue that cannot take a distance has to be given levels, and levels
+     * are only levels once there is a price to measure them from.
+     */
+    reference: number | null;
     /** How far the stop sits from the fill, or null when the order goes out unprotected. */
     stopDistance: number | null;
     /** The same for the target. */
@@ -54,6 +62,7 @@ export function quickPlan(draft: QuickDraft, price: number): QuickPlan {
 
     return {
         size,
+        reference: price > 0 ? price : null,
         stopDistance: distance,
         targetDistance: distance != null && draft.rrr != null && draft.rrr > 0 ? distance * draft.rrr : null,
         notional: size != null && price > 0 ? size * price : null,
@@ -79,15 +88,70 @@ function quickRefusal(draft: QuickDraft, price: number, size: number | null, dis
 }
 
 /**
+ * How the protection is written down, which is not a preference — it is what the other end
+ * can read.
+ *
+ * `distance` is the honest one and what this panel was built on: the offset attaches to the
+ * actual fill, so a risk of 50 costs 50 whatever the fill turns out to be. Only this app's own
+ * engine can do that, because only it is holding the fill when the bracket becomes real.
+ *
+ * `levels` is for a venue. Capital.com, Bybit and Binance all take two prices and nothing else
+ * — hand one a distance and the protection is dropped on the way out, silently, on an order
+ * that has already gone. So the distance is turned into prices HERE, measured off the last
+ * price, and what that costs is said out loud: the fill lands a spread away from where the
+ * levels were worked out, so the trade risks a little more or less than the number typed.
+ */
+export interface QuickProtection {
+    as: 'distance' | 'levels';
+    /**
+     * The instrument's own price increment, where it is known.
+     *
+     * A level worked out from a risk lands between two tradable prices almost every time, and
+     * a venue refuses what is off its grid. Null leaves the level exactly as computed, which
+     * is what a venue with no published increment gets either way.
+     */
+    tick?: number | null;
+}
+
+/** A price on the instrument's own grid, or unchanged where there is no grid to put it on. */
+function onGrid(price: number, tick: number | null | undefined): number {
+    if (tick == null || !(tick > 0)) return price;
+    return Number((Math.round(price / tick) * tick).toFixed(8));
+}
+
+/**
  * The panel as an order spec — always a market order, because that is what this panel is for.
  *
- * The bracket rides along as distances and becomes real orders the moment the fill happens,
- * so the risk is measured from the fill rather than from the close it was typed against.
+ * The bracket rides along as distances and becomes real orders the moment the fill happens, so
+ * the risk is measured from the fill rather than from the close it was typed against. Where
+ * the other end cannot read a distance, `protection` turns them into levels instead — see
+ * {@link QuickProtection} for what that costs.
  */
-export function quickOrder(draft: QuickDraft, side: 'buy' | 'sell', plan: QuickPlan): OrderSpec {
+export function quickOrder(
+    draft: QuickDraft,
+    side: 'buy' | 'sell',
+    plan: QuickPlan,
+    protection: QuickProtection = { as: 'distance' },
+): OrderSpec {
+    /* Left empty where the order goes out bare — which is a real choice, and the one case
+     * `levels` has no work to do and nothing to refuse over. It is dropped below either way. */
     const bracket: OrderBracket = {};
-    if (plan.stopDistance != null) bracket.stopDistance = plan.stopDistance;
-    if (plan.targetDistance != null) bracket.targetDistance = plan.targetDistance;
+    if (plan.stopDistance != null && protection.as === 'levels') {
+        /* Unreachable through the panel — a plan with no price is already refused — and
+         * thrown rather than quietly turned back into distances, which is the one outcome
+         * this branch exists to prevent: a venue that cannot read them would drop the
+         * protection on an order that has already gone. */
+        if (plan.reference == null) throw new Error('A protected order needs a price to measure its levels from.');
+        // Down for a long, up for a short — the stop is on the losing side of the entry.
+        const dir = side === 'buy' ? 1 : -1;
+        bracket.stopLoss = onGrid(plan.reference - dir * plan.stopDistance, protection.tick);
+        if (plan.targetDistance != null) {
+            bracket.takeProfit = onGrid(plan.reference + dir * plan.targetDistance, protection.tick);
+        }
+    } else if (plan.stopDistance != null) {
+        bracket.stopDistance = plan.stopDistance;
+        if (plan.targetDistance != null) bracket.targetDistance = plan.targetDistance;
+    }
 
     return {
         side,

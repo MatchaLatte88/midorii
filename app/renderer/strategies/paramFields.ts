@@ -11,8 +11,8 @@ import type { StrategyParam, StrategyParams } from './types';
  * to stop matching its schema, and the guards are the half where being wrong costs money.
  *
  * Every control writes straight into the `values` object it is handed and then calls
- * `onChange`. That is deliberately not a state library: the forms above repaint wholesale
- * from `values`, so the object IS the form's state and there is nothing to keep in step.
+ * `onChange`. That is deliberately not a state library: the object is the form's draft,
+ * whether a caller keeps the current controls or repaints after a structural change.
  */
 
 const STYLE_ID = 'midorii-param-fields';
@@ -123,8 +123,8 @@ export function paramField(
             onChange: (text) => {
                 const minutes = parseClock(text);
                 if (minutes == null) {
-                    /* Not a clock. The stored value is untouched and the repaint below puts
-                     * the field back to it — a typo must not become a trading window. */
+                    /* Not a clock. The stored value stays untouched, so a typo cannot become
+                     * a trading window. The field itself restores its committed value. */
                     onChange();
                     return;
                 }

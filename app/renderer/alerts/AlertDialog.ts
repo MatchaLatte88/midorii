@@ -92,7 +92,8 @@ export class AlertDialog {
 
         const ui = new Dialog({
             host: this.host,
-            title: 'Alert',
+            title: 'Edit alert',
+            eyebrow: 'Alerts',
             contained: true,
             align: 'center',
             draggable: true,

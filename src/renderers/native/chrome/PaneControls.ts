@@ -37,9 +37,21 @@ const STYLE_ID = 'vela-pane-controls';
 /** The cluster's glyph size. Icons inherit it from the slot, so it is set once in CSS. */
 const ICON_PX = 12;
 
-/** The cluster's scrim pill. It floats over CHART CONTENT (candles of any color), not over a
- *  panel, so it stays a neutral darkening rather than a themed surface. */
-const CLUSTER_PILL = 'rgba(0,0,0,0.65)';
+/**
+ * The cluster's chrome. It floats over CHART CONTENT (candles of any color), so it needs a
+ * ground of its own rather than a wash — and it shares the top-right corner with whatever the
+ * host floats there, so it wears the same surface, border and shadow those do. A darkening
+ * pill beside a bordered card reads as two different apps in one corner.
+ */
+const CLUSTER_BG = 'var(--vela-surface-elev)';
+const CLUSTER_BORDER = '1px solid var(--vela-border)';
+const CLUSTER_SHADOW = 'var(--vela-shadow)';
+/** 20px button + 1px padding + 1px border, either side: the outer size a host can measure. */
+const CLUSTER_SIZE = 24;
+/** Clear of the axis columns, and the same distance a host leaves between its own chips. */
+const CLUSTER_RIGHT = 6;
+/** Down from the top of the pane — the line the host's corner chrome sits on too. */
+const CLUSTER_TOP = 10;
 
 /** Hover/active states as CSS, so they can never lag behind a pointer or drift from the
  *  tokens (the buttons only carry their per-instance color/opacity inline). */
@@ -114,11 +126,16 @@ export class PaneControls {
                 cluster = document.createElement('div');
                 Object.assign(cluster.style, {
                     position: 'absolute',
+                    boxSizing: 'border-box',
                     display: 'flex',
+                    alignItems: 'center',
                     gap: '2px',
-                    padding: '2px',
-                    borderRadius: 'var(--vela-radius-md)',
-                    background: CLUSTER_PILL,
+                    padding: '1px',
+                    height: `${CLUSTER_SIZE}px`,
+                    border: CLUSTER_BORDER,
+                    borderRadius: 'var(--vela-radius-sm)',
+                    background: CLUSTER_BG,
+                    boxShadow: CLUSTER_SHADOW,
                     pointerEvents: 'auto',
                 });
                 this.root.appendChild(cluster);
@@ -191,7 +208,7 @@ export class PaneControls {
 
     /** Reposition each cluster to the top-right of its pane's data area. */
     reposition(): void {
-        const rightPx = this.deps.rightAxis() + 6;
+        const rightPx = this.deps.rightAxis() + CLUSTER_RIGHT;
         const byId = new Map(this.deps.panes().map((p) => [p.id, p]));
         for (const [id, cluster] of this.clusters) {
             const p = byId.get(id);
@@ -206,17 +223,21 @@ export class PaneControls {
             const stateChipRole = p.collapsed ? 'collapse' : !this.suspended && p.maximized ? 'maximize' : null;
             const visible = hasButtons && (hovered || stateChipRole != null) && p.height > 8;
             cluster.style.right = `${rightPx}px`;
-            // Center the cluster inside the ~26px collapsed strip (24 = cluster height incl. padding).
+            // Centred in a collapsed pane's strip; otherwise on the line the host's own corner
+            // chrome uses, so a maximize button and a host chip beside it read as one row.
             cluster.style.top = p.collapsed
-                ? `${p.top + Math.max(1, Math.round((p.height - 24) / 2))}px`
-                : `${p.top + 4}px`;
+                ? `${p.top + Math.max(1, Math.round((p.height - CLUSTER_SIZE) / 2))}px`
+                : `${p.top + CLUSTER_TOP}px`;
             cluster.style.display = visible ? 'flex' : 'none';
             if (!visible) continue;
             // Without hover only the state chip shows, standalone: drop the dark pill so the white
             // chip reads on its own. Its siblings stay laid out (visibility:hidden, not display:none)
             // so the chip keeps the exact slot it occupies once the full cluster reveals on hover.
             const soloChip = stateChipRole != null && !hovered;
-            cluster.style.background = soloChip ? 'transparent' : CLUSTER_PILL;
+            cluster.style.background = soloChip ? 'transparent' : CLUSTER_BG;
+            // The chip stands alone: the surface goes, and its frame has to go with it.
+            cluster.style.border = soloChip ? '1px solid transparent' : CLUSTER_BORDER;
+            cluster.style.boxShadow = soloChip ? 'none' : CLUSTER_SHADOW;
             for (const child of cluster.children) {
                 const btn = child as HTMLElement;
                 btn.style.display = 'inline-flex';

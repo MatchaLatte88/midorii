@@ -121,6 +121,8 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
         tick: () => tickSizeOf(controller.symbol) ?? null,
         quickSizes: () => opts.settings().quickSizes,
         onQuickSizes: (next) => opts.onSettings({ ...opts.settings(), quickSizes: next }),
+        sizing: () => opts.settings().sizingMode,
+        onSizing: (next) => opts.onSettings({ ...opts.settings(), sizingMode: next }),
     });
     /* Its own kit host: the ticket is a sibling of the chart rather than a child, so the
      * theme variables the workspace writes on its own root do not reach it. */
@@ -247,6 +249,7 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
             quick?.destroy();
             strip?.destroy();
             strip?.el.remove();
+            sidebar.dispose();
             sidebar.el.remove();
             dock.el.remove();
             indicator.remove();

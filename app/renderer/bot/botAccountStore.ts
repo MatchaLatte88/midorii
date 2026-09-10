@@ -1,7 +1,7 @@
-import type { MidoriBotAccount } from '../midori';
+import type { MidoriBotAccount, MidoriBotAccountSnapshot } from '../midori';
 
 /**
- * Where a bot's paper account lives between sittings.
+ * Where a bot's account, daily guards, and live ownership live between sittings.
  *
  * The account itself and the market it trades — never the bars, for the reason the chart's
  * own store gives: those are the market's, they are the same bars tomorrow, and keeping them
@@ -26,7 +26,7 @@ export function loadBotAccount(id: string): Promise<MidoriBotAccount | null> {
     return window.midori.bots.account.load(id);
 }
 
-export function saveBotAccount(id: string, account: { symbol: string; session: unknown }): Promise<unknown> {
+export function saveBotAccount(id: string, account: MidoriBotAccountSnapshot): Promise<unknown> {
     return window.midori.bots.account.save(id, account);
 }
 
@@ -42,7 +42,7 @@ export async function sweepBotAccounts(keep: readonly string[]): Promise<number>
 
 export interface BotAccountWriter {
     /** Write soon — at most once per {@link WRITE_INTERVAL_MS}, per bot. */
-    schedule(id: string, account: { symbol: string; session: unknown }): void;
+    schedule(id: string, account: MidoriBotAccountSnapshot): void;
     /**
      * Write whatever is waiting, now, and resolve once it has landed.
      *
@@ -68,7 +68,7 @@ export interface BotAccountWriter {
  * shared one could not confuse two accounts if anybody ever built one.
  */
 export function botAccountWriter(): BotAccountWriter {
-    let pending: { id: string; account: { symbol: string; session: unknown } } | null = null;
+    let pending: { id: string; account: MidoriBotAccountSnapshot } | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     /** The write currently in flight, so a flush can wait for one it did not start. */
     let inFlight: Promise<void> = Promise.resolve();

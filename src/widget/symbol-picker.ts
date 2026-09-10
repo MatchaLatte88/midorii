@@ -364,6 +364,7 @@ export class SymbolPicker {
 
         this.dialog = new Dialog({
             title: 'Symbol Search',
+            eyebrow: 'Market',
             host: opts.host,
             closeOnInteractOutside: true,
             flush: true,

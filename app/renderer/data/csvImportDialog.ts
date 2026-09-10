@@ -49,7 +49,7 @@ const CSS = `
 }
 .midorii-csv-hint { margin: -4px 0 10px; color: var(--vela-fg-muted); line-height: 1.45; }
 
-.midorii-csv-scroll { max-height: 190px; overflow: auto; border: 1px solid var(--vela-border-faint); border-radius: var(--vela-radius-sm); }
+.midorii-csv-scroll { max-height: 190px; overflow: auto; border: 1px solid var(--vela-border-faint); border-radius: 12px; }
 .midorii-csv-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .midorii-csv-table th, .midorii-csv-table td {
     padding: 3px 8px; text-align: right; white-space: nowrap;
@@ -117,12 +117,9 @@ function label(text: string): HTMLElement {
 
 function button(text: string, primary = false): HTMLButtonElement {
     const b = document.createElement('button');
+    b.type = 'button';
+    b.className = primary ? 'vela-dialog-btn vela-dialog-btn-primary' : 'vela-dialog-btn';
     b.textContent = text;
-    b.style.cssText = `all:unset;padding:6px 16px;border-radius:var(--vela-radius-sm);cursor:pointer;font-weight:600;${
-        primary
-            ? 'background:var(--vela-accent);color:#0b0e14'
-            : 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft)'
-    }`;
     return b;
 }
 
@@ -472,6 +469,7 @@ export async function openCsvImportDialog(host: HTMLElement): Promise<string | n
 
         const dialog = new Dialog({
             title: 'Import market data',
+            eyebrow: 'Market data',
             host,
             draggable: true,
             align: 'center',
@@ -482,7 +480,6 @@ export async function openCsvImportDialog(host: HTMLElement): Promise<string | n
                 el.appendChild(body);
             },
             footer: (el) => {
-                el.style.cssText += ';display:flex;justify-content:flex-end;gap:8px';
                 el.append(close, start);
             },
         });

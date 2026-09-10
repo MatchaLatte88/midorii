@@ -124,6 +124,7 @@ export class IndicatorPicker {
         this.list.className = 'vela-ip-list';
         this.dialog = new Dialog({
             title: 'Indicators',
+            eyebrow: 'Chart',
             host: opts.host,
             draggable: true,
             closeOnInteractOutside: true,

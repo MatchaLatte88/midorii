@@ -18,12 +18,9 @@ function row(label: string, control: HTMLElement): HTMLElement {
 
 function button(text: string, primary = false): HTMLButtonElement {
     const b = document.createElement('button');
+    b.type = 'button';
+    b.className = primary ? 'vela-dialog-btn vela-dialog-btn-primary' : 'vela-dialog-btn';
     b.textContent = text;
-    b.style.cssText = `all:unset;padding:6px 16px;border-radius:var(--vela-radius-sm);cursor:pointer;font-weight:600;${
-        primary
-            ? 'background:var(--vela-accent);color:#0b0e14'
-            : 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft)'
-    }`;
     return b;
 }
 
@@ -93,7 +90,7 @@ export async function askReplaySetup(host: HTMLElement): Promise<SetupChoice | n
         dateInput.value = startDate;
         if (datasets[0]!.first != null) dateInput.min = isoDate(datasets[0]!.first);
         if (datasets[0]!.last != null) dateInput.max = isoDate(datasets[0]!.last);
-        dateInput.style.cssText = 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft);border-radius:var(--vela-radius-sm);padding:5px 8px;font:inherit;outline:none';
+        dateInput.style.cssText = 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft);border-radius:var(--vela-control-radius);padding:0 10px;height:var(--vela-control-h);font:inherit;outline:none';
         dateInput.addEventListener('change', () => { startDate = dateInput.value; });
 
         const balanceInput = new NumberInput({
@@ -117,7 +114,8 @@ export async function askReplaySetup(host: HTMLElement): Promise<SetupChoice | n
         };
 
         const dialog = new Dialog({
-            title: 'Replay',
+            title: 'New session',
+            eyebrow: 'Replay',
             host,
             draggable: true,
             align: 'center',
@@ -152,7 +150,6 @@ export async function askReplaySetup(host: HTMLElement): Promise<SetupChoice | n
                 }
             },
             footer: (el) => {
-                el.style.cssText += ';display:flex;justify-content:flex-end;gap:8px';
                 const cancel = button('Cancel');
                 cancel.onclick = () => finish(null);
                 el.append(cancel, start);

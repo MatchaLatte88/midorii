@@ -20,6 +20,20 @@ import {
   capitalPrices, capitalProbe, capitalSubscribe, capitalSubscribeQuotes, capitalTransactions, capitalWorkingOrders,
   configureCapital,
 } from './data/capital.js';
+import {
+  configureProjectX, projectXAccounts, projectXBars, projectXConfigured, projectXContracts,
+  projectXEnvironment, projectXProbe, projectXSubscribe, projectXSubscribeQuotes,
+} from './data/projectx.js';
+import {
+  binanceSpotAccount, binanceSpotCancelAll, binanceSpotCancelOrder, binanceSpotClose,
+  binanceSpotEnvironment, binanceSpotOpenOrders, binanceSpotPlaceOrder, binanceSpotProbe,
+  binanceSpotReplaceProtection, binanceSpotSymbolInfo, binanceSpotTrades, configureBinanceSpot,
+} from './data/binanceSpot.js';
+import {
+  bybitCancelAll, bybitCancelOrder, bybitCategory, bybitClose, bybitEnvironment, bybitExecutions,
+  bybitInstrument, bybitKlines, bybitOpenOrders, bybitPlaceOrder, bybitPositions, bybitProbe,
+  bybitSetProtection, bybitWallet, configureBybit,
+} from './data/bybit.js';
 import { clearCredentials, encryptionAvailable, readPublic, readSecret, saveCredentials } from './data/store/credentialStore.js';
 import { CSV_TIME_ZONES, dominantInterval, missingFields, parseMarketCsv, sniffCsv } from './data/csv.js';
 import { DEFAULT_SOURCE, listSources, sourceOf } from './data/providers/index.js';
@@ -34,6 +48,7 @@ import { loadAlerts, saveAlerts } from './data/store/alertStore.js';
 import { loadBots, saveBots } from './data/store/botStore.js';
 import { clearBotAccount, listBotAccounts, loadBotAccount, saveBotAccount } from './data/store/botAccountStore.js';
 import { applyTitleBarTheme } from './titlebar.js';
+import { approveWindowClose } from './windowCloseGuard.js';
 
 /** Datasets live outside the app bundle so an update never touches them. */
 export function dataDir() {
@@ -90,12 +105,12 @@ export function botsDir() {
 }
 
 /**
- * The paper accounts the bots are running.
+ * The durable state the bots are running.
  *
  * Apart from the definitions above, for the reason sessionStore is apart from the runs: one
  * is what a bot IS and is edited by hand, the other is working state rewritten a few times a
- * minute for weeks. A FINISHED bot account is not here — it goes onto the run shelf beside
- * the backtest of the same strategy, which is the only place the two can be compared.
+ * minute for weeks. Paper accounts, daily guards, and live venue ownership live here. A
+ * FINISHED paper account goes onto the run shelf beside the backtest of the same strategy.
  */
 export function botAccountsDir() {
   return path.join(app.getPath('userData'), 'bot-accounts');
@@ -159,6 +174,76 @@ export async function applyStoredCapitalCredentials() {
   return {
     source: process.env.CAPITAL_API_KEY ? 'env' : 'none',
     env: process.env.CAPITAL_ENV === 'live' ? 'live' : 'demo',
+  };
+}
+
+/** Apply a stored Binance key, or the demo-only environment fallback. */
+export async function applyStoredBinanceSpotCredentials() {
+  const stored = await readSecret(credentialsDir(), 'binance-spot').catch(() => null);
+  if (stored?.apiKey && stored?.secretKey) {
+    configureBinanceSpot(stored);
+    return { source: 'stored', env: 'demo' };
+  }
+  configureBinanceSpot({
+    apiKey: process.env.BINANCE_DEMO_API_KEY,
+    secretKey: process.env.BINANCE_DEMO_SECRET_KEY,
+  });
+  return {
+    source: process.env.BINANCE_DEMO_API_KEY && process.env.BINANCE_DEMO_SECRET_KEY ? 'env' : 'none',
+    env: 'demo',
+  };
+}
+
+/**
+ * Apply a stored Bybit key, or the one the environment supplies.
+ *
+ * The environment it belongs to is stored WITH it and never guessed. A demo key is issued by
+ * a separate Bybit account and only works against the demo host, so a mismatch is not a
+ * degraded connection — it is a refusal at the first call, which is the honest outcome.
+ */
+export async function applyStoredBybitCredentials() {
+  const stored = await readSecret(credentialsDir(), 'bybit').catch(() => null);
+  if (stored?.apiKey && stored?.secretKey) {
+    configureBybit(stored);
+    return { source: 'stored', env: stored.env === 'live' ? 'live' : 'demo' };
+  }
+  configureBybit({
+    apiKey: process.env.BYBIT_API_KEY,
+    secretKey: process.env.BYBIT_SECRET_KEY,
+    env: process.env.BYBIT_ENV,
+  });
+  return {
+    source: process.env.BYBIT_API_KEY && process.env.BYBIT_SECRET_KEY ? 'env' : 'none',
+    env: process.env.BYBIT_ENV === 'live' ? 'live' : 'demo',
+  };
+}
+
+/**
+ * Apply a stored ProjectX key, or the one the environment supplies.
+ *
+ * `live` is stored with the key rather than derived, and defaults to false. It is not a data
+ * setting: the gateway refuses the live side outright to an account that only has simulated
+ * ones — contracts come back empty and bars answer errorCode 1 — so a wrong guess here does
+ * not degrade the connection, it empties the chart. The `base` travels with it because
+ * ProjectX is a gateway several firms sit behind, and a key issued by one is not recognised
+ * by another's host.
+ */
+export async function applyStoredProjectXCredentials() {
+  const stored = await readSecret(credentialsDir(), 'projectx').catch(() => null);
+  if (stored?.userName && stored?.apiKey) {
+    configureProjectX(stored);
+    return { source: 'stored', live: stored.live === true };
+  }
+  configureProjectX({
+    userName: process.env.PROJECTX_USERNAME,
+    apiKey: process.env.PROJECTX_API_KEY,
+    base: process.env.PROJECTX_BASE,
+    hub: process.env.PROJECTX_HUB,
+    live: process.env.PROJECTX_LIVE === 'true',
+  });
+  return {
+    source: process.env.PROJECTX_USERNAME && process.env.PROJECTX_API_KEY ? 'env' : 'none',
+    live: process.env.PROJECTX_LIVE === 'true',
   };
 }
 
@@ -829,9 +914,8 @@ export function registerIpc() {
     return saveBots(botsDir(), bots);
   });
 
-  /* A bot's own paper account, keyed by the bot it belongs to. Read when the bot starts,
-   * written whenever it moves, cleared when the bot is deleted or started over. A FINISHED
-   * one goes through `backtest:save` instead, onto the run shelf. */
+  /* A bot's own durable runtime, keyed by the bot it belongs to. Paper accounts, daily
+   * guards, and live venue ownership are written here whenever they move. */
   ipcMain.handle('botAccount:load', (_e, id) => loadBotAccount(botAccountsDir(), requireString(id, 'id')));
 
   ipcMain.handle('botAccount:save', (_e, id, account) => (
@@ -882,6 +966,12 @@ export function registerIpc() {
 
   ipcMain.on('window:close', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+
+  ipcMain.on('window:close-ready', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return;
+    approveWindowClose(win);
   });
 
   /* A triggered price alert calls this from its notification's click handler — the
@@ -972,6 +1062,63 @@ export function registerIpc() {
 
   ipcMain.handle('capital:unsubscribe-quotes', (_e, id) => { capitalQuoteSubs.get(id)?.(); });
 
+  /* ─── ProjectX (futures live data) ──────────────────────────────────── */
+
+  /* The session, the SignalR socket and the tick-to-bar aggregation live in
+   * data/projectx.js, in this process — see that file for why the forming bar is
+   * built here rather than read off the wire. This is the bridge ProjectXProvider
+   * calls through.
+   */
+  ipcMain.handle('projectx:configured', () => projectXConfigured());
+
+  ipcMain.handle('projectx:environment', () => projectXEnvironment());
+
+  ipcMain.handle('projectx:accounts', (_e, onlyActive) => projectXAccounts(onlyActive !== false));
+
+  ipcMain.handle('projectx:contracts', (_e, searchText) => projectXContracts(requireString(searchText, 'searchText')));
+
+  ipcMain.handle('projectx:bars', (_e, { contractId, timeframe, from, to, limit } = {}) => (
+    projectXBars(requireString(contractId, 'contractId'), requireString(timeframe, 'timeframe'), { from, to, limit })
+  ));
+
+  /* Same shape as the Capital.com feeds above: one subscription per call, keyed by an
+   * opaque id, with the underlying hub subscription shared when two panes want the same
+   * contract. */
+  const projectXSubs = new Map();
+
+  ipcMain.handle('projectx:subscribe', async (event, { contractId, timeframe } = {}) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = await projectXSubscribe(
+      requireString(contractId, 'contractId'),
+      requireString(timeframe, 'timeframe'),
+      (bar) => { if (!sender.isDestroyed()) sender.send('projectx:bar', { subscriptionId: id, bar }); },
+    );
+    // The window can have gone while the seed was fetching, and a 'destroyed' that has
+    // already fired will not fire again — so nothing would ever release this one.
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(projectXSubs, sender, id, unsubscribe);
+    return id;
+  });
+
+  ipcMain.handle('projectx:unsubscribe', (_e, id) => { projectXSubs.get(id)?.(); });
+
+  const projectXQuoteSubs = new Map();
+
+  ipcMain.handle('projectx:subscribe-quotes', async (event, { contractId } = {}) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = await projectXSubscribeQuotes(
+      requireString(contractId, 'contractId'),
+      (quote) => { if (!sender.isDestroyed()) sender.send('projectx:quote', { subscriptionId: id, quote }); },
+    );
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(projectXQuoteSubs, sender, id, unsubscribe);
+    return id;
+  });
+
+  ipcMain.handle('projectx:unsubscribe-quotes', (_e, id) => { projectXQuoteSubs.get(id)?.(); });
+
   /* ─── Capital.com trading ────────────────────────────────────────────
    *
    * The channels that move money. Everything crossing here is checked rather
@@ -1021,6 +1168,144 @@ export function registerIpc() {
   ));
 
   ipcMain.handle('capital:cancel-order', (_e, dealId) => capitalCancelOrder(requireString(dealId, 'dealId')));
+
+  /* ─── Binance Spot Demo trading ──────────────────────────────────────
+   *
+   * No handler accepts an endpoint or environment. The client beneath these channels is
+   * fixed to the demo host, so a renderer payload cannot turn a demo instruction into a
+   * production one.
+   */
+  const spotSymbol = (value) => {
+    const symbol = requireString(value, 'symbol').toUpperCase();
+    if (!/^[A-Z0-9]{5,30}$/.test(symbol) || symbol.endsWith('.P')) {
+      throw new Error('A Binance Spot symbol such as BTCUSDT is required.');
+    }
+    return symbol;
+  };
+  const spotSide = (value) => {
+    const side = requireString(value, 'side').toUpperCase();
+    if (side !== 'BUY' && side !== 'SELL') throw new Error('side must be BUY or SELL');
+    return side;
+  };
+  const spotType = (value) => {
+    const type = requireString(value ?? 'MARKET', 'type').toUpperCase();
+    if (!['MARKET', 'LIMIT', 'STOP_LOSS'].includes(type)) throw new Error('Unsupported Spot order type');
+    return type;
+  };
+  const spotLevels = (value = {}) => ({
+    ...(value.stopLoss == null ? {} : { stopLoss: requireLevel(value.stopLoss, 'stopLoss') }),
+    ...(value.takeProfit == null ? {} : { takeProfit: requireLevel(value.takeProfit, 'takeProfit') }),
+  });
+
+  ipcMain.handle('binance-spot:environment', () => binanceSpotEnvironment());
+  ipcMain.handle('binance-spot:symbol-info', (_e, symbol) => binanceSpotSymbolInfo(spotSymbol(symbol)));
+  ipcMain.handle('binance-spot:account', () => binanceSpotAccount());
+  ipcMain.handle('binance-spot:open-orders', (_e, symbol) => binanceSpotOpenOrders(spotSymbol(symbol)));
+  ipcMain.handle('binance-spot:trades', (_e, symbol) => binanceSpotTrades(spotSymbol(symbol)));
+  ipcMain.handle('binance-spot:place-order', (_e, spec = {}) => binanceSpotPlaceOrder({
+    symbol: spotSymbol(spec.symbol),
+    side: spotSide(spec.side),
+    type: spotType(spec.type),
+    quantity: requireSize(spec.quantity),
+    ...(spec.price == null ? {} : { price: requireLevel(spec.price, 'price') }),
+    ...(spec.stopPrice == null ? {} : { stopPrice: requireLevel(spec.stopPrice, 'stopPrice') }),
+    ...(spec.bracket == null ? {} : { bracket: spotLevels(spec.bracket) }),
+  }));
+  ipcMain.handle('binance-spot:cancel-order', (_e, { symbol, orderId } = {}) => binanceSpotCancelOrder(
+    spotSymbol(symbol), requireSize(orderId),
+  ));
+  ipcMain.handle('binance-spot:cancel-all', (_e, symbol) => binanceSpotCancelAll(spotSymbol(symbol)));
+  ipcMain.handle('binance-spot:replace-protection', (_e, spec = {}) => binanceSpotReplaceProtection({
+    symbol: spotSymbol(spec.symbol),
+    quantity: requireSize(spec.quantity),
+    orders: Array.isArray(spec.orders) ? spec.orders.map((row) => ({
+      orderId: requireSize(row?.orderId),
+      orderListId: Number.isFinite(Number(row?.orderListId)) ? Number(row.orderListId) : -1,
+    })) : [],
+    ...spotLevels(spec),
+  }));
+  ipcMain.handle('binance-spot:close', (_e, symbol) => binanceSpotClose(spotSymbol(symbol)));
+
+  /* ─── Bybit trading ──────────────────────────────────────────────────
+   *
+   * Spot and USDT perpetuals through one set of channels, because the venue is one API and
+   * the category is a parameter of it. No handler accepts a host: which one the credentials
+   * reach is stored with them, so a renderer payload cannot turn a demo instruction into a
+   * live one.
+   */
+  const bybitSymbol = (value) => {
+    const symbol = requireString(value, 'symbol').toUpperCase();
+    if (!/^[A-Z0-9]{5,30}$/.test(symbol)) throw new Error('A Bybit symbol such as BTCUSDT is required.');
+    return symbol;
+  };
+  const bybitSide = (value) => {
+    const side = requireString(value, 'side').toLowerCase();
+    if (side !== 'buy' && side !== 'sell') throw new Error('side must be Buy or Sell');
+    return side === 'buy' ? 'Buy' : 'Sell';
+  };
+  const bybitType = (value) => {
+    const type = requireString(value ?? 'Market', 'type').toLowerCase();
+    if (type !== 'market' && type !== 'limit') throw new Error('Bybit takes Market and Limit orders only.');
+    return type === 'limit' ? 'Limit' : 'Market';
+  };
+  const bybitLevels = (value = {}) => ({
+    ...(value.stopLoss == null ? {} : { stopLoss: requireLevel(value.stopLoss, 'stopLoss') }),
+    ...(value.takeProfit == null ? {} : { takeProfit: requireLevel(value.takeProfit, 'takeProfit') }),
+  });
+
+  ipcMain.handle('bybit:environment', () => bybitEnvironment());
+  ipcMain.handle('bybit:instrument', (_e, { category, symbol } = {}) => (
+    bybitInstrument(bybitCategory(category), bybitSymbol(symbol))
+  ));
+  /* Public candles, for the chart provider. Unsigned and served from the live host whichever
+   * account is connected — Bybit's demo module has no price history of its own. */
+  ipcMain.handle('bybit:klines', (_e, { category, symbol, interval, start, end, limit } = {}) => bybitKlines({
+    category: bybitCategory(category),
+    symbol: bybitSymbol(symbol),
+    interval: requireString(interval, 'interval'),
+    ...(start == null ? {} : { start }),
+    ...(end == null ? {} : { end }),
+    ...(limit == null ? {} : { limit }),
+  }));
+  ipcMain.handle('bybit:wallet', () => bybitWallet());
+  ipcMain.handle('bybit:positions', (_e, symbol) => bybitPositions(bybitSymbol(symbol)));
+  ipcMain.handle('bybit:open-orders', (_e, { category, symbol } = {}) => (
+    bybitOpenOrders(bybitCategory(category), bybitSymbol(symbol))
+  ));
+  ipcMain.handle('bybit:executions', (_e, { category, symbol } = {}) => (
+    bybitExecutions(bybitCategory(category), bybitSymbol(symbol))
+  ));
+  ipcMain.handle('bybit:place-order', (_e, spec = {}) => bybitPlaceOrder({
+    category: bybitCategory(spec.category),
+    symbol: bybitSymbol(spec.symbol),
+    side: bybitSide(spec.side),
+    type: bybitType(spec.type),
+    qty: requireSize(spec.qty),
+    ...(spec.price == null ? {} : { price: requireLevel(spec.price, 'price') }),
+    ...(spec.triggerPrice == null ? {} : { triggerPrice: requireLevel(spec.triggerPrice, 'triggerPrice') }),
+    ...(spec.reference == null ? {} : { reference: requireLevel(spec.reference, 'reference') }),
+    ...(spec.reduceOnly === true ? { reduceOnly: true } : {}),
+    ...(spec.bracket == null ? {} : { bracket: bybitLevels(spec.bracket) }),
+  }));
+  ipcMain.handle('bybit:cancel-order', (_e, { category, symbol, orderId, orderFilter } = {}) => bybitCancelOrder({
+    category: bybitCategory(category),
+    symbol: bybitSymbol(symbol),
+    orderId: requireString(orderId, 'orderId'),
+    ...(orderFilter == null ? {} : { orderFilter: requireString(orderFilter, 'orderFilter') }),
+  }));
+  ipcMain.handle('bybit:cancel-all', (_e, { category, symbol } = {}) => (
+    bybitCancelAll(bybitCategory(category), bybitSymbol(symbol))
+  ));
+  ipcMain.handle('bybit:set-protection', (_e, spec = {}) => bybitSetProtection({
+    category: bybitCategory(spec.category),
+    symbol: bybitSymbol(spec.symbol),
+    ...(spec.quantity == null ? {} : { quantity: requireSize(spec.quantity) }),
+    orders: Array.isArray(spec.orders) ? spec.orders.map((id) => requireString(id, 'orderId')) : [],
+    ...bybitLevels(spec),
+  }));
+  ipcMain.handle('bybit:close', (_e, { category, symbol } = {}) => (
+    bybitClose(bybitCategory(category), bybitSymbol(symbol))
+  ));
 
   /* ─── Broker credentials ─────────────────────────────────────────────
    *
@@ -1073,6 +1358,112 @@ export function registerIpc() {
     await clearCredentials(credentialsDir(), 'capital');
     // Back to whatever the environment says, which may be nothing at all.
     return applyStoredCapitalCredentials();
+  });
+
+  ipcMain.handle('projectx:credentials-status', async () => {
+    const stored = await readPublic(credentialsDir(), 'projectx');
+    return {
+      ...stored,
+      encryptionAvailable: encryptionAvailable(),
+      envPresent: !!(process.env.PROJECTX_USERNAME && process.env.PROJECTX_API_KEY),
+    };
+  });
+
+  /** Try credentials WITHOUT storing them, and answer with the accounts they reach. */
+  ipcMain.handle('projectx:credentials-test', (_e, { userName, apiKey, base, live } = {}) => projectXProbe({
+    userName: requireString(userName, 'userName'),
+    apiKey: requireString(apiKey, 'apiKey'),
+    base: typeof base === 'string' && base.trim() ? base.trim() : undefined,
+    live: live === true,
+  }));
+
+  ipcMain.handle('projectx:credentials-save', async (_e, { userName, apiKey, base, hub, live } = {}) => {
+    const creds = {
+      userName: requireString(userName, 'userName'),
+      apiKey: requireString(apiKey, 'apiKey'),
+      /* Kept only when given: an empty host stored as an empty string would override the
+       * module's own default rather than fall through to it. */
+      ...(typeof base === 'string' && base.trim() ? { base: base.trim() } : {}),
+      ...(typeof hub === 'string' && hub.trim() ? { hub: hub.trim() } : {}),
+      live: live === true,
+    };
+    const accounts = await projectXProbe(creds);
+    await saveCredentials(credentialsDir(), 'projectx', creds);
+    await applyStoredProjectXCredentials();
+    return { accounts, live: creds.live };
+  });
+
+  ipcMain.handle('projectx:credentials-clear', async () => {
+    await clearCredentials(credentialsDir(), 'projectx');
+    return applyStoredProjectXCredentials();
+  });
+
+  ipcMain.handle('binance-spot:credentials-status', async () => {
+    const stored = await readPublic(credentialsDir(), 'binance-spot');
+    return {
+      ...stored,
+      env: 'demo',
+      encryptionAvailable: encryptionAvailable(),
+      envPresent: !!(process.env.BINANCE_DEMO_API_KEY && process.env.BINANCE_DEMO_SECRET_KEY),
+    };
+  });
+
+  ipcMain.handle('binance-spot:credentials-test', (_e, { apiKey, secretKey } = {}) => binanceSpotProbe({
+    apiKey: requireString(apiKey, 'apiKey'),
+    secretKey: requireString(secretKey, 'secretKey'),
+  }));
+
+  ipcMain.handle('binance-spot:credentials-save', async (_e, { apiKey, secretKey } = {}) => {
+    const creds = {
+      apiKey: requireString(apiKey, 'apiKey'),
+      secretKey: requireString(secretKey, 'secretKey'),
+      env: 'demo',
+    };
+    const account = await binanceSpotProbe(creds);
+    await saveCredentials(credentialsDir(), 'binance-spot', creds);
+    await applyStoredBinanceSpotCredentials();
+    return { account, env: 'demo' };
+  });
+
+  ipcMain.handle('binance-spot:credentials-clear', async () => {
+    await clearCredentials(credentialsDir(), 'binance-spot');
+    return applyStoredBinanceSpotCredentials();
+  });
+
+  ipcMain.handle('bybit:credentials-status', async () => {
+    const stored = await readPublic(credentialsDir(), 'bybit');
+    return {
+      ...stored,
+      encryptionAvailable: encryptionAvailable(),
+      envPresent: !!(process.env.BYBIT_API_KEY && process.env.BYBIT_SECRET_KEY),
+    };
+  });
+
+  /** Try credentials WITHOUT storing them, and answer with what the key reaches. */
+  ipcMain.handle('bybit:credentials-test', (_e, { apiKey, secretKey, env } = {}) => bybitProbe({
+    apiKey: requireString(apiKey, 'apiKey'),
+    secretKey: requireString(secretKey, 'secretKey'),
+    env: env === 'live' ? 'live' : 'demo',
+  }));
+
+  ipcMain.handle('bybit:credentials-save', async (_e, { apiKey, secretKey, env } = {}) => {
+    const creds = {
+      apiKey: requireString(apiKey, 'apiKey'),
+      secretKey: requireString(secretKey, 'secretKey'),
+      env: env === 'live' ? 'live' : 'demo',
+    };
+    /* Tried before it is written, for the reason the Capital.com save gives — and for one
+     * more here: a demo key typed into the live form connects to nothing, and finding that
+     * out from a refused order is finding it out too late. */
+    const account = await bybitProbe(creds);
+    await saveCredentials(credentialsDir(), 'bybit', creds);
+    await applyStoredBybitCredentials();
+    return { account, env: creds.env };
+  });
+
+  ipcMain.handle('bybit:credentials-clear', async () => {
+    await clearCredentials(credentialsDir(), 'bybit');
+    return applyStoredBybitCredentials();
   });
 
   /** The two ledgers a finished trade's real cost has to be joined from. */

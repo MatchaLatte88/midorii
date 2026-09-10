@@ -83,7 +83,7 @@ export interface BotFormOptions {
 export interface BotForm {
     readonly el: HTMLElement;
     /** Repaint from the bot handed in, discarding unsaved edits. */
-    reset(bot: BotConfig, readOnly: boolean): void;
+    reset(bot: BotConfig, readOnly: boolean, accountTrades: number, capitalConfigured: boolean): void;
 }
 
 /** Build the form into a fresh element. */
@@ -98,6 +98,18 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
     let draft = draftOf(bot);
     let status: { text: string; error?: boolean } | null = null;
     let saving = false;
+    let accountTrades = opts.accountTrades;
+    let capitalConfigured = opts.capitalConfigured;
+    let statusNode: HTMLElement | null = null;
+
+    /** A scalar edit changes the draft, not the form's structure. Keep the controls mounted so
+     *  the focused field and its selection survive each keystroke. */
+    function markChanged(): void {
+        status = null;
+        if (!statusNode) return;
+        statusNode.textContent = '';
+        delete statusNode.dataset.error;
+    }
 
     function draftOf(source: BotConfig): {
         name: string;
@@ -170,7 +182,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
             value: draft.name,
             fill: true,
             disabled: readOnly,
-            onChange: (v) => { draft.name = v.trim() || 'Bot'; paint(); },
+            onChange: (v) => { draft.name = v.trim() || 'Bot'; markChanged(); },
         });
         grid.appendChild(fieldRow(doc, 'Name', name.el, 'What you call it. Never used as a key.'));
 
@@ -178,7 +190,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
             value: draft.symbol,
             fill: true,
             disabled: readOnly,
-            onChange: (v) => { draft.symbol = v.trim(); paint(); },
+            onChange: (v) => { draft.symbol = v.trim(); markChanged(); },
         });
         grid.appendChild(fieldRow(
             doc,
@@ -193,7 +205,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
             options: [...TIMEFRAME_OPTIONS],
             value: draft.timeframe,
             disabled: readOnly,
-            onChange: (v) => { draft.timeframe = v; paint(); },
+            onChange: (v) => { draft.timeframe = v; markChanged(); },
         });
         grid.appendChild(fieldRow(
             doc,
@@ -206,11 +218,15 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
         const venue = new Select({
             options: VENUE_OPTIONS.map((v) => ({
                 value: v.value,
-                label: v.value === 'capital' && !opts.capitalConfigured ? `${v.label} (no credentials)` : v.label,
+                label: v.value === 'capital' && !capitalConfigured ? `${v.label} (no credentials)` : v.label,
             })),
             value: draft.venue,
             disabled: readOnly,
-            onChange: (v) => { draft.venue = v === 'capital' ? 'capital' : 'paper'; paint(); },
+            onChange: (v) => {
+                draft.venue = v === 'capital' ? 'capital' : 'paper';
+                markChanged();
+                paint();
+            },
         });
         grid.appendChild(fieldRow(
             doc,
@@ -228,7 +244,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
                 step: 1000,
                 fill: false,
                 disabled: readOnly,
-                onChange: (v) => { draft.balance = v; paint(); },
+                onChange: (v) => { draft.balance = v; markChanged(); },
             });
             grid.appendChild(fieldRow(
                 doc,
@@ -244,7 +260,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
 
         if (draft.venue === 'capital') {
             el.appendChild(note(
-                opts.capitalConfigured
+                capitalConfigured
                     ? 'This bot sends real orders. It is never resumed by itself when the app '
                       + 'starts — a real account is armed by a person, every time.'
                     : 'There are no Capital.com credentials on this machine, so this bot cannot '
@@ -275,6 +291,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
                 // A different strategy has a different schema — its own settings, from the
                 // Strategies tab where they were tuned.
                 draft.params = safeParams(v, storedStrategySettings[v] ?? {});
+                markChanged();
                 paint();
             },
         });
@@ -293,13 +310,13 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
 
         el.appendChild(sectionLabel('Risk and size'));
         const riskGrid = fieldGrid(doc);
-        for (const param of risk) riskGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.params, paint)));
+        for (const param of risk) riskGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.params, markChanged)));
         el.appendChild(riskGrid);
 
         if (own.length > 0) {
             el.appendChild(sectionLabel('What counts as a setup'));
             const ownGrid = fieldGrid(doc);
-            for (const param of own) ownGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.params, paint)));
+            for (const param of own) ownGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.params, markChanged)));
             el.appendChild(ownGrid);
         }
 
@@ -323,21 +340,21 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
         el.appendChild(sectionLabel('When it may trade'));
         const whenGrid = fieldGrid(doc);
         for (const param of LIVE_GUARD_PARAMS.slice(0, 4)) {
-            whenGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.guards, paint)));
+            whenGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.guards, markChanged)));
         }
         el.appendChild(whenGrid);
 
         el.appendChild(sectionLabel('How much it may do'));
         const muchGrid = fieldGrid(doc);
         for (const param of LIVE_GUARD_PARAMS.slice(4, 9)) {
-            muchGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.guards, paint)));
+            muchGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.guards, markChanged)));
         }
         el.appendChild(muchGrid);
 
         el.appendChild(sectionLabel('What it refuses to trade through'));
         const condGrid = fieldGrid(doc);
         for (const param of LIVE_GUARD_PARAMS.slice(9)) {
-            condGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.guards, paint)));
+            condGrid.appendChild(readOnlyGuard(paramField(doc, param, draft.guards, markChanged)));
         }
         el.appendChild(condGrid);
         return el;
@@ -418,8 +435,8 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
 
         const reset = button('Start account over');
         reset.disabled = readOnly;
-        reset.title = opts.accountTrades > 0
-            ? `Files this bot's ${opts.accountTrades} ${opts.accountTrades === 1 ? 'trade' : 'trades'} as a run, `
+        reset.title = accountTrades > 0
+            ? `Files this bot's ${accountTrades} ${accountTrades === 1 ? 'trade' : 'trades'} as a run, `
               + 'then starts it again on its opening balance.'
             : 'This bot has traded nothing yet, so there is nothing to file.';
         reset.onclick = () => opts.onResetAccount();
@@ -429,14 +446,14 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
         remove.title = 'Deletes the bot. Its account is filed as a run first — nothing it traded is lost.';
         remove.onclick = () => opts.onDelete();
 
-        const statusEl = doc.createElement('span');
-        statusEl.className = 'midorii-botform-status';
+        statusNode = doc.createElement('span');
+        statusNode.className = 'midorii-botform-status';
         if (status) {
-            statusEl.textContent = status.text;
-            if (status.error) statusEl.dataset.error = '1';
+            statusNode.textContent = status.text;
+            if (status.error) statusNode.dataset.error = '1';
         }
 
-        actions.append(saveButton, revert, reset, remove, statusEl);
+        actions.append(saveButton, revert, reset, remove, statusNode);
         root.appendChild(actions);
     }
 
@@ -444,9 +461,11 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
 
     return {
         el: root,
-        reset(next, nextReadOnly): void {
+        reset(next, nextReadOnly, nextAccountTrades, nextCapitalConfigured): void {
             bot = next;
             readOnly = nextReadOnly;
+            accountTrades = nextAccountTrades;
+            capitalConfigured = nextCapitalConfigured;
             draft = draftOf(next);
             status = null;
             paint();

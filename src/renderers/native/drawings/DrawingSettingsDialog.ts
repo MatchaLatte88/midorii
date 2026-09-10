@@ -76,6 +76,7 @@ export class DrawingSettingsDialog {
         const ui = new Dialog({
             host: this.host,
             title: TITLES[kind],
+            eyebrow: 'Drawing',
             // Non-modal: live-edit dialog — a modal machine locks pointer events on the
             // whole body, killing the chart and the body-portaled popovers.
             modal: false,

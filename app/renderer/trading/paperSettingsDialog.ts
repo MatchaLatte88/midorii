@@ -21,10 +21,11 @@ const CSS = `
 .midorii-paper-sect {
     margin: 18px 0 10px;
     font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.09em;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--vela-fg-muted);
+    opacity: 0.85;
 }
 .midorii-paper-sect:first-child { margin-top: 0; }
 .midorii-paper-row {
@@ -51,23 +52,14 @@ const CSS = `
     color: var(--vela-danger);
     min-height: 1.45em;
 }
-.midorii-paper-btn {
-    all: unset;
-    padding: 6px 16px;
-    border-radius: var(--vela-radius-sm);
-    cursor: pointer;
-    font-weight: 600;
-    background: var(--vela-surface-overlay);
-    color: var(--vela-fg);
-    border: 1px solid var(--vela-border-soft);
+/* Only the danger tone is this dialog's own — the plain and primary shapes are the kit's
+   footer buttons, which every other dialog in the app now wears. */
+.vela-dialog-btn[data-tone='danger'] { color: var(--vela-danger); }
+.vela-dialog-btn[data-tone='danger']:hover {
+    border-color: var(--vela-danger-line);
+    background: var(--vela-danger-soft);
+    color: var(--vela-danger);
 }
-.midorii-paper-btn[data-primary] {
-    background: var(--vela-accent);
-    color: #0b0e14;
-    border-color: transparent;
-}
-.midorii-paper-btn[data-tone='danger'] { color: var(--vela-danger); }
-.midorii-paper-btn:hover { filter: brightness(1.12); }
 `;
 
 /** What the dialog resolves with — the settings to apply, or nothing at all. */
@@ -113,9 +105,8 @@ function section(text: string, doc: Document): HTMLElement {
 function button(text: string, doc: Document, primary = false): HTMLButtonElement {
     const b = doc.createElement('button');
     b.type = 'button';
-    b.className = 'midorii-paper-btn';
+    b.className = primary ? 'vela-dialog-btn vela-dialog-btn-primary' : 'vela-dialog-btn';
     b.textContent = text;
-    if (primary) b.dataset.primary = '1';
     return b;
 }
 
@@ -283,6 +274,7 @@ export async function openPaperSettings(
 
         const dialog = new Dialog({
             title: 'Paper trading',
+            eyebrow: 'Trading',
             host,
             draggable: true,
             align: 'center',
@@ -339,7 +331,6 @@ export async function openPaperSettings(
                 );
             },
             footer: (el) => {
-                el.style.cssText += ';display:flex;align-items:center;gap:8px';
                 if (opts.onResetAccount) {
                     const reset = button('File and reset account', doc);
                     reset.dataset.tone = 'danger';

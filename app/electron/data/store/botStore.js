@@ -12,12 +12,9 @@
  *
  * What is stored and what is not
  * ------------------------------
- * The definition only. A bot's live state — how many trades it has taken today, what it is
- * holding, where its strategy stood — is not here, and deliberately: it is meaningless
- * across a restart, because the strategy is rebuilt from the market's own history when the
- * bot starts again (see app/renderer/bot/BotRunner.ts). Storing it would create a second
- * account record that could disagree with the paper account or with the venue, which are
- * the two things that actually know.
+ * The definition only. Durable runtime data lives in botAccountStore: the paper account,
+ * daily guard counters, and the confirmed venue ids a live bot may manage. Market history
+ * and strategy detector state are rebuilt from the provider when the bot starts again.
  *
  * Values are stored as they arrive and validated where the schema is, in the renderer —
  * the same rule strategyStore follows, and for the same reason: a build that renames a

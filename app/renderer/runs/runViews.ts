@@ -1,4 +1,4 @@
-import { injectStyles } from '../../../src/ui';
+import { BUTTON_CSS, BUTTON_STYLE_ID, injectStyles } from '../../../src/ui';
 // A trade's holding time reads the same as a measured span on the chart, and there is no
 // reason for two of that.
 import { formatDuration } from '../../../src/core/drawings';
@@ -43,17 +43,17 @@ const CSS = `
 
 .midorii-figures-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--vela-border-faint); border: 1px solid var(--vela-border-faint); border-radius: var(--vela-radius-sm); overflow: hidden; margin-bottom: 14px; }
 .midorii-figures-tile { padding: 8px 10px; background: var(--vela-surface); }
-.midorii-figures-tile dt { margin: 0 0 3px; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--vela-fg-muted); }
+.midorii-figures-tile dt { margin: 0 0 3px; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--vela-fg-muted); opacity: 0.85; }
 .midorii-figures-tile dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; color: var(--vela-fg-bright); font-variant-numeric: tabular-nums; }
 
 .midorii-figures-curve { display: block; width: 100%; margin-bottom: 14px; background: var(--vela-surface-sunken); border-radius: var(--vela-radius-sm); }
 
-.midorii-figures-section { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--vela-fg-muted); }
+.midorii-figures-section { margin: 0 0 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--vela-fg-muted); opacity: 0.85; }
 
 .midorii-figures-remove { width: 1%; padding-left: 0; }
 .midorii-figures-remove button {
     all: unset; box-sizing: border-box;
-    padding: 3px 9px; border-radius: var(--vela-radius-sm);
+    padding: 3px 9px; border-radius: var(--vela-control-radius);
     font-size: 11px; font-weight: 600; white-space: nowrap; cursor: pointer;
     color: var(--vela-fg-faint); border: 1px solid transparent;
 }
@@ -79,12 +79,14 @@ export function ensureFigureStyles(doc: Document): void {
 }
 
 export function button(text: string, tone: 'plain' | 'primary' | 'danger' = 'plain'): HTMLButtonElement {
+    // The kit's action button, in its own sheet: several callers here (the settings page,
+    // the bot form) render buttons without ever opening a dialog, so the sheet cannot ride
+    // in on one. Injection is idempotent by id.
+    injectStyles(BUTTON_STYLE_ID, BUTTON_CSS);
     const b = document.createElement('button');
+    b.type = 'button';
     b.textContent = text;
-    const fill = tone === 'primary' ? 'background:var(--vela-accent);color:var(--vela-fg-on-fill);border:1px solid transparent'
-        : tone === 'danger' ? 'background:transparent;color:var(--vela-danger);border:1px solid var(--vela-border-soft)'
-            : 'background:var(--vela-surface-overlay);color:var(--vela-fg);border:1px solid var(--vela-border-soft)';
-    b.style.cssText = `all:unset;box-sizing:border-box;padding:5px 14px;border-radius:var(--vela-radius-sm);cursor:pointer;font-weight:600;font-size:12px;${fill}`;
+    b.className = tone === 'plain' ? 'vela-dialog-btn' : `vela-dialog-btn vela-dialog-btn-${tone}`;
     return b;
 }
 

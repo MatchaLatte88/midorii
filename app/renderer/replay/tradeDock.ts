@@ -20,6 +20,7 @@ import type { OrderRow, PositionRow, TradeBook } from './tradeBook';
 const STYLE_ID = 'midorii-dock';
 const CSS = `
 .midorii-dock {
+    position: relative;
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
@@ -33,33 +34,44 @@ const CSS = `
     align-items: center;
     gap: 14px;
     padding: 0 10px 0 12px;
-    height: 30px;
+    height: 34px;
     flex: 0 0 auto;
+    background: var(--vela-chrome);
 }
+.midorii-dock[data-folded] .midorii-dock-head { background: transparent; }
 .midorii-dock-title {
+    font-family: var(--vela-font-mono);
     font-size: 10px;
     font-weight: 600;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--vela-fg-muted);
 }
 .midorii-dock-title b { color: var(--vela-fg-bright); font-weight: 600; }
 .midorii-dock-spacer { flex: 1 1 auto; }
+/* The height that was dragged for, exactly — not a ceiling the content is free to fall short
+   of. A ceiling would leave the seam sitting on the last row instead of under the pointer
+   that just moved it, which reads as the drag being refused. The list scrolls inside. */
 .midorii-dock-body {
     overflow-y: auto;
-    max-height: 190px;
+    height: var(--midorii-dock-height, 190px);
     padding: 0 12px 10px;
 }
+/* Nothing open is one line, whatever the dock was dragged to. Reserving room for a list that
+   does not exist would take the chart's space to show an empty box. */
+.midorii-dock[data-empty] .midorii-dock-body { height: auto; }
 ${overlayScrollbarCss('.midorii-dock-body')}
 .midorii-dock[data-folded] .midorii-dock-body { display: none; }
 
 .midorii-dock-empty { padding: 2px 0 8px; color: var(--vela-fg-muted); }
 .midorii-dock-section {
-    margin: 6px 0 4px;
+    margin: 10px 0 4px;
     font-size: 10px;
-    letter-spacing: 0.08em;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--vela-fg-muted);
+    opacity: 0.85;
 }
 
 .midorii-dock-row {
@@ -73,8 +85,8 @@ ${overlayScrollbarCss('.midorii-dock-body')}
 .midorii-dock-side {
     flex: 0 0 auto;
     min-width: 46px;
-    padding: 2px 6px;
-    border-radius: var(--vela-radius-sm);
+    padding: 2px 8px;
+    border-radius: 999px;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.06em;
@@ -99,14 +111,15 @@ ${overlayScrollbarCss('.midorii-dock-body')}
     width: 92px;
     padding: 3px 6px;
     border: 1px solid var(--vela-border-soft);
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-control-radius);
     background: var(--vela-surface-overlay);
     color: var(--vela-fg);
     font: inherit;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     outline: none;
+    transition: border-color var(--vela-dur-fast) ease;
 }
-.midorii-dock-price:focus { border-color: var(--vela-focus); }
+.midorii-dock-price:focus { border-color: var(--vela-accent-line); }
 .midorii-dock-price[data-trailing] { border-style: dashed; }
 
 .midorii-dock-actions { display: flex; gap: 6px; margin-left: auto; }
@@ -115,7 +128,7 @@ ${overlayScrollbarCss('.midorii-dock-body')}
     box-sizing: border-box;
     padding: 4px 10px;
     border: 1px solid var(--vela-border-soft);
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-control-radius);
     background: var(--vela-surface-overlay);
     color: var(--vela-fg);
     font-size: 11px;
@@ -145,13 +158,89 @@ ${overlayScrollbarCss('.midorii-dock-body')}
 .midorii-dock-fold {
     all: unset;
     padding: 2px 8px;
-    border-radius: var(--vela-radius-sm);
+    border-radius: var(--vela-control-radius);
     color: var(--vela-fg-muted);
     cursor: pointer;
     font-size: 12px;
 }
 .midorii-dock-fold:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
+
+/* The seam along the dock's top edge: drag it up and the list gets more of the column, the
+   chart less. It straddles the border so the whole seam is grabbable, and paints only under
+   the pointer — the same ink the workspace splitters and the side panel's edge use, so every
+   draggable seam in the app reads as one family. */
+.midorii-dock-resizer {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -4px;
+    height: 8px;
+    cursor: row-resize;
+    touch-action: none;
+    z-index: 1;
+}
+.midorii-dock-resizer::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 4px;
+    height: 1px;
+    background: transparent;
+}
+.midorii-dock-resizer:hover::after,
+.midorii-dock-resizer[data-dragging]::after { background: var(--vela-separator-hover-line); }
+/* Folded, there is no list to make room for. */
+.midorii-dock[data-folded] .midorii-dock-resizer { display: none; }
 `;
+
+/** How little the list may be squeezed to before the drag stops giving. About two rows. */
+export const MIN_DOCK_HEIGHT = 90;
+/** What it opens at, and where a double-click on the seam puts it back. */
+export const DEFAULT_DOCK_HEIGHT = 190;
+/** How little of the column the chart may be left with. The dock is attached to a chart;
+ *  one that could swallow it would hide the thing it is about. */
+const CHART_FLOOR = 200;
+/** The ceiling when the column has no height to reason about yet — a tab that has never
+ *  been shown, or a test with no layout. */
+const UNMEASURED_CEILING = 640;
+
+/** The list's height, held inside what the column can actually spare. */
+export function clampDockHeight(px: number, columnHeight: number): number {
+    const ceiling = columnHeight > 0
+        ? Math.max(MIN_DOCK_HEIGHT, columnHeight - CHART_FLOOR)
+        : UNMEASURED_CEILING;
+    return Math.max(MIN_DOCK_HEIGHT, Math.min(px, ceiling));
+}
+
+const HEIGHT_KEY = 'midorii-dock-height';
+
+/**
+ * How tall the list was last dragged to, on this machine.
+ *
+ * One answer for every screen that mounts a dock — it is the same panel wherever it appears,
+ * and a height set on the replay is a height meant for the chart as well. localStorage for
+ * the reason `settings/prefs` gives: this describes this copy of the app, and a storage
+ * failure is reported rather than fatal.
+ */
+function storedHeight(): number {
+    try {
+        const raw = localStorage.getItem(HEIGHT_KEY);
+        const px = raw == null ? Number.NaN : Number(raw);
+        return Number.isFinite(px) && px > 0 ? px : DEFAULT_DOCK_HEIGHT;
+    } catch (err) {
+        console.error('[midorii] could not read the dock height', err);
+        return DEFAULT_DOCK_HEIGHT;
+    }
+}
+
+function storeHeight(px: number): void {
+    try {
+        localStorage.setItem(HEIGHT_KEY, String(px));
+    } catch (err) {
+        console.error('[midorii] could not persist the dock height', err);
+    }
+}
 
 /** What the dock can ask the session to do. Every one of these already exists on the engine. */
 export interface DockOptions {
@@ -166,13 +255,21 @@ export interface DockOptions {
     howToTrade?: string;
 }
 
+/**
+ * What the dock may do to what is open.
+ *
+ * The four optional ones are the four an ENGINE can do and a venue cannot: taking part of a
+ * position off, reversing it, moving a stop to break-even, trailing it. A venue that offers
+ * none of them gets no buttons for them — an offer that is refused every time is worse than
+ * no offer, and worse still on an account holding real money.
+ */
 export interface DockActions {
     closePosition(id: number): void;
-    closePart(size: number, id: number): void;
-    reverse(id: number): void;
-    breakEven(id: number): void;
+    closePart?(size: number, id: number): void;
+    reverse?(id: number): void;
+    breakEven?(id: number): void;
     protect(levels: { stopLoss?: number | null; takeProfit?: number | null }, id: number): void;
-    setTrailing(distance: number, id: number): void;
+    setTrailing?(distance: number, id: number): void;
     cancelOrder(id: number): void;
     cancelAll(): void;
     flatten(): void;
@@ -315,30 +412,42 @@ function positionRow(doc: Document, p: PositionRow, actions: DockActions): HTMLE
     const bar = doc.createElement('span');
     bar.className = 'midorii-dock-actions';
 
-    const be = button('Break-even');
-    if (p.breakEvenRefusal) {
-        be.disabled = true;
-        // The engine's own words, rather than a greyed button with no reason on it.
-        be.title = p.breakEvenRefusal;
-    } else {
-        be.onclick = () => actions.breakEven(p.id);
+    if (actions.breakEven) {
+        const be = button('Break-even');
+        if (p.breakEvenRefusal) {
+            be.disabled = true;
+            // The engine's own words, rather than a greyed button with no reason on it.
+            be.title = p.breakEvenRefusal;
+        } else {
+            be.onclick = () => actions.breakEven?.(p.id);
+        }
+        bar.append(be);
     }
 
-    const half = button('Take half');
-    half.onclick = () => actions.closePart(p.size / 2, p.id);
+    if (actions.closePart) {
+        const half = button('Take half');
+        half.onclick = () => actions.closePart?.(p.size / 2, p.id);
+        bar.append(half);
+    }
 
-    const trail = button('Trail…');
-    trail.onclick = () => {
-        trail.replaceWith(prompt(doc, 'distance', (distance) => actions.setTrailing(distance, p.id)));
-    };
+    if (actions.setTrailing) {
+        const trail = button('Trail…');
+        trail.onclick = () => {
+            trail.replaceWith(prompt(doc, 'distance', (distance) => actions.setTrailing?.(distance, p.id)));
+        };
+        bar.append(trail);
+    }
 
-    const reverse = button('Reverse');
-    reverse.onclick = () => actions.reverse(p.id);
+    if (actions.reverse) {
+        const reverse = button('Reverse');
+        reverse.onclick = () => actions.reverse?.(p.id);
+        bar.append(reverse);
+    }
 
     const close = button('Close', 'danger');
     close.onclick = () => actions.closePosition(p.id);
+    bar.append(close);
 
-    bar.append(be, half, trail, reverse, close);
     row.append(bar);
     return row;
 }
@@ -424,6 +533,56 @@ export function mountTradeDock(host: HTMLElement, actions: DockActions, opts: Do
     const el = doc.createElement('div');
     el.className = 'midorii-dock';
 
+    /* How much of the column the list may take, and the seam that changes it. Held on the
+     * element rather than in the stylesheet: the stylesheet says what the default is, this
+     * says what this person dragged it to. */
+    let height = DEFAULT_DOCK_HEIGHT;
+    const applyHeight = (px: number): void => {
+        height = clampDockHeight(px, host.clientHeight);
+        el.style.setProperty('--midorii-dock-height', `${height}px`);
+    };
+    applyHeight(storedHeight());
+
+    const resizer = doc.createElement('div');
+    resizer.className = 'midorii-dock-resizer';
+    resizer.setAttribute('role', 'separator');
+    resizer.setAttribute('aria-orientation', 'horizontal');
+    resizer.title = 'Drag up to see more. Double-click to put it back.';
+
+    let startY = 0;
+    let startHeight = 0;
+    let dragging = false;
+    const endDrag = (e: PointerEvent): void => {
+        if (!dragging) return;
+        dragging = false;
+        delete resizer.dataset.dragging;
+        resizer.releasePointerCapture(e.pointerId);
+        // Written once the drag has finished, not on every pixel of it.
+        if (height !== startHeight) storeHeight(height);
+    };
+    resizer.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        dragging = true;
+        startY = e.clientY;
+        startHeight = height;
+        resizer.dataset.dragging = '1';
+        // Pointer capture keeps the drag alive once it is over the chart canvas above.
+        resizer.setPointerCapture(e.pointerId);
+        e.preventDefault(); // no text selection, and no drawing started on the chart under it
+    });
+    resizer.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        // The dock sits at the BOTTOM of the column, so dragging up is asking for more.
+        applyHeight(startHeight + (startY - e.clientY));
+        e.preventDefault();
+    });
+    resizer.addEventListener('pointerup', endDrag);
+    resizer.addEventListener('pointercancel', endDrag);
+    resizer.addEventListener('dblclick', () => {
+        applyHeight(DEFAULT_DOCK_HEIGHT);
+        storeHeight(height);
+    });
+
     const head = doc.createElement('div');
     head.className = 'midorii-dock-head';
     const title = doc.createElement('span');
@@ -463,7 +622,7 @@ export function mountTradeDock(host: HTMLElement, actions: DockActions, opts: Do
     const live = doc.createElement('div');
     body.append(live);
 
-    el.append(head, body);
+    el.append(resizer, head, body);
     host.appendChild(el);
 
     return {
@@ -489,7 +648,10 @@ export function mountTradeDock(host: HTMLElement, actions: DockActions, opts: Do
 
             live.replaceChildren();
 
+            /* Nothing open is one line rather than the height the dock was dragged to: the
+             * room was asked for to see a list with, and there is no list. */
             if (positions.length === 0 && orders.length === 0) {
+                el.setAttribute('data-empty', '');
                 const empty = doc.createElement('div');
                 empty.className = 'midorii-dock-empty';
                 // The how-to only while nothing has been traded yet: after the first round
@@ -501,6 +663,7 @@ export function mountTradeDock(host: HTMLElement, actions: DockActions, opts: Do
                 live.append(empty);
                 return;
             }
+            el.removeAttribute('data-empty');
 
             if (positions.length > 0) {
                 const label = doc.createElement('div');

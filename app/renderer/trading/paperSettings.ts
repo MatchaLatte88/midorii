@@ -1,7 +1,7 @@
 import { DEFAULT_COSTS } from '../../../shared/engine/broker.js';
 import type { Costs, PositionMode } from '../../../shared/engine/broker.js';
 import { normalizeQuickSizes } from '../replay/orderTicket';
-import type { BracketSettings } from '../replay/orderTicket';
+import type { BracketSettings, TicketSizing } from '../replay/orderTicket';
 import type { RiskSettings } from '../replay/replayOrders';
 
 /**
@@ -36,6 +36,15 @@ export interface PaperSettings {
     hedging: boolean;
     /** The most notional a position may carry, as a multiple of equity. */
     maxLeverage: number;
+    /**
+     * Which of the ticket's two ways of saying how big a trade is is on the panel.
+     *
+     * Not asked for anywhere — it is set by using the panel, and stored so that using it
+     * once is enough. Somebody who trades in units types a number of units on every ticket,
+     * and a ticket that came back asking about risk after every restart would be a setting
+     * they had to keep making by hand.
+     */
+    sizingMode: TicketSizing;
     /** How the risk per trade is expressed. */
     riskMode: RiskSettings['mode'];
     /** How much one trade may lose — percent of equity, or cash, per `riskMode`. */
@@ -65,6 +74,7 @@ export const DEFAULT_PAPER_SETTINGS: PaperSettings = {
     slippagePct: DEFAULT_COSTS.slippagePct,
     hedging: true,
     maxLeverage: 1,
+    sizingMode: 'fixed',
     riskMode: 'percent',
     riskValue: 1,
     quickSizes: [1, 3, 5, 10, 15],
@@ -145,6 +155,7 @@ export function normalizeSettings(raw: unknown): PaperSettings {
         slippagePct: number(source.slippagePct, d.slippagePct, 0, 1),
         hedging: typeof source.hedging === 'boolean' ? source.hedging : d.hedging,
         maxLeverage: number(source.maxLeverage, d.maxLeverage, 1, 100),
+        sizingMode: source.sizingMode === 'risk' ? 'risk' : 'fixed',
         riskMode: source.riskMode === 'fixed' ? 'fixed' : 'percent',
         riskValue: number(source.riskValue, d.riskValue, 0.01, 1e6),
         quickSizes: quickSizes(source.quickSizes) ?? [...d.quickSizes],

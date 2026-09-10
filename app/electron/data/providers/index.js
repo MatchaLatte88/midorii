@@ -12,6 +12,7 @@
  * matter what timeframe the chart is on.
  */
 import * as binance from './binance.js';
+import * as bybit from './bybit.js';
 import * as coinbase from './coinbase.js';
 import * as hyperliquid from './hyperliquid.js';
 
@@ -23,6 +24,13 @@ export const SOURCES = {
     example: 'BTCUSDT',
     naming: 'Spot pairs with no separator, from the public monthly archive — the deepest history of the three.',
     module: binance,
+  },
+  bybit: {
+    id: 'bybit',
+    label: 'Bybit',
+    example: 'BTCUSDT',
+    naming: 'Spot pairs with no separator, and USDT perpetuals with a .P suffix (BTCUSDT.P). Paged from the public API.',
+    module: bybit,
   },
   coinbase: {
     id: 'coinbase',

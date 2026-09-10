@@ -1,6 +1,6 @@
 {
   "name": "midorii",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Midorii — local backtesting and trading-bot workbench, built on a Vela fork.",
   "license": "Apache-2.0",
   "private": true,

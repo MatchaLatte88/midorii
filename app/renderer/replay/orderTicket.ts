@@ -11,13 +11,14 @@ import type { RiskSettings } from './replayOrders';
  * the dock — every rule here is a rule about money, and a rule about money that can only be
  * exercised by clicking on a chart is a rule nobody checks.
  *
- * Sizing is derived, not typed
- * ----------------------------
- * By default you say where the trade is wrong and how much that may cost; the size follows,
- * through the same `positionSize` a strategy uses. So a trade taken by hand and a trade taken
- * by a bot are the same size for the same stop, and the two are comparable afterwards. A fixed
- * size is still offered — sometimes the question really is what one whole coin does here — but
- * it is the second option, and it is the one whose risk nobody worked out.
+ * Two ways to say how big
+ * -----------------------
+ * A ticket starts on a typed size — a number of units, the thing a person placing an order by
+ * hand already has in mind. The other way is to say where the trade is wrong and how much that
+ * may cost, and let the size follow through the same `positionSize` a strategy uses; a trade
+ * taken that way is the same size for the same stop as one a bot took, so the two are
+ * comparable afterwards. Neither is the panel's opinion for long: which one was last used is
+ * remembered by whoever mounts the panel and handed back on the next ticket.
  */
 
 export type TicketOrderType = 'market' | 'limit' | 'stop';
@@ -37,7 +38,7 @@ export interface TicketDraft {
 
 /** A ticket with nothing in it. */
 export function emptyTicket(): TicketDraft {
-    return { type: 'market', entryPrice: null, stopLoss: null, takeProfit: null, sizing: 'risk', fixedSize: null };
+    return { type: 'market', entryPrice: null, stopLoss: null, takeProfit: null, sizing: 'fixed', fixedSize: null };
 }
 
 /** The account, as far as a ticket needs to know it. */

@@ -75,19 +75,25 @@ function setup(style: ChartStyle, barCount = 0): { renderer: BackdropRenderer; f
 }
 
 describe('BackdropRenderer — ambient blobs', () => {
-    it('paints both blobs before any bars exist (they are cosmetic, not data)', () => {
+    it('paints all four blobs before any bars exist (they are cosmetic, not data)', () => {
         const { renderer, fills, scene, coords, theme } = setup(defaultChartStyle(), 0);
         renderer.render(scene, coords, theme, 1);
-        expect(fills).toHaveLength(2);
+        expect(fills).toHaveLength(4);
     });
 
     it('anchors each blob outside its own corner and covers the whole data area', () => {
         const { renderer, fills, scene, coords, theme } = setup(defaultChartStyle());
         renderer.render(scene, coords, theme, 1);
-        const [tl, br] = fills;
+        const [tl, tr, bl, br] = fills;
         // Top-left: center above and left of the plot's own top-left corner.
         expect(tl!.translate.x).toBeCloseTo(0.12 * W);
         expect(tl!.translate.y).toBeCloseTo(-0.08 * H);
+        // Top-right: center above and right of it.
+        expect(tr!.translate.x).toBeCloseTo(0.9 * W);
+        expect(tr!.translate.y).toBeCloseTo(-0.06 * H);
+        // Bottom-left: center below and left of it.
+        expect(bl!.translate.x).toBeCloseTo(-0.04 * W);
+        expect(bl!.translate.y).toBeCloseTo(1.06 * H);
         // Bottom-right: center past the opposite corner.
         expect(br!.translate.x).toBeCloseTo(1.04 * W);
         expect(br!.translate.y).toBeCloseTo(1.08 * H);
@@ -113,8 +119,12 @@ describe('BackdropRenderer — ambient blobs', () => {
     it('inherits the theme accent when the blob has no color of its own', () => {
         const { renderer, fills, scene, coords } = setup(defaultChartStyle());
         renderer.render(scene, coords, { ...DARK_THEME, accent: '#0369a1' }, 1);
-        expect(fills[0]!.stops[0]!.color).toBe('rgba(3,105,161,0.14)');
-        expect(fills[1]!.stops[0]!.color).toBe('rgba(3,105,161,0.11)');
+        expect(fills.map((f) => f.stops[0]!.color)).toEqual([
+            'rgba(3,105,161,0.14)',
+            'rgba(3,105,161,0.12)',
+            'rgba(3,105,161,0.1)',
+            'rgba(3,105,161,0.11)',
+        ]);
     });
 
     it('uses a pinned color instead of the accent', () => {
@@ -123,7 +133,7 @@ describe('BackdropRenderer — ambient blobs', () => {
         const { renderer, fills, scene, coords } = setup(style);
         renderer.render(scene, coords, { ...DARK_THEME, accent: '#0369a1' }, 1);
         expect(fills[0]!.stops[0]!.color).toBe('rgba(255,0,0,0.2)');
-        expect(fills[1]!.stops[0]!.color).toBe('rgba(3,105,161,0.11)'); // the other still inherits
+        expect(fills[1]!.stops[0]!.color).toBe('rgba(3,105,161,0.12)'); // the others still inherit
     });
 
     it('falls back to clear black when the color cannot be re-emitted at alpha 0', () => {
@@ -140,9 +150,11 @@ describe('BackdropRenderer — ambient blobs', () => {
         ]);
     });
 
-    it('skips a blob that is switched off, and paints nothing when both are', () => {
+    it('skips a blob that is switched off, and paints nothing when all are', () => {
         const one = defaultChartStyle();
         one.blobs.topLeft.visible = false;
+        one.blobs.topRight.visible = false;
+        one.blobs.bottomLeft.visible = false;
         const a = setup(one);
         a.renderer.render(a.scene, a.coords, a.theme, 1);
         expect(a.fills).toHaveLength(1);
@@ -151,6 +163,8 @@ describe('BackdropRenderer — ambient blobs', () => {
 
         const none = defaultChartStyle();
         none.blobs.topLeft.visible = false;
+        none.blobs.topRight.visible = false;
+        none.blobs.bottomLeft.visible = false;
         none.blobs.bottomRight.visible = false;
         const b = setup(none);
         b.renderer.render(b.scene, b.coords, b.theme, 1);
