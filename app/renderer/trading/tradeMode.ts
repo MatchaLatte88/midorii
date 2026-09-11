@@ -15,6 +15,11 @@ import { mountBinanceSpotTrading, type BinanceSpotMount } from './binanceSpotMou
 import { BybitController } from './BybitController';
 import { mountBybitTrading, type BybitMount } from './bybitMount';
 import { categoryOf, venueSymbol } from '../providers/BybitProvider';
+import { ProjectXController } from './ProjectXController';
+import { mountProjectXTrading, type ProjectXMount } from './projectxMount';
+import type { ProjectXDealing } from '../providers/ProjectXProvider';
+import type { MidoriProjectXAccount } from '../midori';
+import { formatMoney } from '../format';
 
 /**
  * The Trade menu — which broker, if any, the chart is wired to.
@@ -33,7 +38,12 @@ import { categoryOf, venueSymbol } from '../providers/BybitProvider';
  */
 
 /** Which broker the chart is wired to. */
-export type TradeBroker = 'off' | 'paper' | 'capital' | 'binance-spot' | 'bybit';
+export type TradeBroker = 'off' | 'paper' | 'capital' | 'binance-spot' | 'bybit' | 'projectx';
+
+/** The colour ProjectX rows are marked with wherever they appear — the menu here, and the
+ *  account band on the chart. Amber because this venue lists SEVERAL accounts and they
+ *  have to read as one group without repeating the venue's name in every label. */
+export const PROJECTX_ACCENT = '#d99a2b';
 
 export interface TradeModeOptions {
     workspace: VelaWorkspace;
@@ -102,6 +112,8 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     let spotMount: BinanceSpotMount | null = null;
     let bybit: BybitController | null = null;
     let bybitMount: BybitMount | null = null;
+    let projectx: ProjectXController | null = null;
+    let projectxMountHandle: ProjectXMount | null = null;
     /** Whether the credentials point at a real-money account, once the main process has
      *  been asked. Undefined until then — the menu entry waits rather than guessing. */
     let capital: { configured: boolean; live: boolean } | null = null;
@@ -110,6 +122,12 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
      *  means orders from this chart are real orders. Undefined until the main process has
      *  been asked. */
     let bybitVenue: { configured: boolean; live: boolean } | null = null;
+    /* ProjectX is the one venue here that offers a CHOICE of accounts rather than one: a
+     * key reaches an evaluation and the funded accounts that came out of it, and which one
+     * is traded is a decision, not a detail. So the menu lists them individually. */
+    let projectxVenue: { configured: boolean; live: boolean } | null = null;
+    let projectxAccounts: MidoriProjectXAccount[] = [];
+    let projectxChosen: number | null = null;
     const writer = paperWriter();
 
     /** Reading the account off disk is a round trip, and the menu can be clicked again
@@ -171,6 +189,23 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 ].filter(Boolean).join(' '),
                 checked: broker === 'bybit',
                 separatorBefore: !capital?.configured && !binanceSpot?.configured,
+            });
+        }
+        /* One row per account, not one per venue. Each is marked with the venue's colour so
+         * three Topstep rows read as one group, and each carries its own NAME — on this
+         * gateway the name is the only thing separating an evaluation from a funded account,
+         * because it reports both as simulated. */
+        if (projectxVenue?.configured && projectxAccounts.length) {
+            const first = !capital?.configured && !binanceSpot?.configured && !bybitVenue?.configured;
+            projectxAccounts.forEach((account, index) => {
+                list.push({
+                    id: `projectx:${account.id}`,
+                    label: `${account.name} — ${formatMoney(account.balance)}`,
+                    checked: broker === 'projectx' && projectxChosen === account.id,
+                    accent: PROJECTX_ACCENT,
+                    separatorBefore: index === 0 && first,
+                    ...(account.canTrade === false ? { disabled: true } : {}),
+                });
             });
         }
         return list;
@@ -285,6 +320,82 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 theme: opts.theme(),
             });
             broker = 'bybit';
+            saveActiveBroker(broker);
+        } finally {
+            starting = false;
+        }
+    }
+
+    /**
+     * Wire the chart to one ProjectX account, once the person has said so in as many words.
+     *
+     * The account is an ARGUMENT here, unlike every other venue in this menu: a ProjectX key
+     * reaches several, and picking a row is picking which one to trade. Chosen through the
+     * main process rather than held here, so the choice is the same one Settings shows and
+     * the same one that survives a restart.
+     *
+     * The arm dialog is given the account's own name rather than the venue's. On a prop firm
+     * the gateway calls an evaluation and a funded account alike "simulated", so a dialog
+     * saying "ProjectX — simulated" would be true of both and useful for neither.
+     */
+    async function startProjectX(accountId: number): Promise<void> {
+        if (starting) return;
+        const symbol = ws.chart.market.symbol ?? '';
+        const resolved = ws.chart.data.resolve(symbol);
+        if (resolved?.provider !== 'projectx') {
+            ws.toast('ProjectX trading needs a futures contract on the chart — pick one from the symbol list first.', 'error');
+            return;
+        }
+        starting = true;
+        try {
+            const account = projectxAccounts.find((a) => a.id === accountId);
+            if (!account) {
+                ws.toast('That ProjectX account is no longer listed. Open the menu again.', 'error');
+                return;
+            }
+            /* The contract comes off the symbol's own metadata, which the provider fills in
+             * — the ticker on the chart may be a product root (NQ) and every order has to
+             * carry the dated contract it resolved to. Asked through the chart rather than
+             * through a second provider instance, so it is the same answer the chart drew. */
+            const info = await ws.chart.data.symbolInfo(symbol);
+            const dealing = (info as { dealing?: ProjectXDealing } | undefined)?.dealing;
+            if (!dealing?.contractId) {
+                ws.toast(`ProjectX has no contract matching ${resolved.ticker}.`, 'error');
+                return;
+            }
+            const contractName = String((info as { ticker?: string } | undefined)?.ticker ?? resolved.ticker);
+            const go = await askToArm(ws.root, {
+                live: projectxVenue?.live === true,
+                epic: contractName,
+                accountName: account.name,
+                currency: 'USD',
+                balance: account.balance,
+            });
+            if (!go) return;
+
+            /* Only now: switching the account is a change to where every subsequent order
+             * goes, so it happens after the confirmation rather than on the way to it. */
+            await window.midori.projectx.selectAccount(accountId);
+            projectxChosen = accountId;
+
+            stop(); // whatever was on comes off first — one account at a time
+            projectx = new ProjectXController({
+                ticker: contractName,
+                dealing,
+                accountName: account.name,
+                live: projectxVenue?.live === true,
+                notify: (message, kind) => ws.toast(message, kind === 'success' ? 'success' : kind),
+            });
+            projectxMountHandle = mountProjectXTrading({
+                workspace: ws,
+                stack: opts.stack,
+                main: opts.main,
+                controller: projectx,
+                settings: () => settings,
+                onSettings: (next) => void applySettings(next).catch(report),
+                theme: opts.theme(),
+            });
+            broker = 'projectx';
             saveActiveBroker(broker);
         } finally {
             starting = false;
@@ -440,6 +551,14 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             saveActiveBroker('off');
             return;
         }
+        if (broker === 'projectx') {
+            projectxMountHandle?.unmount();
+            projectxMountHandle = null;
+            projectx = null;
+            broker = 'off';
+            saveActiveBroker('off');
+            return;
+        }
         mount?.unmount();
         mount = null;
         persist();
@@ -555,6 +674,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 else if (id === 'capital') void startCapital().catch(report);
                 else if (id === 'binance-spot') void startBinanceSpot().catch(report);
                 else if (id === 'bybit') void startBybit().catch(report);
+                else if (id.startsWith('projectx:')) void startProjectX(Number(id.slice('projectx:'.length))).catch(report);
             },
             onTrailing: (id) => {
                 if (id === 'paper') openSettings();
@@ -591,10 +711,11 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
      * Settings after this handle was installed, and the newly connected venue should appear
      * without making somebody restart the app. */
     const refreshVenues = async (): Promise<void> => {
-        const [capitalResult, spotResult, bybitResult] = await Promise.allSettled([
+        const [capitalResult, spotResult, bybitResult, projectxResult] = await Promise.allSettled([
             window.midori.capital.environment(),
             window.midori.binanceSpot.environment(),
             window.midori.bybit.environment(),
+            window.midori.projectx.environment(),
         ]);
         if (capitalResult.status === 'fulfilled') {
             capital = { configured: capitalResult.value.configured, live: capitalResult.value.live };
@@ -602,6 +723,23 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         if (spotResult.status === 'fulfilled') binanceSpot = { configured: spotResult.value.configured };
         if (bybitResult.status === 'fulfilled') {
             bybitVenue = { configured: bybitResult.value.configured, live: bybitResult.value.live };
+        }
+        if (projectxResult.status === 'fulfilled') {
+            projectxVenue = { configured: projectxResult.value.configured, live: projectxResult.value.live };
+            /* The accounts come with it, because the rows ARE the accounts — a configured
+             * venue with no list would show nothing and look broken. Failures leave the
+             * previous list standing rather than emptying the menu mid-session. */
+            if (projectxVenue.configured) {
+                const [accounts, chosen] = await Promise.allSettled([
+                    window.midori.projectx.accounts(true),
+                    window.midori.projectx.account(),
+                ]);
+                if (accounts.status === 'fulfilled') projectxAccounts = accounts.value;
+                if (chosen.status === 'fulfilled') projectxChosen = chosen.value.accountId;
+            } else {
+                projectxAccounts = [];
+                projectxChosen = null;
+            }
         }
         if (menuOpen) menu?.setItems(items());
     };
@@ -630,6 +768,14 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 if (resume === 'capital' && capital?.configured) return startCapital();
                 if (resume === 'binance-spot' && binanceSpot?.configured) return startBinanceSpot();
                 if (resume === 'bybit' && bybitVenue?.configured) return startBybit();
+                /* ProjectX resumes only onto the account that is still chosen — the mode
+                 * alone does not say which one, and there is no safe way to pick. An
+                 * evaluation that ended, or a key replaced since, leaves the chart on Just
+                 * Watching rather than arming whichever account happens to be first. */
+                if (resume === 'projectx' && projectxVenue?.configured && projectxChosen != null
+                    && projectxAccounts.some((a) => a.id === projectxChosen)) {
+                    return startProjectX(projectxChosen);
+                }
                 return undefined;
             })
             .catch((err: unknown) => console.error('[midorii] could not resume trading', err));

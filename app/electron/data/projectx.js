@@ -58,6 +58,21 @@ let token = null;
 let tokenIssuedAt = 0;
 let loginPromise = null;
 
+/**
+ * Which account orders and positions are addressed to.
+ *
+ * A gateway account is not like a Capital.com one, where the venue has a "preferred"
+ * account and a session lands on it. Here EVERY order, position read and trade carries an
+ * `accountId`, and a key routinely reaches several: an evaluation and the funded accounts
+ * that came out of it. So the choice is the app's to make and to hold, and there is no
+ * sensible default — trading the wrong one of these is not a degraded experience, it is a
+ * trade on somebody's funded account.
+ *
+ * Null until chosen. Everything that needs it asks {@link requireAccountId}, which refuses
+ * rather than picking.
+ */
+let accountId = null;
+
 let ws = null;
 let wsConnectPromise = null;
 let wsReconnectTimer = null;
@@ -84,6 +99,10 @@ export function configureProjectX(next) {
       live: next.live === true,
     }
     : null;
+  /* The chosen account belongs to the key that reached it. A different key is a different
+   * set of accounts, and carrying an id across would address an account this session may
+   * not even be able to see — so it is dropped and has to be chosen again. */
+  accountId = Number.isFinite(next?.accountId) ? Number(next.accountId) : null;
   token = null;
   tokenIssuedAt = 0;
   /* Every forming bar is dropped, though the subscriptions that built them stay. A bar
@@ -201,6 +220,169 @@ export async function projectXAccounts(onlyActive = true) {
   return json?.accounts ?? [];
 }
 
+/** Which account is being traded, and whether one has been chosen at all. */
+export function projectXAccount() {
+  return { accountId, chosen: accountId != null };
+}
+
+/**
+ * Trade a different account from now on.
+ *
+ * Verified against the venue rather than taken on trust: an id typed into a stale settings
+ * page, or restored from disk after an evaluation ended, would otherwise be set here and
+ * only refused later — at the moment an order was sent. The account is also checked for
+ * whether it may trade at all, because one that cannot is a strictly worse answer than
+ * none: it looks connected and refuses everything.
+ */
+export async function projectXSelectAccount(id) {
+  const wanted = Number(id);
+  if (!Number.isFinite(wanted)) throw new Error('A ProjectX account id is required.');
+  const accounts = await projectXAccounts(true);
+  const found = accounts.find((a) => a.id === wanted);
+  if (!found) {
+    throw new Error(`ProjectX does not list an active account ${wanted} for this key. It may have ended, or belong to another login.`);
+  }
+  if (found.canTrade === false) {
+    throw new Error(`ProjectX account ${found.name} cannot trade. Pick one that can.`);
+  }
+  accountId = wanted;
+  wire('account', { accountId: wanted, name: found.name });
+  return found;
+}
+
+/**
+ * The account to address, or a refusal naming what to do about it.
+ *
+ * Never guesses. A key that reaches an evaluation and two funded accounts has no "obvious"
+ * one, and quietly picking the first would put an order on whichever the venue happened to
+ * list first.
+ */
+function requireAccountId() {
+  if (accountId == null) {
+    throw new Error('No ProjectX account is selected — choose one under Settings → Broker connection.');
+  }
+  return accountId;
+}
+
+/** Every position the chosen account holds, including ones this app never opened. */
+export async function projectXPositions() {
+  const json = await authedPost('/api/Position/searchOpen', { accountId: requireAccountId() });
+  return json?.positions ?? [];
+}
+
+/** Every resting order the chosen account holds, on any contract. */
+export async function projectXOpenOrders() {
+  const json = await authedPost('/api/Order/searchOpen', { accountId: requireAccountId() });
+  return json?.orders ?? [];
+}
+
+// ── Trading ─────────────────────────────────────────────────────────────────
+
+/** The gateway's own order kinds. Numbers on the wire, names in this app. */
+export const ORDER_TYPE = { limit: 1, market: 2, stop: 4, trailingStop: 5, joinBid: 6, joinAsk: 7 };
+/** Their sides, in the venue's spelling: a bid buys, an ask sells. */
+export const ORDER_SIDE = { buy: 0, sell: 1 };
+
+/**
+ * What a refused instruction means, in words that say what to do about it.
+ *
+ * Separate from {@link authedPost}'s generic handling because an order's refusal is the one
+ * a person is standing in front of, waiting. `6` is the interesting one: it is not a bad
+ * order, it is an account that is not permitted to do this — a live account on an endpoint
+ * the gateway only serves to simulated ones, or an account following another.
+ */
+function orderFailure(json, what) {
+  if (json?.errorMessage) return new Error(`ProjectX refused to ${what} — ${json.errorMessage}`);
+  if (json?.errorCode === 6) {
+    return new Error(`ProjectX will not ${what} on this account. The gateway serves this only to `
+      + 'simulated accounts that are not following another one.');
+  }
+  return new Error(`ProjectX refused to ${what} (errorCode ${json?.errorCode ?? 'unknown'}).`);
+}
+
+/** POST an instruction, and read the venue's verdict rather than the HTTP status. */
+async function instruct(pathname, body, what) {
+  const startedAt = Date.now();
+  await ensureSession();
+  const res = await fetch(`${creds.base}${pathname}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/plain', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => null);
+  wire('order', { path: pathname, status: res.status, ms: Date.now() - startedAt, body, success: json?.success ?? null, errorCode: json?.errorCode ?? null });
+  /* Deliberately NOT retried on a 401, unlike a read. A timed-out or rejected order may
+   * still have been delivered, and sending it again is how an account ends up with two
+   * positions where somebody asked for one. */
+  if (!res.ok || json?.success === false) throw orderFailure(json, what);
+  return json;
+}
+
+/**
+ * Place an order.
+ *
+ * `size` is whole contracts, `side` is `'buy'` or `'sell'`, `type` one of {@link ORDER_TYPE}'s
+ * names. Brackets are given in TICKS from the fill rather than in prices, which is the
+ * gateway's own shape — and note its restriction: brackets here cannot be combined with
+ * position brackets, and the account needs Auto OCO enabled for them to work at all.
+ */
+export async function projectXPlaceOrder({ contractId, side, type, size, limitPrice, stopPrice, trailPrice, customTag, stopLossTicks, takeProfitTicks }) {
+  const typeCode = ORDER_TYPE[type];
+  const sideCode = ORDER_SIDE[side];
+  if (typeCode == null) throw new Error(`Unknown ProjectX order type "${type}". Known: ${Object.keys(ORDER_TYPE).join(', ')}.`);
+  if (sideCode == null) throw new Error(`Unknown ProjectX order side "${side}". Known: ${Object.keys(ORDER_SIDE).join(', ')}.`);
+  if (!Number.isInteger(size) || size < 1) throw new Error('A ProjectX order size must be a whole number of contracts, at least one.');
+
+  const json = await instruct('/api/Order/place', {
+    accountId: requireAccountId(),
+    contractId,
+    type: typeCode,
+    side: sideCode,
+    size,
+    ...(limitPrice != null ? { limitPrice } : {}),
+    ...(stopPrice != null ? { stopPrice } : {}),
+    ...(trailPrice != null ? { trailPrice } : {}),
+    ...(customTag != null ? { customTag } : {}),
+    ...(stopLossTicks != null ? { stopLossBracket: { ticks: stopLossTicks, type: ORDER_TYPE.stop } } : {}),
+    ...(takeProfitTicks != null ? { takeProfitBracket: { ticks: takeProfitTicks, type: ORDER_TYPE.limit } } : {}),
+  }, 'place the order');
+  return { orderId: json?.orderId ?? null };
+}
+
+/** Change a resting order. Only the fields given are sent. */
+export async function projectXModifyOrder(orderId, { size, limitPrice, stopPrice, trailPrice } = {}) {
+  await instruct('/api/Order/modify', {
+    accountId: requireAccountId(),
+    orderId,
+    ...(size != null ? { size } : {}),
+    ...(limitPrice != null ? { limitPrice } : {}),
+    ...(stopPrice != null ? { stopPrice } : {}),
+    ...(trailPrice != null ? { trailPrice } : {}),
+  }, 'change the order');
+}
+
+export async function projectXCancelOrder(orderId) {
+  await instruct('/api/Order/cancel', { accountId: requireAccountId(), orderId }, 'cancel the order');
+}
+
+/**
+ * Close a position at market, whole or in part.
+ *
+ * Two endpoints rather than one with an optional size, because that is how the gateway
+ * splits them — and the distinction matters: a partial close with a size equal to the whole
+ * position is not the same call as a full close, and only one of them is guaranteed to
+ * leave nothing behind.
+ */
+export async function projectXClosePosition(contractId, size = null) {
+  const accountId = requireAccountId();
+  if (size == null) {
+    await instruct('/api/Position/closeContract', { accountId, contractId }, 'close the position');
+    return;
+  }
+  if (!Number.isInteger(size) || size < 1) throw new Error('A partial close needs a whole number of contracts, at least one.');
+  await instruct('/api/Position/partialCloseContract', { accountId, contractId, size }, 'close part of the position');
+}
+
 /**
  * Contracts matching `searchText`.
  *
@@ -210,6 +392,19 @@ export async function projectXAccounts(onlyActive = true) {
  */
 export async function projectXContracts(searchText) {
   const json = await authedPost('/api/Contract/search', { live: creds?.live === true, searchText });
+  return json?.contracts ?? [];
+}
+
+/**
+ * Every contract the account can reach, with no search text.
+ *
+ * What a symbol index is built from — {@link projectXContracts} needs something to search
+ * FOR, which is no use to a picker that has to show what exists before anybody types. The
+ * only endpoint here this app has never seen answer on a real account, so callers are
+ * expected to degrade rather than depend on it.
+ */
+export async function projectXAvailableContracts() {
+  const json = await authedPost('/api/Contract/available', { live: creds?.live === true });
   return json?.contracts ?? [];
 }
 
@@ -225,6 +420,17 @@ export async function projectXContracts(searchText) {
  * aggregator would have to special-case a calendar it has no other use for.
  */
 const TF_TO_UNIT = {
+  /*
+   * The second-resolution timeframes reach back FOURTEEN DAYS and no further.
+   *
+   * Measured, not documented: asking for 50,000 half-minute bars returns 27,103 of them
+   * covering exactly 14.0 days, and widening the request window by half again changes
+   * nothing. That is the gateway's own retention for this unit, not a paging limit at this
+   * end — so a backtest on seconds has a fortnight of history to work with, and anything
+   * that needs more has to run on minutes.
+   */
+  '15S': { unit: 1, unitNumber: 15, ms: 15_000 },
+  '30S': { unit: 1, unitNumber: 30, ms: 30_000 },
   1: { unit: 2, unitNumber: 1, ms: 60_000 },
   5: { unit: 2, unitNumber: 5, ms: 5 * 60_000 },
   15: { unit: 2, unitNumber: 15, ms: 15 * 60_000 },
@@ -264,34 +470,91 @@ function rowToBar(row) {
   };
 }
 
+/** How many pages one call may walk back through. A guard against a window so wide, or a
+ *  timeframe so fine, that the loop would run for minutes against a rate-limited endpoint. */
+const MAX_PAGES = 20;
+
 /**
- * Historical bars for `contractId`/`timeframe`.
+ * How much wider than the bars themselves an unbounded window is opened.
  *
- * `includePartialBar` is on: the newest bar is the one still forming, which is what the
- * chart treats its last candle as. Leaving it off would hand back a chart that is always
- * one bar behind the market and looks stalled.
+ * The index futures trade roughly 23 hours a day, five days a week — about two thirds of
+ * the calendar. Three halves of it is the smallest slack that reliably covers the nights
+ * and weekends inside a request, without reaching so far back that a short-history
+ * contract spends pages on empty time.
  */
-export async function projectXBars(contractId, timeframe, { from, to, limit } = {}) {
-  const { unit, unitNumber, ms } = unitOf(timeframe);
-  const endTime = new Date(to ?? Date.now()).toISOString();
-  const want = Math.min(limit ?? 500, MAX_BARS);
-  /* No `from` means "the most recent `want` bars", which this API cannot ask for directly —
-   * it only takes a window. The window is computed from the bar span instead. */
-  const startTime = new Date(from ?? (to ?? Date.now()) - want * ms).toISOString();
+const CLOSED_MARKET_SLACK = 1.5;
+
+/** One window's worth of bars, capped by the gateway's own limit. */
+async function barsPage(contractId, { unit, unitNumber }, startTime, endTime, limit) {
   const json = await authedPost('/api/History/retrieveBars', {
     contractId,
     live: creds?.live === true,
-    startTime,
-    endTime,
+    startTime: new Date(startTime).toISOString(),
+    endTime: new Date(endTime).toISOString(),
     unit,
     unitNumber,
-    limit: want,
+    limit: Math.min(limit, MAX_BARS),
     includePartialBar: true,
   });
   const bars = (json?.bars ?? []).map(rowToBar);
   /* Their newest-first ordering is not promised anywhere, so it is not relied on. */
   bars.sort((a, b) => a.time - b.time);
   return bars;
+}
+
+/**
+ * Historical bars for `contractId`/`timeframe`.
+ *
+ * `includePartialBar` is on: the newest bar is the one still forming, which is what the
+ * chart treats its last candle as. Leaving it off would hand back a chart that is always one
+ * bar behind the market and looks stalled.
+ *
+ * Paged BACKWARD past the gateway's 20,000-bar ceiling, which is a server limit and not a
+ * setting — asking for more in one call does not raise it. The ceiling only started to bite
+ * with the second-resolution timeframes: 20,000 minute bars are a fortnight, 20,000
+ * fifteen-second bars are three and a half days.
+ */
+export async function projectXBars(contractId, timeframe, { from, to, limit } = {}) {
+  const spec = unitOf(timeframe);
+  const end = to ?? Date.now();
+  const want = limit ?? 500;
+
+  /* A bounded window is walked from its own end; an unbounded one is "the most recent
+   * `want` bars", which this API cannot ask for directly — it only takes a window, so one
+   * is computed from the bar span.
+   *
+   * Widened by {@link CLOSED_MARKET_SLACK}, because bar span times bar count is CALENDAR
+   * time and a futures market is shut for a good deal of it. Measured: 50,000 half-minute
+   * bars asked over their own 17.4 days came back 27,103 — the nights and the weekends in
+   * between. The window is only an outer bound; the paging stops when the venue runs out,
+   * so asking for more time than is needed costs nothing. */
+  const floor = from ?? end - want * spec.ms * CLOSED_MARKET_SLACK;
+
+  let out = [];
+  let cursor = end;
+  for (let page = 0; page < MAX_PAGES && out.length < want && cursor > floor; page += 1) {
+    const bars = await barsPage(contractId, spec, floor, cursor, want - out.length);
+    if (!bars.length) break;
+    /* Prepended: each page is OLDER than the last, so the answer is built from the back. */
+    out = bars.concat(out);
+    const earliest = bars[0].time;
+    /* No backward progress means the venue is answering the same window again — stop
+     * rather than ask for it a third time. */
+    if (earliest >= cursor) break;
+    cursor = earliest - 1;
+    if (bars.length < MAX_BARS) break; // the window was served whole; there is no more
+  }
+
+  /* Pages can overlap at their seams — the gateway is inclusive at both ends — so identical
+   * open times are collapsed rather than handed on as duplicate candles. */
+  const seen = new Set();
+  const unique = [];
+  for (const bar of out) {
+    if (seen.has(bar.time)) continue;
+    seen.add(bar.time);
+    unique.push(bar);
+  }
+  return unique.length > want ? unique.slice(unique.length - want) : unique;
 }
 
 // ── Realtime ────────────────────────────────────────────────────────────────

@@ -205,6 +205,14 @@ class Surface {
                 // marks the active entry (hover stays the lighter wash).
                 li.dataset.checked = '1';
             }
+            if (item.accent) {
+                /* Set as a variable rather than painted here: the stripe is drawn in CSS
+                 * beside the row, so the caller supplies the colour and the stylesheet keeps
+                 * the geometry. Rows without an accent get neither the property nor the
+                 * stripe, so nothing shifts in a menu that uses none. */
+                li.dataset.accent = '1';
+                li.style.setProperty('--vela-menu-accent', item.accent);
+            }
             if (item.icon) li.appendChild(iconEl(item.icon, doc));
             const label = doc.createElement('span');
             label.className = 'vela-menu-label';

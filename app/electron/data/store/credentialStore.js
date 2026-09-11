@@ -64,6 +64,20 @@ async function readFileRecord(dir) {
  * The identifier comes back because it is what the person recognises the account by, and it
  * is not what protects it. The API key and the password never do.
  */
+/**
+ * Whatever a provider stored beyond the shared fields, kept in the clear.
+ *
+ * Not everything a connection needs is a secret. ProjectX is a gateway several firms sit
+ * behind, each on its own host, so which host to talk to has to be stored with the key —
+ * and a hostname is configuration, not something to encrypt. Anything a caller passes
+ * beyond the known fields rides along here rather than being silently dropped.
+ */
+function extrasOf(entry) {
+  // The named fields are being EXCLUDED, not read — everything else is the extra.
+  const { identifier, env, secret, savedAt, ...extra } = entry;
+  return extra;
+}
+
 export async function readPublic(dir, provider) {
   const record = await readFileRecord(dir);
   const entry = record?.brokers?.[provider];
@@ -74,6 +88,7 @@ export async function readPublic(dir, provider) {
     env: entry.env ?? 'demo',
     hasSecret: typeof entry.secret === 'string' && entry.secret.length > 0,
     savedAt: entry.savedAt ?? null,
+    ...extrasOf(entry),
   };
 }
 
@@ -96,7 +111,7 @@ export async function readSecret(dir, provider) {
   }
   try {
     const secret = JSON.parse(decrypted);
-    return { identifier: entry.identifier ?? null, env: entry.env ?? 'demo', ...secret };
+    return { identifier: entry.identifier ?? null, env: entry.env ?? 'demo', ...extrasOf(entry), ...secret };
   } catch {
     return null;
   }
@@ -107,9 +122,10 @@ export async function readSecret(dir, provider) {
  *
  * `identifier` and `env` are kept in the clear because a screen has to show them; the API key
  * and the password or secret key are encrypted together as one blob, so neither can be read without the
- * OS key.
+ * OS key. Anything else a provider passes is stored in the clear alongside them — see
+ * {@link extrasOf} — rather than being dropped on the floor.
  */
-export async function saveCredentials(dir, provider, { identifier = null, env, apiKey, password, secretKey }) {
+export async function saveCredentials(dir, provider, { identifier = null, env, apiKey, password, secretKey, ...extra }) {
   if (!encryptionAvailable()) {
     throw new Error(
       'This machine cannot encrypt stored secrets, so Midorii will not write them to disk. '
@@ -122,6 +138,7 @@ export async function saveCredentials(dir, provider, { identifier = null, env, a
   if (secretKey != null) privatePart.secretKey = secretKey;
   const blob = safeStorage.encryptString(JSON.stringify(privatePart)).toString('base64');
   record.brokers[provider] = {
+    ...extra,
     identifier,
     env: env === 'live' ? 'live' : 'demo',
     secret: blob,

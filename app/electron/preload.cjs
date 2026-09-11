@@ -225,7 +225,20 @@ contextBridge.exposeInMainWorld('midori', {
     },
     environment: () => ipcRenderer.invoke('projectx:environment'),
     accounts: (onlyActive) => ipcRenderer.invoke('projectx:accounts', onlyActive),
+    /* Which account is traded. Every ProjectX order carries an id, and a key routinely
+       reaches an evaluation plus the funded accounts from it — so one has to be chosen. */
+    account: () => ipcRenderer.invoke('projectx:account'),
+    selectAccount: (id) => ipcRenderer.invoke('projectx:select-account', id),
+    positions: () => ipcRenderer.invoke('projectx:positions'),
+    openOrders: () => ipcRenderer.invoke('projectx:open-orders'),
+    /* Trading. A ProjectX stop is a resting ORDER rather than an attribute of the
+       position — see app/renderer/trading/ProjectXController.ts for what follows from it. */
+    placeOrder: (spec) => ipcRenderer.invoke('projectx:place-order', spec),
+    modifyOrder: (orderId, changes) => ipcRenderer.invoke('projectx:modify-order', { orderId, ...changes }),
+    cancelOrder: (orderId) => ipcRenderer.invoke('projectx:cancel-order', orderId),
+    closePosition: (contractId, size) => ipcRenderer.invoke('projectx:close-position', { contractId, size }),
     contracts: (searchText) => ipcRenderer.invoke('projectx:contracts', searchText),
+    availableContracts: () => ipcRenderer.invoke('projectx:available-contracts'),
     bars: (query) => ipcRenderer.invoke('projectx:bars', query),
     subscribe: (query) => ipcRenderer.invoke('projectx:subscribe', query),
     unsubscribe: (subscriptionId) => ipcRenderer.invoke('projectx:unsubscribe', subscriptionId),

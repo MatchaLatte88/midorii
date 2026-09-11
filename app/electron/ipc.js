@@ -21,8 +21,10 @@ import {
   configureCapital,
 } from './data/capital.js';
 import {
-  configureProjectX, projectXAccounts, projectXBars, projectXConfigured, projectXContracts,
-  projectXEnvironment, projectXProbe, projectXSubscribe, projectXSubscribeQuotes,
+  configureProjectX, projectXAccount, projectXAccounts, projectXAvailableContracts, projectXBars,
+  projectXConfigured, projectXContracts, projectXEnvironment, projectXOpenOrders, projectXPositions,
+  projectXCancelOrder, projectXClosePosition, projectXModifyOrder, projectXPlaceOrder,
+  projectXProbe, projectXSelectAccount, projectXSubscribe, projectXSubscribeQuotes,
 } from './data/projectx.js';
 import {
   binanceSpotAccount, binanceSpotCancelAll, binanceSpotCancelOrder, binanceSpotClose,
@@ -230,9 +232,23 @@ export async function applyStoredBybitCredentials() {
  */
 export async function applyStoredProjectXCredentials() {
   const stored = await readSecret(credentialsDir(), 'projectx').catch(() => null);
-  if (stored?.userName && stored?.apiKey) {
-    configureProjectX(stored);
-    return { source: 'stored', live: stored.live === true };
+  /* Mapped back out of the store's own vocabulary: it keeps a login name under `identifier`
+   * and a real-money flag under `env`, which is exactly what ProjectX's username and live
+   * book are. Only the gateway host has no counterpart there, and rides along as an extra. */
+  if (stored?.identifier && stored?.apiKey) {
+    configureProjectX({
+      userName: stored.identifier,
+      apiKey: stored.apiKey,
+      base: stored.base,
+      hub: stored.hub,
+      live: stored.env === 'live',
+      /* Restored rather than re-chosen: which account is traded is a decision somebody made
+       * once, and asking again on every start would make it easy to answer carelessly. It is
+       * not verified here — that would put a network call in the startup path — so a stale id
+       * surfaces at the first order, which is where the venue would refuse it anyway. */
+      accountId: stored.accountId,
+    });
+    return { source: 'stored', live: stored.env === 'live', accountId: stored.accountId ?? null };
   }
   configureProjectX({
     userName: process.env.PROJECTX_USERNAME,
@@ -244,7 +260,30 @@ export async function applyStoredProjectXCredentials() {
   return {
     source: process.env.PROJECTX_USERNAME && process.env.PROJECTX_API_KEY ? 'env' : 'none',
     live: process.env.PROJECTX_LIVE === 'true',
+    accountId: null,
   };
+}
+
+/**
+ * Keep the chosen account with the credentials it belongs to.
+ *
+ * Written back into the same record rather than into a setting of its own: an account id
+ * only means anything under the key that reaches it, and storing the two apart would let
+ * them drift — a new key, and the old account id still sitting there pointing at somebody
+ * else's book. Silently does nothing where nothing is stored, which is the `.env.local`
+ * case: the choice then lasts as long as the session, and that is the honest scope for it.
+ */
+async function rememberProjectXAccount(id) {
+  const stored = await readSecret(credentialsDir(), 'projectx').catch(() => null);
+  if (!stored?.identifier || !stored?.apiKey) return;
+  await saveCredentials(credentialsDir(), 'projectx', {
+    identifier: stored.identifier,
+    env: stored.env,
+    apiKey: stored.apiKey,
+    ...(stored.base ? { base: stored.base } : {}),
+    ...(stored.hub ? { hub: stored.hub } : {}),
+    accountId: id,
+  });
 }
 
 /**
@@ -273,6 +312,21 @@ function requireString(value, name) {
     throw new Error(`${name} is required`);
   }
   return value.trim();
+}
+
+/**
+ * A number that is really one.
+ *
+ * Checked rather than coerced: `Number(undefined)` is NaN and `Number(null)` is zero, and an
+ * order id of zero is a request to act on whatever the venue has at that id. A field that
+ * did not arrive has to be refused here, at the boundary, not turned into a plausible value.
+ */
+function requireNumber(value, name) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${name} is required`);
+  }
+  return parsed;
 }
 
 /**
@@ -1075,7 +1129,53 @@ export function registerIpc() {
 
   ipcMain.handle('projectx:accounts', (_e, onlyActive) => projectXAccounts(onlyActive !== false));
 
+  /* Which account orders go to. Unlike Capital.com there is no venue-side "preferred"
+   * account — every call carries the id — so the choice is stored here and kept with the
+   * credentials, and survives a restart. */
+  ipcMain.handle('projectx:account', () => projectXAccount());
+
+  ipcMain.handle('projectx:select-account', async (_e, id) => {
+    const account = await projectXSelectAccount(id);
+    await rememberProjectXAccount(account.id);
+    return account;
+  });
+
+  ipcMain.handle('projectx:positions', () => projectXPositions());
+
+  ipcMain.handle('projectx:open-orders', () => projectXOpenOrders());
+
+  /* ─── ProjectX trading ────────────────────────────────────────────────
+   *
+   * The channels that move money. Everything crossing here is checked rather than
+   * forwarded: the renderer builds these from a chart gesture, and a field that arrived
+   * as undefined must be refused here rather than sent as a price of zero.
+   */
+  ipcMain.handle('projectx:place-order', (_e, spec = {}) => projectXPlaceOrder({
+    contractId: requireString(spec.contractId, 'contractId'),
+    side: requireString(spec.side, 'side'),
+    type: requireString(spec.type, 'type'),
+    size: spec.size,
+    limitPrice: spec.limitPrice,
+    stopPrice: spec.stopPrice,
+    trailPrice: spec.trailPrice,
+    customTag: spec.customTag,
+    stopLossTicks: spec.stopLossTicks,
+    takeProfitTicks: spec.takeProfitTicks,
+  }));
+
+  ipcMain.handle('projectx:modify-order', (_e, { orderId, ...changes } = {}) => (
+    projectXModifyOrder(requireNumber(orderId, 'orderId'), changes)
+  ));
+
+  ipcMain.handle('projectx:cancel-order', (_e, orderId) => projectXCancelOrder(requireNumber(orderId, 'orderId')));
+
+  ipcMain.handle('projectx:close-position', (_e, { contractId, size } = {}) => (
+    projectXClosePosition(requireString(contractId, 'contractId'), size ?? null)
+  ));
+
   ipcMain.handle('projectx:contracts', (_e, searchText) => projectXContracts(requireString(searchText, 'searchText')));
+
+  ipcMain.handle('projectx:available-contracts', () => projectXAvailableContracts());
 
   ipcMain.handle('projectx:bars', (_e, { contractId, timeframe, from, to, limit } = {}) => (
     projectXBars(requireString(contractId, 'contractId'), requireString(timeframe, 'timeframe'), { from, to, limit })
@@ -1388,7 +1488,18 @@ export function registerIpc() {
       live: live === true,
     };
     const accounts = await projectXProbe(creds);
-    await saveCredentials(credentialsDir(), 'projectx', creds);
+    /* Written in the store's vocabulary rather than this module's — `identifier` for the
+     * login name and `env` for the real-money flag are the fields it keeps in the clear, and
+     * a screen reads them back under those names. Passing `userName` and `live` instead
+     * would store neither: they are not fields it knows, and the connection would come back
+     * from disk with no username at all. */
+    await saveCredentials(credentialsDir(), 'projectx', {
+      identifier: creds.userName,
+      env: creds.live ? 'live' : 'demo',
+      apiKey: creds.apiKey,
+      ...(creds.base ? { base: creds.base } : {}),
+      ...(creds.hub ? { hub: creds.hub } : {}),
+    });
     await applyStoredProjectXCredentials();
     return { accounts, live: creds.live };
   });

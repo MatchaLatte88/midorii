@@ -35,6 +35,16 @@ export const MENU_CSS = `
 }
 .vela-menu-item[data-highlighted] { background: var(--vela-hover); }
 .vela-menu-item[data-disabled] { opacity: 0.4; cursor: default; }
+/* A source stripe at the leading edge — see MenuItemDescriptor.accent. Drawn inside the
+   row's own padding so an accented row keeps the same label position as an unaccented one;
+   a menu that uses no accents is untouched. */
+.vela-menu-item[data-accent] { position: relative; }
+.vela-menu-item[data-accent]::before {
+    content: '';
+    position: absolute; left: 2px; top: 5px; bottom: 5px;
+    width: 3px; border-radius: 2px;
+    background: var(--vela-menu-accent, transparent);
+}
 .vela-menu-item .vela-icon { width: 16px; height: 16px; font-size: 16px; justify-content: center; color: var(--vela-fg-muted); }
 .vela-menu-item .vela-menu-label { flex: 1 1 auto; }
 .vela-menu-item .vela-menu-hint { color: var(--vela-fg-faint); font-size: var(--vela-font-size-sm); }

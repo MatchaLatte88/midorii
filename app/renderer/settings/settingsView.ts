@@ -18,6 +18,7 @@ import { loadQuoteDisplay, saveQuoteDisplay, type QuoteDisplay } from '../quotes
 import type {
     MidoriBinanceSpotCredentialStatus, MidoriBybitAccountSummary, MidoriBybitCredentialStatus,
     MidoriCapitalAccountSummary, MidoriCapitalCredentialStatus,
+    MidoriProjectXAccount, MidoriProjectXCredentialStatus,
 } from '../midori';
 import { STARTUP_TABS, loadPrefs, savePrefs, type AppPrefs, type StartupTab } from './prefs';
 
@@ -245,6 +246,8 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
     const spotDraft = { apiKey: '', secretKey: '' };
     let bybitBroker: MidoriBybitCredentialStatus | null = null;
     const bybitDraft = { apiKey: '', secretKey: '', env: 'demo' as 'demo' | 'live' };
+    let projectxBroker: MidoriProjectXCredentialStatus | null = null;
+    const projectxDraft = { userName: '', apiKey: '', base: '', live: false };
     /**
      * The paper-account form, which is the one thing here that is not applied as it is
      * typed. Kept across a pane switch rather than thrown away: it is never applied without
@@ -1062,6 +1065,247 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         }
         bybitPanel.append(bybitActions, bybitFacts);
         inner.append(bybitPanel);
+
+        /* ProjectX is a gateway rather than a venue: several prop firms sit behind it, each on
+         * its own host, and one firm's key is not recognised by another's. So the host is a
+         * field here rather than a constant — blank means TopstepX, which is the common case.
+         *
+         * `live` is NOT the demo/real choice the other two cards offer, and is deliberately
+         * worded so nobody reads it as one. The data is real either way; what it selects is
+         * which BOOK the key reads. An evaluation account is refused outright on the live
+         * side, which shows up as an empty symbol list rather than as an error. */
+        const pxStatus = doc.createElement('p');
+        pxStatus.className = 'midorii-settings-status';
+        const pxFacts = doc.createElement('div');
+        pxFacts.className = 'midorii-settings-note';
+        const sayPx = (text: string, error = false): void => {
+            pxStatus.textContent = text;
+            if (error) pxStatus.dataset.error = '1';
+            else delete pxStatus.dataset.error;
+        };
+        if (projectxBroker?.configured && projectxBroker.identifier) {
+            sayPx(`Connected as ${projectxBroker.identifier} · ${projectxBroker.env === 'live' ? 'LIVE book' : 'simulated'}`);
+        } else if (projectxBroker?.configured) {
+            /* A record with no username is one the main process refuses to connect with, so
+             * saying "connected as unknown" would be a plain lie — and the kind that is only
+             * found out later, by a chart that will not load. Named as the broken thing it
+             * is, with the one action that fixes it. */
+            sayPx('A stored connection is missing its username. Fill the form in and save it again.', true);
+        } else if (projectxBroker?.envPresent) {
+            sayPx('Using ProjectX credentials from .env.local. Saving here replaces them.');
+        } else {
+            sayPx('Not connected.');
+        }
+
+        const pxField = (label: string, key: 'userName' | 'apiKey' | 'base', placeholder: string, secret = false): HTMLElement => {
+            const control = buildFieldControl({
+                kind: 'text',
+                value: projectxDraft[key],
+                fill: true,
+                placeholder,
+                onChange: (v) => { projectxDraft[key] = v; },
+            });
+            if (!secret) return fieldRow({ label, control: control.el, controlWidth: FIELD_WIDTH });
+            const input = control.el.querySelector('input');
+            if (input) input.type = 'password';
+            const wrap = doc.createElement('div');
+            wrap.className = 'midorii-settings-secret';
+            const reveal = doc.createElement('button');
+            reveal.type = 'button';
+            reveal.className = 'midorii-settings-reveal';
+            const paintReveal = (): void => {
+                const shown = input?.type === 'text';
+                reveal.replaceChildren(iconEl(shown ? 'eye-off' : 'eye', doc));
+                reveal.title = `${shown ? 'Hide' : 'Show'} ${label.toLowerCase()}`;
+                reveal.setAttribute('aria-label', reveal.title);
+            };
+            reveal.onclick = () => {
+                if (!input) return;
+                input.type = input.type === 'password' ? 'text' : 'password';
+                paintReveal();
+            };
+            paintReveal();
+            wrap.append(control.el, reveal);
+            return fieldRow({ label, control: wrap, controlWidth: FIELD_WIDTH });
+        };
+
+        const pxSave = button('Connect and save', 'primary');
+        const pxTest = button('Test only');
+        const pxForget = button('Forget', 'danger');
+        const collectPx = (): { userName: string; apiKey: string; base?: string; live: boolean } | null => {
+            const userName = projectxDraft.userName.trim();
+            const apiKey = projectxDraft.apiKey.trim();
+            if (!userName || !apiKey) {
+                sayPx('Fill in the platform username and the API key first.', true);
+                return null;
+            }
+            const base = projectxDraft.base.trim();
+            return { userName, apiKey, ...(base ? { base } : {}), live: projectxDraft.live };
+        };
+        const pxBusy = (on: boolean): void => {
+            pxSave.disabled = on;
+            pxTest.disabled = on;
+        };
+        const listPxAccounts = (found: MidoriProjectXAccount[]): void => {
+            pxFacts.replaceChildren();
+            for (const a of found) {
+                const line = doc.createElement('div');
+                const money = a.balance == null
+                    ? ''
+                    : ` · ${a.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+                /* `simulated` says which book the account is on, and it is the fact worth
+                 * reading back: every account on an evaluation is one, and somebody expecting
+                 * a funded one should see that plainly rather than discover it on a fill. */
+                const book = a.simulated === false ? 'live' : 'simulated';
+                line.textContent = `${a.canTrade ? '●' : '○'} ${a.name} (${a.id})${money} · ${book}`;
+                pxFacts.appendChild(line);
+            }
+        };
+        pxTest.onclick = () => {
+            const creds = collectPx();
+            if (!creds) return;
+            pxBusy(true);
+            sayPx('Connecting to ProjectX…');
+            void window.midori.projectx.credentials.test(creds)
+                .then((found) => {
+                    listPxAccounts(found);
+                    sayPx(`Works — ${found.length} account${found.length === 1 ? '' : 's'} reachable. Nothing was saved.`);
+                })
+                .catch((err: unknown) => sayPx(err instanceof Error ? err.message : String(err), true))
+                .finally(() => pxBusy(false));
+        };
+        pxSave.onclick = () => {
+            const creds = collectPx();
+            if (!creds) return;
+            pxBusy(true);
+            sayPx('Connecting to ProjectX…');
+            void window.midori.projectx.credentials.save(creds)
+                .then((result) => {
+                    listPxAccounts(result.accounts);
+                    // Out of the form the moment it is safely stored.
+                    projectxDraft.apiKey = '';
+                    sayPx(`Saved and connected · ${result.live ? 'LIVE book' : 'simulated'}`);
+                    refresh();
+                })
+                .catch((err: unknown) => sayPx(err instanceof Error ? err.message : String(err), true))
+                .finally(() => pxBusy(false));
+        };
+        pxForget.onclick = () => {
+            if (pxForget.dataset.armed !== '1') {
+                pxForget.dataset.armed = '1';
+                pxForget.textContent = 'Forget — click again';
+                return;
+            }
+            void window.midori.projectx.credentials.clear()
+                .then(() => { sayPx('Forgotten.'); refresh(); })
+                .catch((err: unknown) => sayPx(err instanceof Error ? err.message : String(err), true));
+        };
+        pxForget.onmouseleave = () => {
+            pxForget.dataset.armed = '0';
+            pxForget.textContent = 'Forget';
+        };
+
+        const pxRows: HTMLElement[] = [
+            fieldSection('ProjectX (futures)'),
+            note('Generate the key in your platform — TopstepX, The Futures Desk, or whichever firm '
+                + 'you trade through. The API is a paid add-on; without it the key authenticates and is '
+                + 'then refused. The username is the one you SIGN IN with, not the email on the account. '
+                + 'Contracts chart the venue’s way (NQU6), and the product root (NQ) loads whichever '
+                + 'expiry is currently active.'),
+            pxField('Username', 'userName', 'your platform sign-in name'),
+            pxField('API key', 'apiKey', 'the key generated in the platform', true),
+            pxField('Gateway host', 'base', 'blank for TopstepX'),
+            selectRow('Book', [
+                { value: 'simulated', label: 'Simulated — evaluation and practice accounts' },
+                { value: 'live', label: 'Live — a funded account, real money' },
+            ], projectxDraft.live ? 'live' : 'simulated', (v) => { projectxDraft.live = v === 'live'; }, FIELD_WIDTH),
+        ];
+        if (projectxBroker && !projectxBroker.encryptionAvailable) {
+            const warn = doc.createElement('p');
+            warn.className = 'midorii-settings-warn';
+            warn.textContent = 'This machine has no OS keychain available, so Midorii will not store the key. '
+                + 'Use PROJECTX_USERNAME and PROJECTX_API_KEY in .env.local instead.';
+            pxRows.push(warn);
+        }
+        const pxPanel = card(...pxRows);
+        const pxActions = doc.createElement('div');
+        pxActions.className = 'midorii-settings-actions';
+        pxActions.append(pxSave, pxTest, pxStatus);
+        if (projectxBroker?.configured) {
+            const end = doc.createElement('div');
+            end.className = 'midorii-settings-actions-end';
+            end.append(pxForget);
+            pxActions.appendChild(end);
+        }
+        pxPanel.append(pxActions, pxFacts);
+        inner.append(pxPanel);
+
+        /* Which account is traded — its own row, below the connection rather than inside it,
+         * because it is a different kind of decision. The credentials say WHO you are; this
+         * says whose money moves. A key here reaches an evaluation and the funded accounts
+         * that came out of it, all of which the gateway reports as `simulated` because the
+         * firm settles them that way — so nothing in the data distinguishes the one that
+         * matters, and the name is the only honest signal to show. */
+        if (projectxBroker?.configured && projectxBroker.identifier) {
+            const accountNote = doc.createElement('div');
+            accountNote.className = 'midorii-settings-note';
+            const accountRows: HTMLElement[] = [fieldSection('ProjectX account')];
+            const holder = doc.createElement('div');
+            accountRows.push(note('Every ProjectX order carries the account it is for, so one has to be '
+                + 'chosen — nothing is picked by default. The gateway reports evaluation and funded '
+                + 'accounts alike as simulated, because that is how the firm settles them, so check the '
+                + 'name rather than the label before you trade.'));
+            accountRows.push(holder);
+            accountRows.push(accountNote);
+            const accountPanel = card(...accountRows);
+            inner.append(accountPanel);
+
+            /* Painted when both answers land: the list of accounts, and which one is current.
+             * Drawn from the venue each time this pane opens rather than remembered, because
+             * an evaluation that ended is an account that must stop being offered. */
+            void Promise.all([
+                window.midori.projectx.accounts(true),
+                window.midori.projectx.account(),
+            ]).then(([found, current]) => {
+                holder.replaceChildren();
+                if (!found.length) {
+                    accountNote.textContent = 'This key reaches no active trading accounts.';
+                    return;
+                }
+                const options = found.map((a) => ({
+                    value: String(a.id),
+                    label: `${a.name} · ${a.balance == null ? 'no balance' : a.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                        + `${a.canTrade === false ? ' · cannot trade' : ''}`,
+                }));
+                const chosen = current.accountId != null ? String(current.accountId) : '';
+                if (!chosen) {
+                    /* An explicit empty row rather than a silent first-item default: a select
+                     * that shows an account nobody picked reads as a decision that was made. */
+                    options.unshift({ value: '', label: 'None — pick the account to trade' });
+                }
+                holder.append(selectRow('Trading account', options, chosen, (v) => {
+                    if (!v) return;
+                    accountNote.textContent = 'Switching…';
+                    delete accountNote.dataset.error;
+                    void window.midori.projectx.selectAccount(Number(v))
+                        .then((account) => {
+                            accountNote.textContent = `Trading ${account.name}`
+                                + `${account.balance == null ? '' : ` · ${account.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}`;
+                        })
+                        .catch((err: unknown) => {
+                            accountNote.textContent = err instanceof Error ? err.message : String(err);
+                            accountNote.dataset.error = '1';
+                        });
+                }, FIELD_WIDTH));
+                const active = found.find((a) => String(a.id) === chosen);
+                accountNote.textContent = active
+                    ? `Trading ${active.name}`
+                    : 'No account chosen — orders will be refused until one is.';
+            }).catch((err: unknown) => {
+                accountNote.textContent = err instanceof Error ? err.message : String(err);
+                accountNote.dataset.error = '1';
+            });
+        }
     }
 
     function paintTrading(): void {
@@ -1336,6 +1580,12 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
                 if (active === 'brokers') paint();
             })
             .catch((err: unknown) => console.error('[midorii] could not read the Bybit credential status', err));
+        void window.midori.projectx.credentials.status()
+            .then((next) => {
+                projectxBroker = next;
+                if (active === 'brokers') paint();
+            })
+            .catch((err: unknown) => console.error('[midorii] could not read the ProjectX credential status', err));
         /* The paper form is the exception, because it can hold work: an edit nobody has
          * saved yet is kept, and only an UNTOUCHED form is re-read. So changing the account
          * through the chart's own gear shows here on the next visit, and a half-typed

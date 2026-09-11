@@ -462,11 +462,27 @@ export interface MidoriProjectXQuote {
     time: number;
 }
 
+/**
+ * What is stored for ProjectX, in the credential store's own vocabulary.
+ *
+ * `identifier` is the platform username and `env` is which book the key trades — the store
+ * keeps a login name and a real-money flag under those names for every broker, and ProjectX
+ * uses them rather than inventing a second pair. The gateway host has no counterpart there
+ * and is kept as an extra field.
+ */
 export interface MidoriProjectXCredentialStatus {
-    stored?: boolean;
-    userName?: string;
-    live?: boolean;
+    configured: boolean;
+    /** The platform username. */
+    identifier: string | null;
+    /** `'live'` is a funded account; `'demo'` is an evaluation or practice one. */
+    env: 'demo' | 'live' | null;
+    hasSecret?: boolean;
+    savedAt?: number | null;
+    /** The account orders are addressed to, once one has been chosen. */
+    accountId?: number;
+    /** The firm's gateway host, absent when it is the TopstepX default. */
     base?: string;
+    hub?: string;
     encryptionAvailable: boolean;
     /** Whether the environment is currently supplying credentials — worth showing, because
      *  it explains a connection that works with nothing stored. */
@@ -1182,7 +1198,49 @@ declare global {
                  */
                 environment(): Promise<{ configured: boolean; live: boolean; base: string | null }>;
                 accounts(onlyActive?: boolean): Promise<MidoriProjectXAccount[]>;
+                /**
+                 * Which account orders are addressed to.
+                 *
+                 * Unlike Capital.com there is no venue-side preferred account: every ProjectX
+                 * call carries an id, and one key routinely reaches an evaluation plus the
+                 * funded accounts that came out of it. Nothing is chosen by default, because
+                 * guessing here would put an order on somebody's funded book.
+                 */
+                account(): Promise<{ accountId: number | null; chosen: boolean }>;
+                /** Verified against the venue before it takes effect; rejects for an account
+                 *  that is gone or may not trade. */
+                selectAccount(id: number): Promise<MidoriProjectXAccount>;
+                /** Open positions on the chosen account. Rejects when none is chosen. */
+                positions(): Promise<unknown[]>;
+                /** Resting orders on the chosen account. Rejects when none is chosen. */
+                openOrders(): Promise<unknown[]>;
+                /**
+                 * Place an order. Brackets are given in TICKS from the fill, which is the
+                 * gateway's own shape — and they can only be set HERE, when the order is
+                 * placed. Protecting a position that is already open means resting orders
+                 * of its own; see ProjectXController.
+                 */
+                placeOrder(spec: {
+                    contractId: string;
+                    side: 'buy' | 'sell';
+                    type: 'market' | 'limit' | 'stop' | 'trailingStop' | 'joinBid' | 'joinAsk';
+                    size: number;
+                    limitPrice?: number;
+                    stopPrice?: number;
+                    trailPrice?: number;
+                    customTag?: string;
+                    stopLossTicks?: number;
+                    takeProfitTicks?: number;
+                }): Promise<{ orderId: number | null }>;
+                /** Move a resting order. Only the fields given are sent. */
+                modifyOrder(orderId: number, changes: { size?: number; limitPrice?: number; stopPrice?: number; trailPrice?: number }): Promise<void>;
+                cancelOrder(orderId: number): Promise<void>;
+                /** Close at market — whole, or `size` contracts of it. */
+                closePosition(contractId: string, size?: number | null): Promise<void>;
                 contracts(searchText: string): Promise<MidoriProjectXContract[]>;
+                /** Everything reachable, for the symbol index. The one call here never seen
+                 *  answer on a real account — callers degrade rather than depend on it. */
+                availableContracts(): Promise<MidoriProjectXContract[]>;
                 bars(query: { contractId: string; timeframe: string; from?: number; to?: number; limit?: number }): Promise<MidoriProjectXBar[]>;
                 /** Resolves to an opaque subscription id — pass it to `unsubscribe`. */
                 subscribe(query: { contractId: string; timeframe: string }): Promise<string>;

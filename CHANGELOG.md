@@ -3,6 +3,107 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
+## [v0.5.0]
+
+### Added
+
+- **Futures through ProjectX — Topstep and the other firms on that gateway.** Connect the
+  account under Settings → Broker connection and the contracts chart like any other market:
+  ES, NQ, MES, MNQ, CL, GC, the currency futures and forty more, named the venue's own way
+  (`NQU6`), with the product root (`NQ`) loading whichever expiry is currently active. A chart
+  left open across a rollover keeps the contract it was opened on rather than quietly becoming
+  a different instrument.
+
+  The data is real-time, within about a tenth of a second of the exchange, on evaluation and
+  funded accounts alike. What the venue does not send is candles — only the tape — so the
+  forming bar is built from the prints as they arrive, and seeded from history first so the
+  newest candle opens where the market opened it rather than where it happened to print when
+  you looked.
+
+  Trading is there too: market, limit and stop orders, and protection you set AFTER the fact.
+  Place the trade bare, then drag a stop and a target off the position; dragging again moves
+  the resting order rather than replacing it, so there is no instant where the position stands
+  uncovered. A **Break-even** button puts the stop at the entry, and says why it is unavailable
+  rather than failing once pressed.
+
+  One thing to know about this venue: a stop and a target are two independent orders and it
+  does not link them. If one fills, the other would be left working against a position that no
+  longer exists — so Midorii sweeps those up itself, every few seconds. The gap between a fill
+  and the sweep is real, and if a leftover cannot be cancelled you are told loudly rather than
+  quietly.
+
+- **Pick which ProjectX account you are trading — in Settings, and from the chart.** One key
+  reaches several: an evaluation and the funded accounts that came out of it. Nothing is
+  chosen by default, because the first one in a list is not a decision. The Trade menu lists
+  them individually with an amber stripe so they read as one group, and each row carries the
+  account's own name and balance — on a prop firm the gateway calls evaluation and funded
+  accounts alike "simulated", so the name is the only thing that tells them apart. The chosen
+  account is shown on the chart for as long as it is armed, and a restart only re-arms the
+  account that is still chosen.
+
+- **Fifteen- and thirty-second charts.** New timeframes across the app, served by ProjectX
+  from its own second-resolution bars. Worth knowing before you plan around them: that venue
+  keeps a fortnight of history at this resolution and no more, so a backtest on seconds has
+  two weeks to work with and anything longer has to run on minutes.
+
+- **Two more futures sleeves: Morning Book and the RSI(2) Dip.** Both come from the same
+  published book as the two above, in the outright-futures form that book measures separately.
+
+  The Morning Book is not a third signal — it is the cell continuation and the phase
+  oscillator watching the same session with one seat between them. Whichever speaks first
+  takes it and the other is finished for the morning, a tie going to the oscillator, and the
+  seat is spent by the SIGNAL rather than by the trade: a cell break refused for closing back
+  through its own open has still used up the day. Each engine keeps its own stop and its own
+  closing time, because a book-level stop was tested on this sleeve and failed. That means the
+  two halves size differently, and `Max leverage` is the setting to watch — for a cell trade
+  it caps a size that risk already decided, for an oscillator trade there is no stop and it is
+  the whole size.
+
+  The RSI(2) Dip buys the session after a 2-period RSI closes below 10 while price holds above
+  its 200-day average, and sells on the clock two sessions later. Long only, no stop. Its daily
+  bars are folded from the cash-session window rather than the whole 23-hour day, because the
+  signal it reproduces was read off an index ETF: the original takes the signal from SPY or
+  QQQ and trades ES or NQ, and with one instrument per run there is no second symbol to read.
+  The cash-hours fold gets close; it is not the same number, and the strategy says so rather
+  than pretending otherwise.
+
+  Running two timeframes in one backtest is new, and it is where the care went: a ten-minute
+  bar is handed to the strategy on the minute that COMPLETED it, not on the one that starts
+  the next, so a folded signal is acted on exactly when a person watching that chart could
+  have acted on it.
+
+- **Two futures sleeves you can backtest: Phase-Oscillator ±100 Cross and TBR9 Cell
+  Continuation.** Both come from the same published book of index-option sleeves, in the
+  outright-futures form that book measures separately — the option versions need a chain and
+  minute quotes on a premium, which nothing here has, so they are not approximated.
+
+  The oscillator sleeve buys the morning bar that closes with Saty's phase oscillator crossing
+  above +100 and sells the one that crosses below −100. It has no stop, which is the
+  measurement rather than an omission: the sleeve lives on a few very large winners, and every
+  stop variant its authors tested gave profit back. So the trade ends on the opposite cross or
+  on the clock, and Max leverage is the size control. A cross that reverses a position inside
+  the signal window does both jobs in one order, so a reversal is a single fill.
+
+  TBR9 fences off the 07:00 Central hour with walls set a quarter of a standard deviation
+  either side of its open — that deviation being what the last twenty mornings actually did,
+  so the walls are known before the hour starts. If the hour stays inside them, the first touch
+  of a wall in the hour after is the trade, stopped at the 07:00 open and flat at 11:00.
+
+  One rule the source leaves open is a setting rather than a guess: on options the ticket has
+  to wait for the 08:30 cash open, on futures it need not, and which was measured is not said.
+  `Earliest entry` is 00:00 by default and 08:30 reproduces the options reading.
+
+  Both read a Central-Time wall clock, and their windows are matched against bar CLOSES, so a
+  setting means the same thing on any timeframe. The published figures are a 10-minute chart
+  for the oscillator and a 1-minute one for TBR9.
+
+### Fixed
+
+- **A seconds timeframe no longer reads as an hour.** Typing `S` in the timeframe box produced
+  a chart that silently bucketed its bars hourly — the picker could ask for something the chart
+  could not understand, and nothing said so. Every provider was affected; it only became
+  visible now that a venue serves second-resolution bars.
+
 ## [v0.4.0]
 
 ### Added

@@ -2,8 +2,12 @@ import type { OHLCV } from '../../../src/core/model/ohlcv';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
 import type { DetectionCache } from './detection';
 import { INTRADAY_MOMENTUM_STRATEGY } from './intradayMomentum';
+import { MORNING_BOOK_STRATEGY } from './morningBook';
 import { OPENING_RANGE_STRATEGY } from './openingRange';
+import { PHASE_OSCILLATOR_STRATEGY } from './phaseOscillator';
+import { RSI_DIP_STRATEGY } from './rsiDip';
 import { SILVER_BULLET_STRATEGY } from './silverBullet';
+import { TIME_BASED_RANGE_STRATEGY } from './timeBasedRange';
 import type { StrategyInfo, StrategyParam, StrategyParams, StrategyParamValue, StrategySpec } from './types';
 
 /**
@@ -25,6 +29,10 @@ export const STRATEGIES: Record<string, StrategySpec> = {
     silverbullet: SILVER_BULLET_STRATEGY,
     openingrange: OPENING_RANGE_STRATEGY,
     intradaymomentum: INTRADAY_MOMENTUM_STRATEGY,
+    phaseoscillator: PHASE_OSCILLATOR_STRATEGY,
+    tbr9: TIME_BASED_RANGE_STRATEGY,
+    morningbook: MORNING_BOOK_STRATEGY,
+    rsidip: RSI_DIP_STRATEGY,
 };
 
 function specFor(id: string): StrategySpec {

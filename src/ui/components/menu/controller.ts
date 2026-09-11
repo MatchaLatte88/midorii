@@ -22,6 +22,16 @@ export interface MenuItemDescriptor {
     toggle?: boolean;
     /** Icon id (see the `vela/ui` icon registry) rendered before the label. */
     icon?: string;
+    /**
+     * A colour stripe at the row's leading edge, as a CSS colour.
+     *
+     * For a menu whose rows come from several SOURCES and where which source a row belongs
+     * to matters as much as its label — a broker menu listing three accounts on one venue
+     * and one on another. The stripe groups them at a glance without repeating the venue's
+     * name in every label. Rows without it reserve no space, so a menu that uses none looks
+     * exactly as it did.
+     */
+    accent?: string;
     /** Favorite-star affordance at the row's right edge: `false` renders an outline
      *  star revealed on row hover, `true` a filled star that stays visible. Clicking
      *  it reports through the menu's `onFavorite` WITHOUT selecting (or closing) the

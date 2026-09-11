@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface Bar { time: number; open: number; high: number; low: number; close: number; volume: number }
 interface Quote { contractId: string; last: number | null; bid: number | null; ask: number | null; time: number }
-interface Credentials { userName: string; apiKey: string; base?: string; hub?: string; live?: boolean }
+interface Credentials { userName: string; apiKey: string; base?: string; hub?: string; live?: boolean; accountId?: number }
+interface Account { id: number; name: string; balance: number; canTrade: boolean; simulated?: boolean }
 
 /** The main-process client's surface. Written out here because it is JavaScript — Electron
  *  loads it directly — and a dynamic import of it would otherwise be `any`. */
@@ -14,6 +15,14 @@ interface ProjectXClient {
     projectXBars(contractId: string, timeframe: string, opts?: { from?: number; to?: number; limit?: number }): Promise<Bar[]>;
     projectXSubscribe(contractId: string, timeframe: string, cb: (bar: Bar) => void): Promise<() => void>;
     projectXSubscribeQuotes(contractId: string, cb: (quote: Quote) => void): Promise<() => void>;
+    projectXAccount(): { accountId: number | null; chosen: boolean };
+    projectXSelectAccount(id: number | string): Promise<Account>;
+    projectXPositions(): Promise<unknown[]>;
+    projectXOpenOrders(): Promise<unknown[]>;
+    projectXPlaceOrder(spec: Record<string, unknown>): Promise<{ orderId: number | null }>;
+    projectXModifyOrder(orderId: number, changes?: Record<string, unknown>): Promise<void>;
+    projectXCancelOrder(orderId: number): Promise<void>;
+    projectXClosePosition(contractId: string, size?: number | null): Promise<void>;
 }
 
 /**
@@ -148,6 +157,199 @@ describe('ProjectX session', () => {
     });
 });
 
+describe('ProjectX account selection', () => {
+    const accounts = (rows: unknown[]): Response => ok({ accounts: rows, success: true, errorCode: 0, errorMessage: null });
+    const EVAL = { id: 27215526, name: '25KTC-SKU-LAB-V2', balance: 25_174.4, canTrade: true, simulated: true };
+    const FUNDED = { id: 20274534, name: 'EXPRESS-V2-CT-209461', balance: 238.06, canTrade: true, simulated: true };
+
+    it('starts with nothing chosen, because there is no obvious account to guess', () => {
+        expect(px.projectXAccount()).toEqual({ accountId: null, chosen: false });
+    });
+
+    it('refuses to read positions until an account is chosen', async () => {
+        await expect(px.projectXPositions()).rejects.toThrow(/No ProjectX account is selected/);
+        await expect(px.projectXOpenOrders()).rejects.toThrow(/No ProjectX account is selected/);
+    });
+
+    it('verifies a choice against the venue before it takes effect', async () => {
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(accounts([EVAL, FUNDED]));
+        const chosen = await px.projectXSelectAccount(FUNDED.id);
+        expect(chosen).toMatchObject({ id: FUNDED.id, name: FUNDED.name });
+        expect(px.projectXAccount()).toEqual({ accountId: FUNDED.id, chosen: true });
+    });
+
+    it('refuses an account the key does not reach, rather than setting it and failing later', async () => {
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(accounts([EVAL]));
+        await expect(px.projectXSelectAccount(999)).rejects.toThrow(/does not list an active account 999/);
+        expect(px.projectXAccount().chosen).toBe(false);
+    });
+
+    it('refuses an account that cannot trade — worse than none, because it looks connected', async () => {
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(accounts([{ ...EVAL, canTrade: false }]));
+        await expect(px.projectXSelectAccount(EVAL.id)).rejects.toThrow(/cannot trade/);
+        expect(px.projectXAccount().chosen).toBe(false);
+    });
+
+    it('addresses positions and orders to the chosen account', async () => {
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(accounts([FUNDED]));
+        await px.projectXSelectAccount(FUNDED.id);
+
+        // The spy accumulates across the selection above, so the record starts fresh here.
+        const fetch = vi.spyOn(globalThis, 'fetch');
+        fetch.mockClear();
+        fetch
+            .mockResolvedValueOnce(ok({ positions: [], success: true, errorCode: 0 }))
+            .mockResolvedValueOnce(ok({ orders: [], success: true, errorCode: 0 }));
+        await px.projectXPositions();
+        await px.projectXOpenOrders();
+        expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body)).accountId).toBe(FUNDED.id);
+        expect(JSON.parse(String(fetch.mock.calls[1]![1]?.body)).accountId).toBe(FUNDED.id);
+    });
+
+    it('takes the account it is configured with, so a restart trades what was chosen', () => {
+        px.configureProjectX({ userName: 'trader', apiKey: 'key', live: false, accountId: FUNDED.id });
+        expect(px.projectXAccount()).toEqual({ accountId: FUNDED.id, chosen: true });
+    });
+
+    it('drops the account when the key changes, since the ids belong to the key', async () => {
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(accounts([FUNDED]));
+        await px.projectXSelectAccount(FUNDED.id);
+        px.configureProjectX({ userName: 'someone-else', apiKey: 'other-key', live: false });
+        expect(px.projectXAccount()).toEqual({ accountId: null, chosen: false });
+    });
+
+    it('refuses an id that is not a number rather than sending it', async () => {
+        await expect(px.projectXSelectAccount('not-a-number')).rejects.toThrow(/account id is required/);
+    });
+});
+
+describe('ProjectX orders', () => {
+    const FUNDED = { id: 20274534, name: 'EXPRESS-V2-CT-209461', balance: 238.06, canTrade: true, simulated: true };
+    const accountsBody = (rows: unknown[]): Response => ok({ accounts: rows, success: true, errorCode: 0 });
+    const accepted = (orderId = 555): Response => ok({ orderId, success: true, errorCode: 0, errorMessage: null });
+
+    /** A session with an account already chosen, and the fetch record reset to zero. */
+    async function armed() {
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(accountsBody([FUNDED]));
+        await px.projectXSelectAccount(FUNDED.id);
+        const fetch = vi.spyOn(globalThis, 'fetch');
+        fetch.mockClear();
+        return fetch;
+    }
+
+    it('refuses to place anything until an account is chosen', async () => {
+        await expect(px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 1 }))
+            .rejects.toThrow(/No ProjectX account is selected/);
+    });
+
+    it('sends the venue its own codes for side and type', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(accepted());
+        await px.projectXPlaceOrder({ contractId: CONTRACT, side: 'sell', type: 'limit', size: 2, limitPrice: 29_100 });
+        const body = JSON.parse(String(fetch.mock.calls[0]![1]?.body));
+        // 1 = Ask (sell), 1 = Limit — the gateway's enums, not ours.
+        expect(body).toMatchObject({ accountId: FUNDED.id, contractId: CONTRACT, side: 1, type: 1, size: 2, limitPrice: 29_100 });
+    });
+
+    it('hands back the order id the venue assigned', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(accepted(9_001));
+        expect(await px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 1 })).toEqual({ orderId: 9_001 });
+    });
+
+    it('refuses a fractional size rather than letting the venue round it', async () => {
+        await armed();
+        await expect(px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 1.5 }))
+            .rejects.toThrow(/whole number of contracts/);
+    });
+
+    it('refuses an order type it does not know instead of sending a guess', async () => {
+        await armed();
+        await expect(px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'iceberg', size: 1 }))
+            .rejects.toThrow(/Unknown ProjectX order type "iceberg"/);
+    });
+
+    it('sends brackets as ticks, in the shape the gateway takes them', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(accepted());
+        await px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 1, stopLossTicks: 40, takeProfitTicks: 80 });
+        const body = JSON.parse(String(fetch.mock.calls[0]![1]?.body));
+        expect(body.stopLossBracket).toEqual({ ticks: 40, type: 4 });   // 4 = Stop
+        expect(body.takeProfitBracket).toEqual({ ticks: 80, type: 1 }); // 1 = Limit
+    });
+
+    it('leaves out what was not asked for, rather than sending nulls', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(accepted());
+        await px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 1 });
+        const body = JSON.parse(String(fetch.mock.calls[0]![1]?.body));
+        expect(Object.keys(body).sort()).toEqual(['accountId', 'contractId', 'side', 'size', 'type']);
+    });
+
+    /**
+     * The one that matters most: a refused order must not be retried.
+     *
+     * Reads retry after a 401 because the request was rejected before anything was done with
+     * it. An order has no such guarantee — it may have been delivered and accepted before the
+     * answer went missing — so sending it again is how one press becomes two positions.
+     */
+    it('never re-sends an order, even on a 401', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(new Response('{}', { status: 401 }));
+        await expect(px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 1 })).rejects.toThrow();
+        expect(fetch.mock.calls).toHaveLength(1);
+    });
+
+    it('reads a success:false body as the refusal it is, despite the HTTP 200', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(ok({ success: false, errorCode: 2, errorMessage: 'Insufficient margin' }));
+        await expect(px.projectXPlaceOrder({ contractId: CONTRACT, side: 'buy', type: 'market', size: 99 }))
+            .rejects.toThrow(/Insufficient margin/);
+    });
+
+    it('explains errorCode 6 as the account restriction it is, not as a bad order', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(ok({ success: false, errorCode: 6, errorMessage: null }));
+        await expect(px.projectXCancelOrder(1)).rejects.toThrow(/simulated accounts that are not following another one/);
+    });
+
+    it('sends only the fields a modify actually changes', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(ok({ success: true, errorCode: 0 }));
+        await px.projectXModifyOrder(777, { stopPrice: 29_000 });
+        expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body)))
+            .toEqual({ accountId: FUNDED.id, orderId: 777, stopPrice: 29_000 });
+    });
+
+    it('closes a whole position through the endpoint meant for it', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(ok({ success: true, errorCode: 0 }));
+        await px.projectXClosePosition(CONTRACT);
+        expect(String(fetch.mock.calls[0]![0])).toContain('/api/Position/closeContract');
+        expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ accountId: FUNDED.id, contractId: CONTRACT });
+    });
+
+    it('uses the partial endpoint when a size is given', async () => {
+        const fetch = await armed();
+        fetch.mockResolvedValueOnce(ok({ success: true, errorCode: 0 }));
+        await px.projectXClosePosition(CONTRACT, 2);
+        expect(String(fetch.mock.calls[0]![0])).toContain('/api/Position/partialCloseContract');
+        expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toMatchObject({ size: 2 });
+    });
+});
+
 describe('ProjectX bars', () => {
     it('asks with the account side it was configured for, not a caller-chosen one', async () => {
         const fetch = vi.spyOn(globalThis, 'fetch')
@@ -177,6 +379,107 @@ describe('ProjectX bars', () => {
 
     it('refuses a timeframe the gateway does not serve rather than sending a guess', async () => {
         await expect(px.projectXBars(CONTRACT, '7', {})).rejects.toThrow(/does not serve the "7" timeframe/);
+    });
+
+    it('maps the second timeframes onto the gateway second unit', async () => {
+        for (const [tf, unitNumber] of [['15S', 15], ['30S', 30]] as const) {
+            const fetch = vi.spyOn(globalThis, 'fetch')
+                .mockResolvedValueOnce(session())
+                .mockResolvedValueOnce(barsBody([]));
+            px.configureProjectX({ userName: 'trader', apiKey: 'key', live: false });
+            await px.projectXBars(CONTRACT, tf, { limit: 1 });
+            const body = JSON.parse(String(fetch.mock.calls[1]![1]?.body));
+            expect([tf, body.unit, body.unitNumber]).toEqual([tf, 1, unitNumber]);
+            vi.restoreAllMocks();
+        }
+    });
+
+    it('sizes an unbounded window by the bar span, so seconds do not ask for weeks', async () => {
+        const fetch = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody([]));
+        await px.projectXBars(CONTRACT, '30S', { limit: 100 });
+        const body = JSON.parse(String(fetch.mock.calls[1]![1]?.body));
+        const span = Date.parse(body.endTime) - Date.parse(body.startTime);
+        // The bars' own span, widened for the hours the market is shut.
+        expect(span).toBe(100 * 30_000 * 1.5);
+    });
+
+    it('honours a caller-given window exactly, without widening it', async () => {
+        const from = Date.parse('2026-09-01T00:00:00Z');
+        const to = Date.parse('2026-09-02T00:00:00Z');
+        const fetch = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody([]));
+        await px.projectXBars(CONTRACT, '1', { from, to, limit: 100 });
+        const body = JSON.parse(String(fetch.mock.calls[1]![1]?.body));
+        expect(Date.parse(body.startTime)).toBe(from);
+        expect(Date.parse(body.endTime)).toBe(to);
+    });
+});
+
+describe('ProjectX bar paging', () => {
+    /** A full page of `n` one-minute bars ending at `endMs`. */
+    const page = (endMs: number, n: number) => Array.from({ length: n }, (_, i) => (
+        row(new Date(endMs - (n - 1 - i) * 60_000).toISOString(), 1, 1, 1, 1, 1)
+    ));
+
+    it('pages backward past the 20,000-bar ceiling the gateway imposes', async () => {
+        const end = Date.parse('2026-09-10T12:00:00Z');
+        const first = page(end, 20_000);
+        const second = page(Date.parse(first[0]!.t) - 60_000, 5_000);
+        const fetch = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody(first))
+            .mockResolvedValueOnce(barsBody(second));
+        const bars = await px.projectXBars(CONTRACT, '1', { limit: 25_000, to: end });
+        expect(bars).toHaveLength(25_000);
+        // Oldest first, and the older page really is at the front.
+        expect(bars[0]!.time).toBe(Date.parse(second[0]!.t));
+        expect(fetch).toHaveBeenCalledTimes(3); // login + two pages
+    });
+
+    it('never asks the gateway for more than it will serve in one call', async () => {
+        const fetch = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody([]));
+        await px.projectXBars(CONTRACT, '1', { limit: 80_000 });
+        expect(JSON.parse(String(fetch.mock.calls[1]![1]?.body)).limit).toBe(20_000);
+    });
+
+    it('stops after one page when the window came back whole', async () => {
+        const fetch = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody(page(Date.parse('2026-09-10T12:00:00Z'), 10)));
+        await px.projectXBars(CONTRACT, '1', { limit: 25_000 });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('collapses the seam where two pages share a bar, rather than duplicating it', async () => {
+        const end = Date.parse('2026-09-10T12:00:00Z');
+        const first = page(end, 20_000);
+        // The gateway is inclusive at both ends: the older page repeats the newer one's oldest bar.
+        const second = page(Date.parse(first[0]!.t), 5_000);
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody(first))
+            .mockResolvedValueOnce(barsBody(second));
+        const bars = await px.projectXBars(CONTRACT, '1', { limit: 30_000, to: end });
+        expect(new Set(bars.map((b) => b.time)).size).toBe(bars.length);
+        expect(bars).toHaveLength(24_999);
+    });
+
+    it('stops rather than loop when a page makes no backward progress', async () => {
+        const end = Date.parse('2026-09-10T12:00:00Z');
+        const stuck = page(end, 20_000);
+        const fetch = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(barsBody(stuck))
+            .mockResolvedValue(barsBody(stuck)); // the venue keeps answering the same window
+        const bars = await px.projectXBars(CONTRACT, '1', { limit: 100_000, to: end });
+        expect(bars).toHaveLength(20_000);
+        // Two pages: the first, then the repeat that proved there was nothing older.
+        expect(fetch.mock.calls.length).toBeLessThanOrEqual(4);
     });
 
     it('reads the single-letter fields and the offset timestamps into chart bars', async () => {
@@ -227,6 +530,30 @@ describe('ProjectX tick aggregation', () => {
             time: Date.parse('2026-09-10T18:50:00Z'),
             open: 200, high: 200, low: 200, close: 200, volume: 5,
         });
+    });
+
+    it('buckets on a thirty-second grid when that is the timeframe', async () => {
+        const { socket, bars } = await feedFor('30S');
+        socket.push('GatewayTrade', [CONTRACT, [print(100, 1, '05')]]);   // 18:49:05 → 18:49:00
+        socket.push('GatewayTrade', [CONTRACT, [print(110, 1, '29')]]);   // 18:49:29 → same bucket
+        socket.push('GatewayTrade', [CONTRACT, [print(120, 1, '30')]]);   // 18:49:30 → the next one
+        expect(bars.map((b) => b.time)).toEqual([
+            Date.parse('2026-09-10T18:49:00Z'),
+            Date.parse('2026-09-10T18:49:00Z'),
+            Date.parse('2026-09-10T18:49:30Z'),
+        ]);
+        expect(bars[1]!.high).toBe(110);
+        expect(bars[2]).toMatchObject({ open: 120, volume: 1 });
+    });
+
+    it('buckets on a fifteen-second grid too', async () => {
+        const { socket, bars } = await feedFor('15S');
+        socket.push('GatewayTrade', [CONTRACT, [print(100, 1, '14')]]);
+        socket.push('GatewayTrade', [CONTRACT, [print(110, 1, '15')]]);
+        expect(bars.map((b) => b.time)).toEqual([
+            Date.parse('2026-09-10T18:49:00Z'),
+            Date.parse('2026-09-10T18:49:15Z'),
+        ]);
     });
 
     it('buckets by the timeframe it was opened for, not by the minute', async () => {

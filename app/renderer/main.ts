@@ -21,6 +21,7 @@ import { mountStrategiesView, type StrategiesViewHandle } from './strategies/str
 import { openDownloadDialog } from './data/downloadDialog';
 import { BybitProvider } from './providers/BybitProvider';
 import { CapitalProvider } from './providers/CapitalProvider';
+import { ProjectXProvider } from './providers/ProjectXProvider';
 import { LocalArchiveProvider } from './providers/LocalArchiveProvider';
 import { isReplayContext } from './replay/replayActions';
 import { resumeReplay, startReplay, type MountedReplay } from './replay/replayBootstrap';
@@ -50,6 +51,10 @@ function providers() {
         // it shows up in the symbol picker's provider filter); getBars/subscribe
         // fail soft with a console warning until CAPITAL_* is set in .env.local.
         capital: () => new CapitalProvider(),
+        // Futures through the ProjectX gateway — needs a platform account with the API
+        // add-on (see .env.example). Contracts are named the venue's way (NQU6), with the
+        // product root (NQ) resolving to whichever expiry is active.
+        projectx: () => new ProjectXProvider(),
     };
 }
 
