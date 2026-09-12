@@ -83,7 +83,7 @@ export interface ProjectXDealing {
  * of the decimals, never one over the tick. Computed the naive way, a quarter-point tick
  * would claim a price scale of 4.
  */
-function tickDecimals(tick: number): number {
+export function tickDecimals(tick: number): number {
     if (!(tick > 0) || !Number.isFinite(tick)) return 2;
     for (let d = 0; d <= 8; d += 1) {
         if (Math.abs(Number(tick.toFixed(d)) - tick) <= tick * 1e-6) return d;

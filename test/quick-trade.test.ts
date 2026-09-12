@@ -136,3 +136,34 @@ describe('stepping the size', () => {
         expect(stepSize('0.01', -1)).toBe('');
     });
 });
+
+/**
+ * The same panel on an instrument whose point is not a unit of account money.
+ *
+ * This one decides where a stop LANDS on a trade that is about to be on, so getting the
+ * multiplier wrong is not a display error: on one NQ contract, reading "$100 of risk" as a
+ * hundred points puts the stop twenty times too far out and the trade risks $2,000.
+ */
+describe('the quick panel on a contract that multiplies', () => {
+    const NQ = 20; // a quarter-point tick worth $5 is $20 a point
+
+    it('divides the risk by what the size is worth, not by the size', () => {
+        const plan = quickPlan(quick({ size: 1, riskCash: 100 }), 24_000, NQ);
+        expect(plan.stopDistance).toBe(5); // $100 over $20 a point
+    });
+
+    it('measures the target off that distance, so the reward is in the same money', () => {
+        const plan = quickPlan(quick({ size: 1, riskCash: 100, rrr: 2 }), 24_000, NQ);
+        expect(plan.stopDistance).toBe(5);
+        expect(plan.targetDistance).toBe(10);
+    });
+
+    it('states the notional a contract carries rather than its price', () => {
+        expect(quickPlan(quick({ size: 2 }), 24_000, NQ).notional).toBe(960_000);
+    });
+
+    it('is unchanged where a point is a unit — every spot account here', () => {
+        const spot = quickPlan(quick({ size: 0.5, riskCash: 50 }), PRICE);
+        expect(spot).toEqual(quickPlan(quick({ size: 0.5, riskCash: 50 }), PRICE, 1));
+    });
+});

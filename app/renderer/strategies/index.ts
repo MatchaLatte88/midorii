@@ -8,6 +8,7 @@ import { PHASE_OSCILLATOR_STRATEGY } from './phaseOscillator';
 import { RSI_DIP_STRATEGY } from './rsiDip';
 import { SILVER_BULLET_STRATEGY } from './silverBullet';
 import { TIME_BASED_RANGE_STRATEGY } from './timeBasedRange';
+import { VWAP_REVERSION_STRATEGY } from './vwapReversion';
 import type { StrategyInfo, StrategyParam, StrategyParams, StrategyParamValue, StrategySpec } from './types';
 
 /**
@@ -33,6 +34,7 @@ export const STRATEGIES: Record<string, StrategySpec> = {
     tbr9: TIME_BASED_RANGE_STRATEGY,
     morningbook: MORNING_BOOK_STRATEGY,
     rsidip: RSI_DIP_STRATEGY,
+    vwapreversion: VWAP_REVERSION_STRATEGY,
 };
 
 function specFor(id: string): StrategySpec {

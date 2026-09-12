@@ -84,6 +84,12 @@ function onlyOne<T>(matches: readonly T[]): T | null {
 /** The row's venue label — the LISTING prefix the data declares, else the provider name. */
 const venueOf = (s: SymbolDescriptor): string | undefined => s.prefix ?? s.provider;
 
+/** The symbols served by one of `providers` (registered names) — all of them when null. */
+export function scopeSymbols(list: readonly SymbolDescriptor[], providers: readonly string[] | null): readonly SymbolDescriptor[] {
+    if (!providers) return list;
+    return list.filter((s) => s.provider !== undefined && providers.includes(s.provider));
+}
+
 export function filterSymbols(list: readonly SymbolDescriptor[], query: string, limit = 100, top: readonly string[] | false = TOP_TICKERS): SymbolDescriptor[] {
     // The venues are the list's own — the picker's pool is already tab-filtered, and a scope
     // token must never resolve to a venue that has nothing to show. Both spellings scope:
@@ -287,6 +293,10 @@ export class SymbolPicker {
     private activeTab = 'All';
     /** Registered provider name, or null for "All providers". */
     private activeProvider: string | null = null;
+    /** Providers the picker is limited to (null ⇒ every registered one) — see `setScope`. */
+    private scope: readonly string[] | null = null;
+    /** An open `choose()`: its own scope, and where the chosen symbol goes instead of `onSelect`. */
+    private request: { providers: readonly string[] | null; resolve: (symbol: string | null) => void } | null = null;
     private tabs!: HTMLElement;
     private readonly providerButton: HTMLButtonElement;
     private readonly providerMenu: Menu;
@@ -383,6 +393,10 @@ export class SymbolPicker {
                     // Every close path (pick, Escape, X, outside tap) — a field still
                     // focused when it leaves the screen keeps iOS's focus-zoom alive.
                     this.input.blur();
+                    // Still pending here means nothing was picked (`select` settles it first).
+                    const dismissed = this.request;
+                    this.request = null;
+                    dismissed?.resolve(null);
                 }
                 opts.onOpenChange?.(open);
             },
@@ -430,9 +444,35 @@ export class SymbolPicker {
         this.providersSource = source;
     }
 
+    /** Limit the picker to `providers` (registered names) until called again; null lifts it. */
+    setScope(providers: readonly string[] | null): void {
+        this.scope = providers ? [...providers] : null;
+        this.ranked = null;
+    }
+
     open(initialQuery = ''): void {
         this.seed = initialQuery;
+        this.clampProvider();
         this.dialog.show();
+    }
+
+    /**
+     * Ask for one symbol, limited to `providers` for this pick only (null ⇒ the standing
+     * scope). Resolves with the chosen symbol in its committed form — WITHOUT `onSelect`,
+     * so the caller decides whether the chart switches — or null when dismissed.
+     */
+    choose(opts: { providers?: readonly string[] | null; query?: string } = {}): Promise<string | null> {
+        this.request?.resolve(null);
+        return new Promise((resolve) => {
+            this.request = { providers: opts.providers ? [...opts.providers] : null, resolve };
+            this.ranked = null;
+            if (this.dialog.open) {
+                this.clampProvider();
+                this.refresh();
+            } else {
+                this.open(opts.query ?? '');
+            }
+        });
     }
 
     close(): void {
@@ -447,10 +487,26 @@ export class SymbolPicker {
     /** Menu items for the provider filter — "All providers" plus one row per registration. */
     private providerItems(): MenuItemDescriptor[] {
         const items: MenuItemDescriptor[] = [{ id: 'all', label: 'All providers', checked: this.activeProvider === null }];
+        const scope = this.effectiveScope();
         for (const p of this.providersSource()) {
+            if (scope && !scope.includes(p.name)) continue;
             items.push({ id: p.name, label: p.displayName ?? p.name, checked: this.activeProvider === p.name });
         }
         return items;
+    }
+
+    /** The scope in force: an open `choose()`'s own, else the standing one. */
+    private effectiveScope(): readonly string[] | null {
+        return this.request?.providers ?? this.scope;
+    }
+
+    /** A provider filter left on a venue the scope excludes would show an empty list. */
+    private clampProvider(): void {
+        const scope = this.effectiveScope();
+        if (this.activeProvider && scope && !scope.includes(this.activeProvider)) {
+            this.activeProvider = null;
+            this.renderProviderButton();
+        }
     }
 
     /** Sync the trigger's label/state to the current filter. */
@@ -486,12 +542,16 @@ export class SymbolPicker {
     }
 
     private select(ticker: string, venue: string | undefined, onSelect: (symbol: string) => void): void {
+        const request = this.request;
+        this.request = null; // settled here, so the close below does not read it as a dismissal
         this.close();
         // The prefix IS the disambiguation: several venues may list this ticker, and the
         // user picked a specific row — a bare ticker would re-resolve by declaration order.
         // The committed form is the CANONICAL one: the listing prefix when the data
         // declares it (`NASDAQ:AAPL`), the provider name otherwise (`binance:BTCUSDT`).
-        onSelect(venue ? `${venue}:${ticker}` : ticker);
+        const symbol = venue ? `${venue}:${ticker}` : ticker;
+        if (request) request.resolve(symbol);
+        else onSelect(symbol);
     }
 
     private moveHighlight(delta: number): void {
@@ -514,7 +574,7 @@ export class SymbolPicker {
      *  keystroke; an async hook resolves onto the next repaint (stale-while-revalidate
      *  in between, the raw pool before the first resolve). */
     private pool(): readonly SymbolDescriptor[] {
-        const raw = this.source();
+        const raw = scopeSymbols(this.source(), this.effectiveScope());
         const hook = symbolRanking();
         if (!hook) return raw;
         const key = `${raw.length}:${raw[0]?.ticker ?? ''}:${raw[raw.length - 1]?.ticker ?? ''}`;

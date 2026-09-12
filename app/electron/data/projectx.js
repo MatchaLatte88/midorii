@@ -28,11 +28,26 @@ import { appendFileSync } from 'node:fs';
 const DEFAULT_BASE = 'https://api.topstepx.com';
 const DEFAULT_HUB = 'https://rtc.topstepx.com/hubs/market';
 
+/**
+ * The account-side hub, derived from the market one rather than configured separately.
+ *
+ * The two are the same server and differ only in the last segment, so asking somebody to
+ * enter both would be asking them to get one of them wrong. A hub that does not end in the
+ * expected segment is left alone and simply has `/hubs/user` put where its own last segment
+ * was — the shape every deployment of this gateway uses.
+ */
+function userHubOf(marketHub) {
+  return marketHub.replace(/\/hubs\/[^/?#]+/, '/hubs/user');
+}
+
 /** Tokens last 24h. Re-login this far ahead of that, so a slow request never lands on a
  *  token that expired between the check and the send. */
 const SESSION_MARGIN_MS = 60 * 60_000;
 /** Reconnect backoff after an unexpected socket close. */
 const WS_RECONNECT_MS = 2_000;
+/** How far that backoff is allowed to grow while reopening keeps failing. The gateway rate
+ *  limits logins, and a market that is simply shut answers no faster for being asked often. */
+const WS_RECONNECT_MAX_MS = 30_000;
 /** SignalR frames its records with this byte rather than with newlines. */
 const SEP = '\x1e';
 
@@ -76,12 +91,30 @@ let accountId = null;
 let ws = null;
 let wsConnectPromise = null;
 let wsReconnectTimer = null;
+/** How long the next reopen waits — see {@link scheduleReconnect}. */
+let wsReconnectDelay = WS_RECONNECT_MS;
+
+/* The account-side socket. Kept entirely apart from the market one: they are different
+ * endpoints with different subscriptions, and a market feed dropping is no reason to stop
+ * hearing about a fill. */
+let userWs = null;
+let userConnectPromise = null;
+let userReconnectTimer = null;
+/** How long the next account-side reopen waits — see {@link scheduleUserReconnect}. */
+let userReconnectDelay = WS_RECONNECT_MS;
+/** Which account id the CURRENT user socket has been subscribed for, or null. */
+let userSubscribedTo = null;
+/** Everyone listening for account-side events — see {@link projectXSubscribeUser}. */
+const userSubscribers = new Set();
 
 /** `contractId:timeframe` → { bar, tfMs, listeners:Set<cb> } — one forming bar per feed,
  *  however many panes are watching it. */
 const barFeeds = new Map();
 /** `contractId` → Set<callback>, delivered every quote. */
 const quoteSubscribers = new Map();
+/** The same for raw prints — the tape, as it happens. Its own set rather than a flag on the
+ *  quote one, because a tape and a ticket are wanted independently. */
+const printSubscribers = new Map();
 /** `contractId` → the last complete quote, since the feed sends deltas. See the
  *  GatewayQuote branch of {@link handleHubMessage}. */
 const quoteState = new Map();
@@ -96,6 +129,7 @@ export function configureProjectX(next) {
       apiKey: next.apiKey,
       base: next.base || DEFAULT_BASE,
       hub: next.hub || DEFAULT_HUB,
+      userHub: userHubOf(next.hub || DEFAULT_HUB),
       live: next.live === true,
     }
     : null;
@@ -117,6 +151,10 @@ export function configureProjectX(next) {
    * would be streaming under a session that no longer exists. Subscriptions themselves
    * stay; `onclose` reopens under whatever is configured by then. */
   if (ws) { try { ws.close(); } catch { /* onclose does the rest */ } }
+  /* The account side goes with it, and for a sharper reason than the market side: it is
+   * subscribed to ONE account id, and after a switch that id belongs to a different key. */
+  userSubscribedTo = null;
+  if (userWs) { try { userWs.close(); } catch { /* onclose does the rest */ } }
 }
 
 export function projectXConfigured() {
@@ -246,6 +284,10 @@ export async function projectXSelectAccount(id) {
     throw new Error(`ProjectX account ${found.name} cannot trade. Pick one that can.`);
   }
   accountId = wanted;
+  /* The account side follows the choice. This hub answers per account id, so without it a
+   * running socket would go on reporting the account that was just switched away from — and
+   * report nothing at all about the one now being traded. */
+  refollowUser();
   wire('account', { accountId: wanted, name: found.name });
   return found;
 }
@@ -274,6 +316,29 @@ export async function projectXPositions() {
 export async function projectXOpenOrders() {
   const json = await authedPost('/api/Order/searchOpen', { accountId: requireAccountId() });
   return json?.orders ?? [];
+}
+
+/**
+ * Executions on the chosen account, between two moments.
+ *
+ * HALF-TURNS, not round trips: each row is one fill, and `profitAndLoss` is null on the one
+ * that opened and carries the realised result on the one that closed. Pairing them into
+ * trades a person would recognise is the renderer's job — see projectxHistory.ts — because it
+ * is a reading of the data rather than a fetch of it, and a reading belongs where it can be
+ * tested without a gateway.
+ *
+ * `from` and `to` are epoch milliseconds; the gateway takes ISO 8601 and is given it here.
+ */
+export async function projectXTrades({ from, to } = {}) {
+  const end = to != null ? new Date(to) : new Date();
+  // A month back where nobody said. Long enough to be a record, short enough to stay one call.
+  const start = from != null ? new Date(from) : new Date(end.getTime() - 30 * 24 * 60 * 60_000);
+  const json = await authedPost('/api/Trade/search', {
+    accountId: requireAccountId(),
+    startTimestamp: start.toISOString(),
+    endTimestamp: end.toISOString(),
+  });
+  return json?.trades ?? [];
 }
 
 // ── Trading ─────────────────────────────────────────────────────────────────
@@ -569,23 +634,28 @@ export async function projectXBars(contractId, timeframe, { from, to, limit } = 
  * If the hub ever needs the parts that are genuinely hard (transport fallback, automatic
  * reconnect with state replay), that trade changes and the library should come in.
  */
-async function negotiate() {
+async function negotiate(hubUrl, label) {
   await ensureSession();
-  const res = await fetch(`${creds.hub}/negotiate?negotiateVersion=1`, {
+  const res = await fetch(`${hubUrl}/negotiate?negotiateVersion=1`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
   });
-  if (!res.ok) throw new Error(`ProjectX hub negotiate HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`ProjectX ${label} hub negotiate HTTP ${res.status}`);
   const json = await res.json();
-  wire('hub.negotiate', { status: res.status, transports: (json.availableTransports ?? []).map((t) => t.transport) });
+  wire(`${label}.negotiate`, { status: res.status, transports: (json.availableTransports ?? []).map((t) => t.transport) });
   return json;
 }
 
-/** Send one framed record, saying whether it actually went. */
-function sendWs(obj) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  ws.send(JSON.stringify(obj) + SEP);
+/** Send one framed record on a given socket, saying whether it actually went. */
+function sendTo(socket, obj) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(obj) + SEP);
   return true;
+}
+
+/** Send one framed record on the market socket. */
+function sendWs(obj) {
+  return sendTo(ws, obj);
 }
 
 /**
@@ -606,22 +676,57 @@ function streamContract(contractId) {
 /** Every contract something is currently listening to, across both kinds of subscription. */
 function activeContracts() {
   const ids = new Set(quoteSubscribers.keys());
+  for (const id of printSubscribers.keys()) ids.add(id);
   for (const key of barFeeds.keys()) ids.add(key.slice(0, key.lastIndexOf(':')));
   return ids;
 }
 
+/** Whether anything is still waiting on the market stream. */
+function streamWanted() {
+  return barFeeds.size > 0 || quoteSubscribers.size > 0 || printSubscribers.size > 0;
+}
+
+/**
+ * Reopen the stream in a moment, and go on trying while anything still wants it.
+ *
+ * Armed from BOTH ways a connection ends, which is the point of it being one function. A
+ * socket that closes calls `onclose`; an attempt that never gets that far — a refused login,
+ * a negotiate that fails, a machine with no network — throws before any socket exists and
+ * calls nothing. Scheduling only from `onclose`, as this did, meant one retry after a drop
+ * and then silence: the chart went on asking a feed that had stopped trying to come back.
+ *
+ * The wait doubles up to {@link WS_RECONNECT_MAX_MS} so an outage that lasts is not hammered
+ * at, and is reset by the handshake that succeeds.
+ */
+function scheduleReconnect() {
+  if (wsReconnectTimer || !streamWanted()) return;
+  const delay = wsReconnectDelay;
+  wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_RECONNECT_MAX_MS);
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    /* Reported rather than thrown into nothing: this runs on a timer with no caller left to
+     * reject to — and then tries again, which is the whole repair. */
+    ensureStream().catch((e) => {
+      console.warn(`[midorii] ProjectX stream could not be reopened — ${e instanceof Error ? e.message : String(e)}`);
+      scheduleReconnect();
+    });
+  }, delay);
+}
+
 function stopReconnectingIfIdle() {
-  if (barFeeds.size === 0 && quoteSubscribers.size === 0 && wsReconnectTimer) {
+  if (streamWanted()) return;
+  if (wsReconnectTimer) {
     clearTimeout(wsReconnectTimer);
     wsReconnectTimer = null;
   }
+  wsReconnectDelay = WS_RECONNECT_MS;
 }
 
 async function ensureStream() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   if (wsConnectPromise) return wsConnectPromise;
   wsConnectPromise = (async () => {
-    const neg = await negotiate();
+    const neg = await negotiate(creds.hub, 'hub');
     const url = `${creds.hub.replace(/^http/, 'ws')}`
       + `?id=${encodeURIComponent(neg.connectionToken || neg.connectionId)}`
       + `&access_token=${encodeURIComponent(token)}`;
@@ -652,6 +757,8 @@ async function ensureStream() {
             settled = true;
             ws = socket;
             streamed.clear();
+            // Back to the short wait: the next drop is a fresh outage, not this one continuing.
+            wsReconnectDelay = WS_RECONNECT_MS;
             wire('hub.handshake', { ok: true });
             // Re-subscribe everything — a fresh socket remembers nothing.
             for (const id of activeContracts()) streamContract(id);
@@ -666,13 +773,7 @@ async function ensureStream() {
         ws = null;
         streamed.clear();
         if (!settled) { settled = true; reject(new Error('ProjectX hub closed before it opened')); }
-        if (barFeeds.size > 0 || quoteSubscribers.size > 0) {
-          /* Reported rather than thrown into nothing: reopening runs on a timer with no
-           * caller left to reject to. */
-          wsReconnectTimer = setTimeout(() => {
-            ensureStream().catch((e) => console.warn(`[midorii] ProjectX stream could not be reopened — ${e instanceof Error ? e.message : String(e)}`));
-          }, WS_RECONNECT_MS);
-        }
+        scheduleReconnect();
       };
     });
   })().finally(() => { wsConnectPromise = null; });
@@ -697,6 +798,19 @@ function handleHubMessage(msg) {
     /* An array, not a tick: up to twenty prints arrive in one message, and reading only
      * the first would silently drop most of the tape. */
     for (const trade of payload) foldTrade(contractId, trade);
+    /* And on to anyone reading the tape itself. Handed the batch whole rather than one at a
+     * time: a tape is read in bursts, and twenty repaints for one message is twenty times the
+     * work for a list that would look identical. */
+    const readers = printSubscribers.get(contractId);
+    if (readers && payload.length) {
+      for (const cb of readers) {
+        try {
+          cb(payload);
+        } catch (e) {
+          console.warn(`[midorii] ProjectX tape listener failed — ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
     return;
   }
 
@@ -725,6 +839,184 @@ function handleHubMessage(msg) {
     const quote = { contractId, ...state };
     for (const cb of quoteSubscribers.get(contractId) ?? []) cb(quote);
   }
+}
+
+// ── The account side ────────────────────────────────────────────────────────
+
+/**
+ * The user hub: the gateway telling us that something happened to the account.
+ *
+ * Without it the only way to learn about a fill is to ask, and asking on a timer means a
+ * stop that triggered is on screen somewhere between nought and one interval later — with
+ * the interval also being how long a leftover protective order lives before it is swept.
+ *
+ * What arrives here is deliberately treated as a DOORBELL, not as news.
+ * -------------------------------------------------------------------
+ * Each event carries the object it is about, and this relay passes it on untouched — but
+ * nothing in the app reads it, and the controller's answer to any of them is to re-read the
+ * account over REST. That is not timidity about the payload: it is the same rule the rest of
+ * this venue is built on, that what is drawn is what the venue confirms when asked. It also
+ * means the one thing this file asserts about the hub is the set of event NAMES, which is
+ * published, rather than the shape of four payloads, which would be a second source of truth
+ * to keep in step with a gateway nobody here controls.
+ *
+ * Subscriptions are per account id, so they are re-sent whenever the chosen account changes.
+ */
+
+/** The four the gateway sends on this hub. Anything else is bookkeeping. */
+const USER_EVENTS = new Set(['GatewayUserAccount', 'GatewayUserOrder', 'GatewayUserPosition', 'GatewayUserTrade']);
+
+/** Ask the user socket for everything about `id`, and only once per socket per account. */
+function subscribeUser(id) {
+  if (userSubscribedTo === id) return;
+  const sent = sendTo(userWs, { type: 1, target: 'SubscribeAccounts', arguments: [] })
+    && sendTo(userWs, { type: 1, target: 'SubscribeOrders', arguments: [id] })
+    && sendTo(userWs, { type: 1, target: 'SubscribePositions', arguments: [id] })
+    && sendTo(userWs, { type: 1, target: 'SubscribeTrades', arguments: [id] });
+  if (sent) {
+    userSubscribedTo = id;
+    wire('user.subscribe', { accountId: id });
+  }
+}
+
+/**
+ * Point the user socket at whichever account is chosen now.
+ *
+ * Called after the account changes as well as on connect. The old subscriptions are dropped
+ * first: this hub answers per account id, and leaving the previous one subscribed would wake
+ * the app for an account it is no longer trading.
+ */
+function refollowUser() {
+  if (!userWs || userWs.readyState !== WebSocket.OPEN) return;
+  if (userSubscribedTo === accountId) return;
+  if (userSubscribedTo != null) {
+    sendTo(userWs, { type: 1, target: 'UnsubscribeOrders', arguments: [userSubscribedTo] });
+    sendTo(userWs, { type: 1, target: 'UnsubscribePositions', arguments: [userSubscribedTo] });
+    sendTo(userWs, { type: 1, target: 'UnsubscribeTrades', arguments: [userSubscribedTo] });
+    userSubscribedTo = null;
+  }
+  if (accountId != null) subscribeUser(accountId);
+}
+
+function handleUserMessage(msg) {
+  if (msg.type === 7) { wire('user.close', { error: msg.error ?? null }); return; }
+  if (msg.type === 3 && msg.error) { wire('user.invocation-error', { error: msg.error }); return; }
+  if (msg.type !== 1) return;
+  if (!USER_EVENTS.has(msg.target)) return;
+  const payload = msg.arguments?.[0] ?? null;
+  for (const cb of userSubscribers) {
+    try {
+      cb({ event: msg.target, payload });
+    } catch (e) {
+      /* One listener throwing must not stop the next one hearing about a fill. */
+      console.warn(`[midorii] ProjectX user listener failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
+/**
+ * Reopen the account socket in a moment, and go on trying while anybody is still listening.
+ *
+ * The market stream's {@link scheduleReconnect}, for the other socket and for the same reason:
+ * an attempt refused before a socket exists — a login the gateway turns down, a machine with
+ * no network — calls no `onclose`, so arming the retry only from there gave up after one try.
+ * On this socket that is the more expensive silence of the two: it is where a fill arrives,
+ * and a controller that stops being told about fills believes the position it last saw.
+ */
+function scheduleUserReconnect() {
+  if (userReconnectTimer || userSubscribers.size === 0) return;
+  const delay = userReconnectDelay;
+  userReconnectDelay = Math.min(userReconnectDelay * 2, WS_RECONNECT_MAX_MS);
+  userReconnectTimer = setTimeout(() => {
+    userReconnectTimer = null;
+    ensureUserStream().catch((e) => {
+      console.warn(`[midorii] ProjectX user hub could not be reopened — ${e instanceof Error ? e.message : String(e)}`);
+      scheduleUserReconnect();
+    });
+  }, delay);
+}
+
+async function ensureUserStream() {
+  if (userWs && userWs.readyState === WebSocket.OPEN) return;
+  if (userConnectPromise) return userConnectPromise;
+  userConnectPromise = (async () => {
+    const neg = await negotiate(creds.userHub, 'user');
+    const url = `${creds.userHub.replace(/^http/, 'ws')}`
+      + `?id=${encodeURIComponent(neg.connectionToken || neg.connectionId)}`
+      + `&access_token=${encodeURIComponent(token)}`;
+    await new Promise((resolve, reject) => {
+      const socket = new WebSocket(url);
+      let settled = false;
+      let handshakeDone = false;
+
+      socket.onopen = () => {
+        socket.send(`${JSON.stringify({ protocol: 'json', version: 1 })}${SEP}`);
+      };
+      socket.onmessage = (ev) => {
+        const raw = typeof ev.data === 'string' ? ev.data : String(ev.data);
+        for (const part of raw.split(SEP)) {
+          if (!part) continue;
+          let msg;
+          try { msg = JSON.parse(part); } catch { continue; }
+          if (!handshakeDone) {
+            handshakeDone = true;
+            if (msg.error) {
+              wire('user.handshake', { error: msg.error });
+              try { socket.close(); } catch { /* onclose follows */ }
+              if (!settled) { settled = true; reject(new Error(`ProjectX user hub refused the handshake — ${msg.error}`)); }
+              return;
+            }
+            settled = true;
+            userWs = socket;
+            userSubscribedTo = null;   // a fresh socket remembers nothing
+            // Back to the short wait: the next drop is a fresh outage, not this one continuing.
+            userReconnectDelay = WS_RECONNECT_MS;
+            wire('user.handshake', { ok: true });
+            if (accountId != null) subscribeUser(accountId);
+            resolve();
+            continue;
+          }
+          handleUserMessage(msg);
+        }
+      };
+      socket.onerror = () => { try { socket.close(); } catch { /* onclose follows */ } };
+      socket.onclose = () => {
+        userWs = null;
+        userSubscribedTo = null;
+        if (!settled) { settled = true; reject(new Error('ProjectX user hub closed before it opened')); }
+        /* Reopened only while somebody is still listening. A controller that has been taken
+         * off the chart is not waiting for a fill, and a socket nobody reads is a session
+         * held open for nothing. */
+        scheduleUserReconnect();
+      };
+    });
+  })().finally(() => { userConnectPromise = null; });
+  return userConnectPromise;
+}
+
+/**
+ * Hear about anything that happens to the chosen account.
+ *
+ * Resolves once the socket is actually up, so a caller can say whether it is being pushed to
+ * or is still on its own timer — the difference decides how often it has to ask. Answering
+ * before the handshake would have every caller believe it is live and quietly poll too slowly.
+ */
+export async function projectXSubscribeUser(handler) {
+  userSubscribers.add(handler);
+  try {
+    await ensureUserStream();
+  } catch (e) {
+    userSubscribers.delete(handler);
+    throw e;
+  }
+  return () => {
+    userSubscribers.delete(handler);
+    if (userSubscribers.size > 0) return;
+    if (userReconnectTimer) { clearTimeout(userReconnectTimer); userReconnectTimer = null; }
+    userReconnectDelay = WS_RECONNECT_MS;
+    userSubscribedTo = null;
+    if (userWs) { try { userWs.close(); } catch { /* onclose does the rest */ } }
+  };
 }
 
 // ── Tick → bar aggregation ──────────────────────────────────────────────────
@@ -827,6 +1119,32 @@ export async function projectXSubscribeQuotes(contractId, cb) {
     listeners.delete(cb);
     if (listeners.size > 0) return;
     quoteSubscribers.delete(contractId);
+    unstreamIfIdle(contractId);
+    stopReconnectingIfIdle();
+  };
+}
+
+/**
+ * The tape: every print on a contract, as it arrives.
+ *
+ * The same pair of hub subscriptions the quotes and the bars ride, so this costs nothing extra
+ * on the wire — what it adds is that the prints are passed on WHOLE rather than only folded
+ * into a bar. The aggressor side rides along in each print's own `type`, which is what makes a
+ * tape worth reading rather than a list of prices.
+ */
+export async function projectXSubscribePrints(contractId, cb) {
+  if (!printSubscribers.has(contractId)) printSubscribers.set(contractId, new Set());
+  printSubscribers.get(contractId).add(cb);
+
+  await ensureStream();
+  streamContract(contractId);
+
+  return () => {
+    const listeners = printSubscribers.get(contractId);
+    if (!listeners) return;
+    listeners.delete(cb);
+    if (listeners.size > 0) return;
+    printSubscribers.delete(contractId);
     unstreamIfIdle(contractId);
     stopReconnectingIfIdle();
   };

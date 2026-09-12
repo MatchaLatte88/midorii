@@ -15,6 +15,7 @@ interface ProjectXClient {
     projectXBars(contractId: string, timeframe: string, opts?: { from?: number; to?: number; limit?: number }): Promise<Bar[]>;
     projectXSubscribe(contractId: string, timeframe: string, cb: (bar: Bar) => void): Promise<() => void>;
     projectXSubscribeQuotes(contractId: string, cb: (quote: Quote) => void): Promise<() => void>;
+    projectXSubscribeUser(handler: (event: { event: string; payload: unknown }) => void): Promise<() => void>;
     projectXAccount(): { accountId: number | null; chosen: boolean };
     projectXSelectAccount(id: number | string): Promise<Account>;
     projectXPositions(): Promise<unknown[]>;
@@ -730,5 +731,120 @@ describe('ProjectX subscriptions', () => {
             time: Date.parse('2026-09-10T18:49:00Z'),
             open: 110, high: 110, low: 110, close: 110, volume: 1,
         });
+    });
+});
+
+describe('ProjectX reconnection', () => {
+    /** Bring the socket that a reopen has just created up, as the server would. */
+    async function raiseReopened(index: number) {
+        await vi.waitFor(() => expect(FakeSocket.instances.length).toBeGreaterThan(index));
+        const socket = FakeSocket.instances[index]!;
+        socket.onopen?.();
+        socket.completeHandshake();
+        return socket;
+    }
+
+    it('goes on trying after a reopen that fails before any socket exists', async () => {
+        const { socket } = await feedFor('1');
+        vi.useFakeTimers();
+        try {
+            /* A reopen this early never reaches a socket: it negotiates first, and a refused
+             * negotiate throws where no `onclose` can follow. That is the case that used to
+             * end the retries — one attempt, then a chart left asking a feed nobody was
+             * reopening. */
+            vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the network is gone'));
+            socket.close();
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(FakeSocket.instances).toHaveLength(1);
+
+            vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(negotiated());
+            await vi.advanceTimersByTimeAsync(4_000);
+            const reopened = await raiseReopened(1);
+            // Back up, and watching what it was watching before — a fresh socket remembers nothing.
+            expect(reopened.records().map((r) => r.target)).toContain('SubscribeContractTrades');
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('waits longer each time rather than hammering a venue that keeps refusing', async () => {
+        const { socket } = await feedFor('1');
+        vi.useFakeTimers();
+        try {
+            vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the network is gone'));
+            socket.close();
+            await vi.advanceTimersByTimeAsync(2_000); // first retry: refused
+            const attempts = (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+            await vi.advanceTimersByTimeAsync(2_000); // the old fixed delay would have tried again here
+            expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(attempts);
+            await vi.advanceTimersByTimeAsync(2_000); // four seconds after the first: now it tries
+            expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBeGreaterThan(attempts);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('stops trying once nothing wants the stream any more', async () => {
+        const { socket, unsubscribe } = await feedFor('1');
+        vi.useFakeTimers();
+        try {
+            unsubscribe();
+            const fetching = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('nothing should ask for this'));
+            const before = fetching.mock.calls.length;
+            socket.close();
+            await vi.advanceTimersByTimeAsync(30_000);
+            expect(FakeSocket.instances).toHaveLength(1);
+            expect(fetching.mock.calls).toHaveLength(before);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    /* The account socket is the one a fill arrives on, so it reopens on the same terms — and
+     * failed the same way before this: one try, then a controller left believing the position
+     * it last heard about. */
+    async function openUserStream() {
+        const events: unknown[] = [];
+        vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(session())
+            .mockResolvedValueOnce(negotiated());
+        const pending = px.projectXSubscribeUser((event) => { events.push(event); });
+        const socket = await raiseSocket();
+        const unsubscribe = await pending;
+        return { socket, events, unsubscribe };
+    }
+
+    it('goes on trying to reopen the account stream, where a missed fill costs the most', async () => {
+        const { socket } = await openUserStream();
+        vi.useFakeTimers();
+        try {
+            vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the network is gone'));
+            socket.close();
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(FakeSocket.instances).toHaveLength(1);
+
+            vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(negotiated());
+            await vi.advanceTimersByTimeAsync(4_000);
+            await raiseReopened(1);
+            expect(FakeSocket.instances).toHaveLength(2);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('stops trying for the account stream once nobody is listening for fills', async () => {
+        const { socket, unsubscribe } = await openUserStream();
+        vi.useFakeTimers();
+        try {
+            unsubscribe();
+            const fetching = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('nothing should ask for this'));
+            const before = fetching.mock.calls.length;
+            socket.close();
+            await vi.advanceTimersByTimeAsync(30_000);
+            expect(FakeSocket.instances).toHaveLength(1);
+            expect(fetching.mock.calls).toHaveLength(before);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

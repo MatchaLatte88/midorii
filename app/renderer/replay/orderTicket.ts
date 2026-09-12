@@ -68,6 +68,62 @@ export interface TicketAccount {
      */
     bid?: number;
     ask?: number;
+    /**
+     * What one point of price movement is worth, per unit, in the account's money.
+     *
+     * On a spot account this is 1 and always was: one unit of the instrument moving one point
+     * moves the balance by one of whatever it is quoted in. A futures contract is the case it
+     * exists for — one NQ moving four points is eighty dollars, not four — and without it every
+     * figure below is out by that multiple, in the direction that sizes the trade too large.
+     *
+     * Absent means 1. Not because one is always right, but because it is what every account
+     * here has been measured as until now, and a number invented for an instrument nobody has
+     * asked about would be a confident wrong answer where there is currently an honest one.
+     */
+    pointValue?: number;
+    /**
+     * The grid sizes have to sit on, and the smallest the venue will deal.
+     *
+     * A size is worked out from risk and comes out a fraction; what is SENT is that fraction
+     * on the venue's own grid. Absent where the panel has not been told, and then nothing is
+     * snapped and the venue applies its own rules after the fact — which is what every account
+     * did before these were carried, and is exactly the gap they close: the figure on the
+     * ticket was not the figure the order went out with.
+     */
+    sizeStep?: number;
+    minSize?: number;
+}
+
+/** One point in account money, per unit. See {@link TicketAccount.pointValue}. */
+function pointValueOf(account: TicketAccount): number {
+    const value = account.pointValue;
+    return value != null && value > 0 ? value : 1;
+}
+
+/**
+ * The largest size at or below `size` that the venue would accept, or null where none is.
+ *
+ * DOWN, never up. A size rounded up risks more than the number it was worked out from, and a
+ * risk figure is the one thing on this panel that may not be wrong in that direction: a
+ * ticket that says 40 dollars and sends 60 is worse than one that says it cannot be sent.
+ */
+function snapSize(size: number | null, account: TicketAccount): number | null {
+    if (size == null) return null;
+    const step = account.sizeStep;
+    // Eight decimals clears the dust a divide-and-multiply leaves behind; the epsilon keeps a
+    // size that IS on the grid from falling a step through a binary-float hair.
+    const out = step != null && step > 0
+        ? Number((Math.floor((size + step * 1e-9) / step) * step).toFixed(8))
+        : size;
+    if (!(out > 0)) return null;
+    if (account.minSize != null && out < account.minSize) return null;
+    return out;
+}
+
+/** The smallest trade this instrument accepts, where the panel has been told. */
+function sizeFloor(account: TicketAccount): number | null {
+    const floor = account.minSize ?? account.sizeStep;
+    return floor != null && floor > 0 ? floor : null;
 }
 
 /**
@@ -206,11 +262,21 @@ export function ticketPlan(draft: TicketDraft, account: TicketAccount, risk: Ris
     const typed = draft.entryPrice != null && draft.entryPrice > 0 ? draft.entryPrice : null;
     const reference = draft.type === 'market' ? (account.price > 0 ? account.price : null) : typed;
 
-    const size = ticketSize(draft, reference, account, risk);
-    const notional = size != null && reference != null ? size * reference : null;
+    /* Points into money, once, here — every figure below is in the account's currency and
+     * none of them is a price. See {@link TicketAccount.pointValue}. */
+    const value = pointValueOf(account);
+
+    /* What the risk asks for, and what the venue would actually take. The two are kept apart
+     * because only the first of them says whether the CEILING decided this trade: a size held
+     * to the grid differs from the ceiling by up to a step, every time, and comparing the
+     * snapped one would report a cap that never bit. */
+    const wanted = ticketSize(draft, reference, account, risk, value);
+    const size = snapSize(wanted, account);
+
+    const notional = size != null && reference != null ? size * reference * value : null;
 
     const cash = size != null && reference != null && draft.stopLoss != null
-        ? Math.abs(reference - draft.stopLoss) * size
+        ? Math.abs(reference - draft.stopLoss) * size * value
         : null;
 
     const spread = reference != null && draft.stopLoss != null ? Math.abs(reference - draft.stopLoss) : 0;
@@ -221,9 +287,9 @@ export function ticketPlan(draft: TicketDraft, account: TicketAccount, risk: Ris
     /* Where the cap bit, the size is no longer the one the risk asked for, and the trade will
      * lose less than it was allowed to at its stop. Worth saying out loud: a ticket pinned to
      * the ceiling is telling you the stop is too tight for the risk, not that all is well. */
-    const ceiling = sizeCeiling(reference, account, risk);
-    const capped = draft.sizing === 'risk' && size != null && ceiling != null
-        && Math.abs(size - ceiling) < ceiling * 1e-9;
+    const ceiling = sizeCeiling(reference, account, risk, value);
+    const capped = draft.sizing === 'risk' && wanted != null && ceiling != null
+        && Math.abs(wanted - ceiling) < ceiling * 1e-9;
 
     return {
         reference,
@@ -244,12 +310,16 @@ export function ticketPlan(draft: TicketDraft, account: TicketAccount, risk: Ris
  * limit, decided by somebody else. A paper account's is the leverage figure in its own
  * settings, which is a rule its owner wrote for themselves.
  */
-function sizeCeiling(reference: number | null, account: TicketAccount, risk: RiskSettings): number | null {
+function sizeCeiling(reference: number | null, account: TicketAccount, risk: RiskSettings, value: number): number | null {
     if (reference == null || !(reference > 0)) return null;
+    /* `reference * value` is what ONE unit is worth, which is what both ceilings are really
+     * divided by — a leverage multiple and a margin share are both shares of what is being
+     * carried, and what is carried is not the price on a contract that multiplies it. */
+    const perUnit = reference * value;
     if (account.marginFactor != null && account.marginFactor > 0 && account.available != null) {
-        return account.available / (account.marginFactor * reference);
+        return account.available / (account.marginFactor * perUnit);
     }
-    return (account.equity * risk.maxLeverage) / reference;
+    return (account.equity * risk.maxLeverage) / perUnit;
 }
 
 /** What the venue would hold against this position. Null on an account that does not margin. */
@@ -258,14 +328,36 @@ function marginFor(notional: number | null, account: TicketAccount): { required:
     return { required: notional * account.marginFactor, available: account.available };
 }
 
-/** The size the ticket would send, or null where there is no honest answer. */
-function ticketSize(draft: TicketDraft, reference: number | null, account: TicketAccount, risk: RiskSettings): number | null {
+/**
+ * The size the risk asks for, before the venue's grid is applied — or null where there is no
+ * honest answer.
+ *
+ * `positionSize` is the one answer in this app to "how big for this risk", and it is written
+ * in a world where one point of price is one unit of money. That is not a limitation of it;
+ * it is the arithmetic. So the two prices are converted into account money on the way in,
+ * rather than the rule being copied out and adjusted here — a second implementation of sizing
+ * is how a hand-placed trade and a bot's stop being "the same 1%" quietly stop being the same.
+ */
+function ticketSize(
+    draft: TicketDraft,
+    reference: number | null,
+    account: TicketAccount,
+    risk: RiskSettings,
+    value: number,
+): number | null {
     if (draft.sizing === 'fixed') return draft.fixedSize != null && draft.fixedSize > 0 ? draft.fixedSize : null;
     if (reference == null || draft.stopLoss == null) return null;
-    const sized = positionSize(account.equity, reference, draft.stopLoss, risk.mode, risk.value, risk.maxLeverage);
+    const sized = positionSize(
+        account.equity,
+        reference * value,
+        draft.stopLoss * value,
+        risk.mode,
+        risk.value,
+        risk.maxLeverage,
+    );
     /* On a margined account the leverage setting is not the binding limit — the money left is.
      * Held to whichever is smaller, so a ticket never offers a size the account cannot fund. */
-    const ceiling = sizeCeiling(reference, account, risk);
+    const ceiling = sizeCeiling(reference, account, risk, value);
     if (sized == null || ceiling == null) return sized;
     return Math.min(sized, ceiling);
 }
@@ -290,7 +382,16 @@ export function ticketRefusal(draft: TicketDraft, side: 'buy' | 'sell', account:
     if (draft.sizing === 'fixed' && !(draft.fixedSize != null && draft.fixedSize > 0)) {
         return 'A fixed size has to be a positive number of units.';
     }
-    if (plan.size == null) return 'This cannot be sized against the account.';
+    if (plan.size == null) {
+        /* The size existed and the venue's grid took it to nothing — a different problem from
+         * "this cannot be sized", and one with a different answer: widen nothing, risk more,
+         * or accept that this instrument does not trade in pieces that small. */
+        const floor = sizeFloor(account);
+        if (floor != null) {
+            return `The smallest trade this instrument takes is ${floor} — this works out to less.`;
+        }
+        return 'This cannot be sized against the account.';
+    }
 
     if (draft.type !== 'market') {
         /* A limit is a pullback and a stop is a breakout: which side of the market the level

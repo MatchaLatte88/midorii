@@ -297,3 +297,86 @@ describe('the sizes offered on the ticket', () => {
         expect(normalizeQuickSizes(many)).toHaveLength(MAX_QUICK_SIZES);
     });
 });
+
+/**
+ * An instrument whose point is not a unit of account money.
+ *
+ * One NQ contract: a quarter-point tick worth five dollars, so twenty dollars a point, whole
+ * contracts only. Every figure the ticket shows is in the account's money, and without the
+ * multiplier each of them is out by twenty — in the direction that sizes the trade too large.
+ */
+const FUTURES: TicketAccount = {
+    equity: 50_000,
+    price: 24_000,
+    pointValue: 20,
+    sizeStep: 1,
+    minSize: 1,
+};
+
+describe('an instrument that multiplies', () => {
+    it('costs what the stop is worth in money, not what it is worth in points', () => {
+        // 10 points on 1 contract is $200, not $10.
+        const plan = ticketPlan(ticket({ fixedSize: 1, stopLoss: 23_990 }), FUTURES, RISK);
+        expect(plan.risk).toEqual({ cash: 200, share: 0.004 });
+    });
+
+    it('carries what a contract is worth, not what it is priced at', () => {
+        const plan = ticketPlan(ticket({ fixedSize: 1 }), FUTURES, RISK);
+        // One NQ at 24,000 is $480,000 of notional — not $24,000.
+        expect(plan.notional).toBe(480_000);
+    });
+
+    it('sizes from risk against the money, so the stop costs what was asked', () => {
+        /* 1% of 50,000 is $500. A stop 10 points away costs $200 a contract, so the risk buys
+         * 2.5 contracts — where a points-only division would have asked for 50 of them, and
+         * the trade would have risked twenty times what was agreed to. */
+        const plan = ticketPlan(byRisk({ stopLoss: 23_990 }), FUTURES, { ...RISK, maxLeverage: 100 });
+        expect(plan.size).toBe(2); // 2.5, held to whole contracts
+        expect(plan.risk?.cash).toBe(400);
+    });
+
+    it('holds the leverage ceiling against what is carried, not against the price', () => {
+        /* At one times equity, $50,000 buys nothing of a contract worth $480,000 — the
+         * ceiling bites before the risk does, and the size comes to less than one. */
+        const plan = ticketPlan(byRisk({ stopLoss: 23_990 }), FUTURES, RISK);
+        expect(plan.size).toBeNull();
+        expect(refusal(byRisk({ stopLoss: 23_990 }), 'buy', FUTURES))
+            .toMatch(/smallest trade this instrument takes is 1/);
+    });
+});
+
+describe('the size the venue would actually take', () => {
+    it('puts a risk-sized fraction on the grid, downwards', () => {
+        /* 1% of 108,000 is $1,080 over a $200 stop: 5.4 contracts. Six would lose more at the
+         * stop than the number the size was worked out from, so it is the 5 that goes out. */
+        const account: TicketAccount = { ...FUTURES, equity: 108_000 };
+        const plan = ticketPlan(byRisk({ stopLoss: 23_990 }), account, { ...RISK, maxLeverage: 100 });
+        expect(plan.size).toBe(5);
+    });
+
+    it('puts a typed size on the grid too — what is shown is what goes out', () => {
+        const plan = ticketPlan(ticket({ fixedSize: 1.6 }), FUTURES, RISK);
+        expect(plan.size).toBe(1);
+    });
+
+    it('refuses rather than raising a size the grid takes to nothing', () => {
+        const draft = ticket({ fixedSize: 0.4 });
+        expect(ticketPlan(draft, FUTURES, RISK).size).toBeNull();
+        expect(refusal(draft, 'buy', FUTURES)).toMatch(/smallest trade this instrument takes is 1/);
+    });
+
+    it('leaves an account with no grid exactly as it was', () => {
+        // Every crypto and paper account here: no step stated, nothing snapped.
+        expect(ticketPlan(ticket({ fixedSize: 0.37 }), ACCOUNT, RISK).size).toBe(0.37);
+    });
+
+    it('still reports the cap from the size the risk asked for, not the snapped one', () => {
+        /* The snapped size differs from the ceiling by up to a step every time, so comparing
+         * that one would report a cap on trades the ceiling never touched. */
+        const account: TicketAccount = { equity: 10_000, price: 3, sizeStep: 1 };
+        const plan = ticketPlan(byRisk({ stopLoss: 2.999 }), account, RISK);
+        // The ceiling is 3333.33; what goes out is 3333. The cap still bit.
+        expect(plan.size).toBe(3333);
+        expect(plan.capped).toBe(true);
+    });
+});

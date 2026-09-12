@@ -48,6 +48,9 @@ export interface ReplayVisualState {
         side: 'buy' | 'sell';
         price: number;
         tag: string | null;
+        /** Units waiting. Optional: an older payload has none, and the tag then says only
+         *  what kind of order it is, which is what it always said. */
+        size?: number;
     }>;
     /**
      * Every order that has actually filled, in execution order.
@@ -81,6 +84,12 @@ export function readLineId(id: string): { positionId: number; level: 'entry' | '
     if (!m) return null;
     const level = m[2] === 'sl' ? 'stop' : m[2] === 'tp' ? 'target' : 'entry';
     return { positionId: Number(m[1]), level };
+}
+
+/** The same for a resting order's own line. Null for anything that is not one. */
+export function readOrderLineId(id: string): number | null {
+    const m = /^ord_(\d+)_lvl$/.exec(id);
+    return m ? Number(m[1]) : null;
 }
 
 /** The mark a currency is written with, for the ones this app is likely to meet. Anything
@@ -251,12 +260,21 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
         }
     }
 
-    // A resting order has not happened yet: it is only drawn ahead of the playhead.
+    /* A resting order has not happened yet: it is only drawn ahead of the playhead.
+     *
+     * Taken hold of the same way a stop is, because it is the same gesture about the same kind
+     * of thing — a level you want moved. The ✕ on its tag cancels it, which is the one
+     * destructive thing an order offers, exactly as the entry tag's ✕ closes a position.
+     * Neither decides anything here: the drop is reported and the account answers. */
     for (const o of state.orders) {
         lines.push(line(`ord_${o.id}`, nowTime, nowTime, o.price, ORDER_COLOR, 'dashed', 'right'));
         priceLines.push({
             id: `ord_${o.id}_lvl`, paneId: 'price', price: o.price, color: ORDER_COLOR,
-            lineStyle: 'dotted', title: o.tag ?? o.side,
+            lineStyle: 'dotted',
+            /* Which way it goes and how big, not just what kind it is: a chart with three
+             * resting orders on it is read by their sizes, and "limit" is true of all three. */
+            title: [o.tag ?? o.side, o.size != null ? formatSize(o.size) : null].filter(Boolean).join('  '),
+            axisTag: true, draggable: true, action: 'close',
         });
     }
 

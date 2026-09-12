@@ -44,6 +44,31 @@ export interface TradingController {
     /** What is open right now — read to find the position a dragged level belongs to. */
     positions(): readonly ControlledPosition[];
     /**
+     * What one point of price movement is worth, per unit, in the account's money.
+     *
+     * Absent means one, which is what a spot account is and what everything here assumed
+     * before a futures contract was one of the things being traded: one NQ moving four points
+     * is eighty dollars, not four, and a trade sized without knowing that is sized by that
+     * multiple too large. Optional because a venue that cannot state it honestly must not
+     * state a one instead — see `CapitalController`, which can only learn it from a position
+     * that already exists.
+     */
+    pointValue?(): number;
+    /**
+     * The largest size at or below `size` this venue would accept, or 0 where none is.
+     *
+     * Sizing from risk produces a fraction; a venue takes whole contracts, or hundredths, or
+     * whatever its own grid says. Asked here rather than left to the order call, because the
+     * number has to be known BEFORE it is sent — it is the number the person is shown, and a
+     * ticket that reads 1.6 and sends 2 has told them the wrong risk. Always downwards: a size
+     * rounded up risks more than was asked for.
+     *
+     * Distinct from the `snapSize` helpers inside the venue controllers, which are the guard
+     * on the way OUT and refuse rather than answer. This one is asked before anything is
+     * sent, so it answers with a number a caller can show.
+     */
+    sizeOnGrid?(size: number): number;
+    /**
      * Place an order.
      *
      * Anything the account can refuse OUTRIGHT — an unsized trade, a market it is not on —
@@ -57,6 +82,17 @@ export interface TradingController {
     protect(levels: ProtectionLevels, positionId?: number | null): void;
     /** Close one position outright, at market. */
     closeOne(positionId: number): void;
+    /**
+     * Move a resting order to a new price.
+     *
+     * Optional, because not every account here HAS resting orders to move — a spot balance
+     * with no working book has nothing to answer. Where it is absent the chart leaves those
+     * lines where they are: a line that could be dragged and then silently sprang back would
+     * be worse than one that was never draggable.
+     */
+    moveOrder?(orderId: number, price: number): void;
+    /** Cancel one resting order — what the ✕ on its tag reaches. Optional for the same reason. */
+    cancelOrder?(orderId: number): void;
     /** Redraw the chart from the account as it stands — after a refused edit, so what is
      *  on screen goes back to being what is true. */
     refreshVisuals(): void;

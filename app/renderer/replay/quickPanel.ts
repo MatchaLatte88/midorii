@@ -152,6 +152,15 @@ export interface QuickPanelOptions {
     brackets?: QuickProtection['as'];
     /** The instrument's own increment, for putting a computed level on the venue's grid. */
     tick?(): number | null;
+    /**
+     * What one point of price movement is worth, per unit, in the account's money.
+     *
+     * The risk box is read as money and turned into a stop DISTANCE, so without this the
+     * distance is out by whatever a point is actually worth — on a futures contract the stop
+     * lands twenty times too far away and the trade risks twenty times what was typed.
+     * Absent means one, which is what a spot account is.
+     */
+    pointValue?(): number;
 }
 
 export interface QuickPanel {
@@ -301,7 +310,7 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
     const stopWatching = onOverlayDisplayChange((display) => card.setAvailable(display.showQuick));
 
     function refresh(): void {
-        const plan = quickPlan(draft, opts.price());
+        const plan = quickPlan(draft, opts.price(), opts.pointValue?.() ?? 1);
         const blocked = plan.refusal != null;
         for (const b of [buy, sell]) {
             b.disabled = blocked;
@@ -313,7 +322,7 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
     }
 
     function send(which: 'buy' | 'sell'): void {
-        const plan = quickPlan(draft, opts.price());
+        const plan = quickPlan(draft, opts.price(), opts.pointValue?.() ?? 1);
         if (plan.refusal != null || plan.size == null) return;
         opts.order(quickOrder(draft, which, plan, { as: opts.brackets ?? 'distance', tick: opts.tick?.() ?? null }));
         /* The size stays. It is how this session is being traded — the next entry is usually

@@ -3,6 +3,7 @@ import type { Costs, PositionMode } from '../../../shared/engine/broker.js';
 import { normalizeQuickSizes } from '../replay/orderTicket';
 import type { BracketSettings, TicketSizing } from '../replay/orderTicket';
 import type { RiskSettings } from '../replay/replayOrders';
+import type { RiskLimits } from './riskLimits';
 
 /**
  * What a paper account is, before it has traded anything.
@@ -65,6 +66,16 @@ export interface PaperSettings {
     bracketStop: number;
     /** How far the automatic target sits from the entry, in `bracketUnit`. */
     bracketTarget: number;
+    /**
+     * The limits that end a session rather than size a trade — see {@link RiskLimits}.
+     *
+     * All zero, which is off, and deliberately so: a limit nobody chose would start refusing
+     * orders for a reason they never agreed to, and they would meet it for the first time
+     * mid-trade.
+     */
+    dailyLossLimit: number;
+    maxPositionSize: number;
+    lossStreakLimit: number;
 }
 
 export const DEFAULT_PAPER_SETTINGS: PaperSettings = {
@@ -82,6 +93,9 @@ export const DEFAULT_PAPER_SETTINGS: PaperSettings = {
     bracketUnit: 'ticks',
     bracketStop: 40,
     bracketTarget: 80,
+    dailyLossLimit: 0,
+    maxPositionSize: 0,
+    lossStreakLimit: 0,
 };
 
 const STORAGE_KEY = 'midorii-paper-settings';
@@ -102,6 +116,15 @@ export function positionModeOf(settings: PaperSettings): PositionMode {
 /** The ticket's half — how a trade is sized. Read fresh whenever one is placed. */
 export function riskOf(settings: PaperSettings): RiskSettings {
     return { mode: settings.riskMode, value: settings.riskValue, maxLeverage: settings.maxLeverage };
+}
+
+/** The session limits, read fresh whenever an order is about to go out. */
+export function limitsOf(settings: PaperSettings): RiskLimits {
+    return {
+        dailyLoss: settings.dailyLossLimit,
+        maxSize: settings.maxPositionSize,
+        lossStreak: settings.lossStreakLimit,
+    };
 }
 
 /** Where a fresh ticket's stop and target start. Read fresh, for the same reason. */
@@ -163,6 +186,9 @@ export function normalizeSettings(raw: unknown): PaperSettings {
         bracketUnit: source.bracketUnit === 'cash' ? 'cash' : 'ticks',
         bracketStop: number(source.bracketStop, d.bracketStop, 0, 1e9),
         bracketTarget: number(source.bracketTarget, d.bracketTarget, 0, 1e9),
+        dailyLossLimit: number(source.dailyLossLimit, d.dailyLossLimit, 0, 1e9),
+        maxPositionSize: number(source.maxPositionSize, d.maxPositionSize, 0, 1e9),
+        lossStreakLimit: number(source.lossStreakLimit, d.lossStreakLimit, 0, 100),
     };
 }
 

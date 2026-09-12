@@ -3,8 +3,10 @@ import type { BracketMode, PlanMode } from '../../../shared/engine/plannedTrade.
 import { positionSize } from '../../../shared/strategies/risk.js';
 import type { RiskMode } from '../../../shared/strategies/risk.js';
 import { Menu } from '../../../src/ui';
+import { formatSize } from '../format';
 import type { Vela } from '../../../src';
 import type { TradingController } from '../trading/TradingController';
+import type { OrderSpec } from '../../../shared/engine/broker.js';
 
 /** Vela's built-in click-drag entry/stop/target tool. */
 const POSITION_TOOL = 'position';
@@ -32,6 +34,15 @@ export interface OrderEntryOptions {
     risk?: () => RiskSettings;
     /** Feedback for the user — a rejected block explains itself instead of failing mute. */
     notify?: (message: string, kind: 'info' | 'error') => void;
+    /**
+     * A last word before the order goes, which refuses by throwing.
+     *
+     * Where the session limits are applied. It is a hook rather than a check written into this
+     * file because a block traded from the chart is only one of three ways in, and all three
+     * have to meet the same limit — so the rule lives with whoever mounted them, and each way
+     * in asks it rather than owning a copy.
+     */
+    beforeOrder?: (spec: OrderSpec) => void;
 }
 
 /** Price formatting for the menu's hints — enough decimals to name a level, no more. */
@@ -100,17 +111,30 @@ export function wireOrderEntry(opts: OrderEntryOptions): () => void {
 
             const risk = riskNow();
             const sizeEntry = sizingEntry(spec, controller.price());
-            const size = positionSize(
+            /* Prices into account money before they are sized against, for the reason the
+             * ticket panel gives: a point of an instrument is not always one of whatever the
+             * account is kept in, and on a futures contract it is twenty of them. One is what
+             * a spot account is, and what this did before contracts were tradeable here. */
+            const value = controller.pointValue?.() ?? 1;
+            const wanted = positionSize(
                 controller.equity(),
-                sizeEntry,
-                sizingStop(spec, sizeEntry),
+                sizeEntry * value,
+                sizingStop(spec, sizeEntry) * value,
                 risk.mode,
                 risk.value,
                 risk.maxLeverage,
             );
-            if (size == null) throw new Error('This block cannot be sized against the account.');
+            if (wanted == null) throw new Error('This block cannot be sized against the account.');
 
-            controller.order({
+            /* On the venue's own grid before it goes, so the size reported below is the size
+             * that was sent. A block that sizes to less than the smallest deal is refused
+             * here rather than raised to one — the block said how much this may lose. */
+            const size = controller.sizeOnGrid ? controller.sizeOnGrid(wanted) : wanted;
+            if (!(size > 0)) {
+                throw new Error('This block sizes to less than the smallest trade this instrument takes.');
+            }
+
+            const order: OrderSpec = {
                 side: spec.side,
                 type: spec.type,
                 size,
@@ -118,8 +142,11 @@ export function wireOrderEntry(opts: OrderEntryOptions): () => void {
                 ...(spec.type === 'stop' ? { stopPrice: spec.price! } : {}),
                 bracket: spec.bracket,
                 tag: 'manual',
-            });
-            notify(`${spec.side === 'buy' ? 'Long' : 'Short'} ${size.toFixed(4)} placed`, 'info');
+            };
+            // Refuses by throwing, and the block stays where it is so the reason can be acted on.
+            opts.beforeOrder?.(order);
+            controller.order(order);
+            notify(`${spec.side === 'buy' ? 'Long' : 'Short'} ${formatSize(size)} placed`, 'info');
             /* Only now does the block go: from here the position (or the resting order) is
              * drawn by the replay indicator, which is state. Leaving the drawing would put a
              * draggable copy on the chart that the account knows nothing about. A REJECTED

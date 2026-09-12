@@ -169,7 +169,7 @@ export class CapitalController implements TradingController {
     private dealing: CapitalDealing | null;
 
     private live: LivePosition[] = [];
-    /** `dealId` → what one point is worth on it, in account money. See {@link pointValue}. */
+    /** `dealId` → what one point is worth on it, in account money. See {@link pointValueOf}. */
     private pointValues = new Map<string, number>();
     private resting: RestingOrder[] = [];
     private balance = 0;
@@ -288,8 +288,9 @@ export class CapitalController implements TradingController {
         return this.balance;
     }
 
-    /** What the venue says is open on this instrument. */
-    positions(): readonly ControlledPosition[] {
+    /** What the venue says is open on this instrument, in full — the levels included, which
+     *  is what the ladder and the chart both draw from. Satisfies `ControlledPosition`. */
+    positions(): readonly LivePosition[] {
         return this.live;
     }
 
@@ -404,6 +405,23 @@ export class CapitalController implements TradingController {
     }
 
     /** Take a resting order off the book. */
+    /**
+     * Move a working order to a new level — what a drag on its line reaches.
+     *
+     * One field, because this venue takes the order's level as one number whatever kind it is;
+     * the stop and profit attached to it are left exactly as they were, which is what dragging
+     * the ENTRY of a pending order means.
+     */
+    moveOrder(orderId: number, price: number): void {
+        const order = this.resting.find((o) => o.id === orderId);
+        if (!order) throw new Error('That order is no longer working — it may have filled or been cancelled.');
+        this.requireOpenMarket();
+        this.submit(
+            () => window.midori.capital.amendOrder({ dealId: order.dealId, level: price }),
+            'Moving the order',
+        );
+    }
+
     cancelOrder(orderId: number): void {
         const order = this.resting.find((o) => o.id === orderId);
         if (!order) throw new Error('That order is no longer on the book.');
@@ -444,6 +462,44 @@ export class CapitalController implements TradingController {
      */
     book(): TradeBook {
         return venueBook(this.live, this.resting, (p) => p.upl);
+    }
+
+    /**
+     * The size grid this instrument deals on, for whoever has to show a size before sending it.
+     *
+     * Only the two fields a ticket can act on, and only where the venue has stated them —
+     * an empty object rather than nulls, so spreading it onto an account leaves the fields
+     * absent rather than present and meaningless.
+     */
+    dealingRules(): { sizeStep?: number; minSize?: number } {
+        const step = this.dealing?.sizeIncrement;
+        const min = this.dealing?.minSize;
+        return {
+            ...(step != null && step > 0 ? { sizeStep: step } : {}),
+            ...(min != null && min > 0 ? { minSize: min } : {}),
+        };
+    }
+
+    /**
+     * The largest size at or below `size` this instrument deals in, or 0 where none is.
+     *
+     * For whoever has to SHOW the number before it is sent. {@link venueSize} is the guard on
+     * the way out and rounds to the nearest grid point, which is right for a size somebody
+     * typed; this one only ever goes down, because the sizes it is asked about were worked out
+     * from a risk and raising one raises what the trade loses at its stop.
+     *
+     * No point value to go with it: on this venue what a point is worth can only be learned
+     * from a position that has already moved — see {@link pointValueOf} — so the ticket goes on
+     * measuring in points here rather than being handed a one that might be wrong.
+     */
+    sizeOnGrid(size: number): number {
+        const step = this.dealing?.sizeIncrement;
+        const min = this.dealing?.minSize;
+        const out = step != null && step > 0
+            ? Number((Math.floor((size + step * 1e-9) / step) * step).toFixed(8))
+            : size;
+        if (!(out > 0)) return 0;
+        return min != null && out < min ? 0 : out;
     }
 
     /**
@@ -526,7 +582,7 @@ export class CapitalController implements TradingController {
                  * EUR account is not, and one unit of an instrument is not always one point of
                  * it. Both corrections live in the one factor below, so a level says what it is
                  * worth in the money the account is actually kept in. */
-                const perPoint = this.pointValue(p);
+                const perPoint = this.pointValueOf(p);
                 const at = (level: number | null): number | null => (
                     level == null || perPoint == null ? null : (level - p.entryPrice) * p.size * perPoint
                 );
@@ -893,7 +949,7 @@ export class CapitalController implements TradingController {
      * already charged, so a position held over several nights implies a slightly stale rate.
      * It is right to the cent on the day a trade is taken.
      */
-    private pointValue(p: LivePosition): number | null {
+    private pointValueOf(p: LivePosition): number | null {
         const drift = p.exitPrice - p.entryPrice;
         if (p.exitPrice > 0 && p.upl !== 0 && Math.abs(drift) > p.entryPrice * 1e-5) {
             this.pointValues.set(p.dealId, p.upl / (drift * p.size));

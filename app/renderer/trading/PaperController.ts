@@ -321,6 +321,20 @@ export class PaperController implements TradingController {
         this.settled();
     }
 
+    /**
+     * Move a resting order to a new price — what a drag on its line reaches.
+     *
+     * Which field carries it follows from the order's own kind, the same way it does on a
+     * venue: a stop waits on its trigger and a limit on its level.
+     */
+    moveOrder(orderId: number, price: number): void {
+        const order = this.session.broker.pending.find((o) => o.id === orderId);
+        if (!order) throw new Error('That order is no longer working — it may have filled or been cancelled.');
+        const moved = this.session.modifyOrder(orderId, order.type === 'stop' ? { stopPrice: price } : { limitPrice: price });
+        if (!moved) throw new Error('The account would not move that order.');
+        this.settled();
+    }
+
     cancelOrder(id: number): boolean {
         const gone = this.session.cancelOrder(id);
         this.settled();

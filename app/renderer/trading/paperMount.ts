@@ -11,7 +11,9 @@ import { wireOrderEntry } from '../replay/replayOrders';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { PaperController } from './PaperController';
 import { catchUpLabel, fetchGapBars } from './paperCatchUp';
-import { bracketsOf, riskOf, type PaperSettings } from './paperSettings';
+import { bracketsOf, limitsOf, riskOf, type PaperSettings } from './paperSettings';
+import { limitRefusal, sessionState } from './riskLimits';
+import { installTradeHotkeys, loadHotkeys } from './hotkeys';
 import { tickSizeOf } from '../alerts/symbolTick';
 import type { ThemeName, VelaTheme } from '../../../src';
 
@@ -99,6 +101,23 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
     off.push(styling.dispose);
 
     // ── the ticket beside the plot ───────────────────────────────────────
+
+    /**
+     * The session limits, applied at the one place every way in passes through.
+     *
+     * Each gesture that can place an order calls this rather than carrying its own copy of
+     * the rule. It refuses by throwing, so the reason reaches the person the same way every
+     * other refusal does — and it only ever refuses an order that would ADD to what is on.
+     */
+    const guardLimits = (spec: { side: 'buy' | 'sell'; size: number }): void => {
+        const refusal = limitRefusal(
+            limitsOf(opts.settings()),
+            sessionState(controller.history()),
+            { net: controller.broker.netSize, side: spec.side, size: spec.size },
+        );
+        if (refusal) throw new Error(refusal);
+    };
+
     const sidebar = mountTradeSidebar(opts.main, {
         account: () => ({ equity: controller.broker.equity, price: controller.price() }),
         counts: () => {
@@ -106,7 +125,7 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
             return { positions: book.positions.length, orders: book.orders.length };
         },
         actions: {
-            order: (spec) => guarded(ws, () => controller.order(spec)),
+            order: (spec) => guarded(ws, () => { guardLimits(spec); controller.order(spec); }),
             flatten: () => guarded(ws, () => controller.flatten()),
             cancelAll: () => guarded(ws, () => controller.cancelAll()),
         },
@@ -137,8 +156,26 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
         // The dialog's risk settings, not the ticket's own copy: one account, one answer
         // to "how much may this lose", whichever hand places the trade.
         risk: () => riskOf(opts.settings()),
+        beforeOrder: guardLimits,
         notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
     }));
+    /* The keys — the same ones every traded chart here answers to. Break-even is the engine's
+     * own, applied to whichever position is open. */
+    off.push(installTradeHotkeys({
+        root: ws.root,
+        bindings: loadHotkeys,
+        actions: {
+            buy: () => sidebar.submit('buy'),
+            sell: () => sidebar.submit('sell'),
+            flatten: () => guard(() => controller.flatten())(),
+            cancelAll: () => guard(() => controller.cancelAll())(),
+            breakEven: () => guard(() => {
+                const position = controller.broker.position;
+                if (position) controller.breakEven(position.id);
+            })(),
+        },
+    }));
+
     off.push(wirePositionLevels({
         chart,
         controller,
@@ -161,7 +198,7 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
     const quick = cell
         ? mountQuickPanel(cell, {
             price: () => controller.price(),
-            order: (spec) => guarded(ws, () => controller.order(spec)),
+            order: (spec) => guarded(ws, () => { guardLimits(spec); controller.order(spec); }),
             anchor: strip?.el ?? null,
         })
         : null;

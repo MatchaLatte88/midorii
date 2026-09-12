@@ -53,11 +53,21 @@ export interface QuickPlan {
     refusal: string | null;
 }
 
-/** What the panel is describing, at the price the session is standing on. */
-export function quickPlan(draft: QuickDraft, price: number): QuickPlan {
+/**
+ * What the panel is describing, at the price the session is standing on.
+ *
+ * `pointValue` is what one point of price movement is worth, per unit, in the account's money
+ * — one on a spot account, twenty on an NQ contract. It is the whole of the difference between
+ * a stop that costs what was typed and one that costs a multiple of it: the risk is turned
+ * into a DISTANCE here, and a distance in points divided by money-per-point is not the same
+ * number as a distance in points divided by units. Defaults to one, which is what every
+ * account here was until a futures contract was one of them.
+ */
+export function quickPlan(draft: QuickDraft, price: number, pointValue = 1): QuickPlan {
+    const value = pointValue > 0 ? pointValue : 1;
     const size = draft.size != null && draft.size > 0 ? draft.size : null;
     const distance = size != null && draft.riskCash != null && draft.riskCash > 0
-        ? draft.riskCash / size
+        ? draft.riskCash / (size * value)
         : null;
 
     return {
@@ -65,7 +75,7 @@ export function quickPlan(draft: QuickDraft, price: number): QuickPlan {
         reference: price > 0 ? price : null,
         stopDistance: distance,
         targetDistance: distance != null && draft.rrr != null && draft.rrr > 0 ? distance * draft.rrr : null,
-        notional: size != null && price > 0 ? size * price : null,
+        notional: size != null && price > 0 ? size * price * value : null,
         refusal: quickRefusal(draft, price, size, distance),
     };
 }

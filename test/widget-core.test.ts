@@ -8,7 +8,7 @@ import { fmtPrice, fmtChange, decimalsFor } from '../src/widget/format';
 import { tzMenuLabel, tzButtonLabel } from '../src/widget/timezones';
 import { priceStyleLabel } from '../src/widget/topbar';
 import { RANGE_PRESETS } from '../src/widget/bottombar';
-import { filterSymbols } from '../src/widget/symbol-picker';
+import { filterSymbols, scopeSymbols } from '../src/widget/symbol-picker';
 import { registerSymbolRanking, symbolRanking, type SymbolRankingHook } from '../src/widget/contributions';
 import { zoomTarget, followStep } from '../src/widget/glide';
 import { avatarColor } from '../src/widget/symbol-picker';
@@ -153,6 +153,26 @@ describe('registerSymbolRanking', () => {
         const offB = registerSymbolRanking(b);
         offB();
         expect(symbolRanking()).toBeUndefined();
+    });
+});
+
+describe('scopeSymbols', () => {
+    const list = [
+        { ticker: 'BTCUSDT', provider: 'binance' },
+        { ticker: 'US100', provider: 'capital' },
+        { ticker: 'GOLD', provider: 'capital' },
+        { ticker: 'GC', provider: 'projectx' },
+        { ticker: 'LOOSE' },
+    ];
+
+    it('keeps only the symbols a scoped provider serves', () => {
+        expect(scopeSymbols(list, ['capital']).map((s) => s.ticker)).toEqual(['US100', 'GOLD']);
+        expect(scopeSymbols(list, ['capital', 'projectx']).map((s) => s.ticker)).toEqual(['US100', 'GOLD', 'GC']);
+    });
+
+    it('drops a symbol with no provider once a scope is set, and passes everything without one', () => {
+        expect(scopeSymbols(list, []).length).toBe(0);
+        expect(scopeSymbols(list, null)).toBe(list);
     });
 });
 

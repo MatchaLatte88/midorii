@@ -3,6 +3,201 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
+## [v0.6.0]
+
+### Added
+
+- **Each live account brings its own chart back.** Arming an account in the Trade menu now puts
+  the chart on the symbol and timeframe that account was last watched on — gold futures on one
+  minute for a prop account, the Nasdaq CFD on five for a Capital.com one — instead of refusing
+  because the chart is still showing the other account's market. It is remembered per account,
+  not per venue: each ProjectX account keeps its own, and a demo login keeps a different one
+  from the live one. The chart only moves once the arm dialog has been answered yes, so a no
+  leaves it where it was. An account with nothing remembered, armed from a chart on another
+  venue, opens the symbol search on that venue alone rather than showing an error. A resume at
+  startup still does not ask.
+
+  While a live account is armed, the symbol search offers only that venue's markets: a Bitcoin
+  pair under a Capital.com account is a chart with nothing the account can send. Paper trading
+  and Just Watching keep every provider.
+
+- **A VWAP Reversion sleeve you can backtest — and the one in the library with no paper behind
+  it.** It fades a session that has closed a set number of standard deviations from its own
+  volume-weighted average price, targets that average, and stops a further fraction of a
+  deviation beyond the band. The average and the deviation both reset at the session open —
+  09:30 New York for index futures, the UTC day for a market that never opens — and the
+  deviation is volume-weighted, which is worth knowing because some platforms band a VWAP with
+  an unweighted one and draw visibly different lines under the same name.
+
+  Everything else here follows something published. This does not: it is desk practice,
+  described consistently everywhere and measured nowhere, so every default is a starting point
+  for a sweep rather than a figure to reproduce. Two parts of the version desks describe are
+  missing and are not faked. The tape confirmation — delta divergence, absorption at the band —
+  needs each print's side and cannot be had from OHLCV bars at all. The trend filter has no
+  evidence anywhere for its threshold, so instead of inventing one, `Trades per session` caps
+  how often a single day may be faded; that is a risk control, not an edge.
+
+  A first run says why that matters. On NQ 5-minute bars from December 2022 to December 2025,
+  765 sessions, the defaults lose money — 1,258 trades, 26% winners, profit factor 0.94 — and
+  fading more often per day loses more. It is a mean-reversion rule running on three years that
+  trended, which is the failure its own description warns about.
+
+  The chart will not agree with it, on purpose: the `vwap` indicator anchors on the UTC day and
+  has no session anchor, so on an index future its line and this sleeve's average are two
+  different numbers from midnight onwards.
+
+- **A ladder beside the chart, and a tape beside that.** The trading panel now has four faces
+  rather than two. **Ladder** is prices as a column with everything of yours laid against them:
+  working orders on their own rows, the position on its entry, its stop and target on the side
+  they would close from, the best bid and ask marked, and this session's volume as a bar behind
+  each price. Clicking the left column buys at that price and the right column sells — limit
+  below the market and stop above it, the way the ticket already reads a typed level, so the
+  question your cursor has already answered is not asked again. The size is picked from your
+  quick sizes at the top, and clicking your own order cancels it. The ladder follows the market
+  while the market is near the middle and holds still once you scroll, with a button to bring it
+  back. It does not draw a depth column: this gateway publishes only the top of book, and an
+  invented one would be the most convincing wrong thing on the screen.
+
+  **Tape** is every print as it happens, with the side that crossed the spread. Prints at the
+  same price and side, back to back, are shown as one row with their sizes added — five ones
+  down a column is a tape nobody reads. The heavier prints stand out against a threshold read
+  off the tape itself rather than a fixed number, so it means the same thing on an instrument
+  that trades in ones as on one that trades in hundreds.
+
+- **Resting orders can be dragged on the chart.** They were drawn and then could not be
+  touched. Now an order's line moves the way a stop's does, and the ✕ on its tag cancels it —
+  the same two gestures a position's levels already answered to, on the same kind of thing. The
+  tag also says which way it goes and how big, because a chart with three orders on it is read
+  by their sizes and "limit" is true of all three.
+
+- **One account band, with the figures you choose.** Every traded chart used to build its own
+  band from scratch — the same row of numbers written four times, drifting apart. It is now one
+  band, and the ⋮ on it picks which figures it shows. Two new ones are offered that nothing
+  showed before: the balance on its own, and what this session has realised so far, measured
+  over the same day the session limits use. What is on the band is kept per venue on this
+  machine. The warning at the end of the row is not a column and cannot be switched off.
+
+- **A sound when something fills.** Off until you turn it on, under the trading settings: a
+  short rising tone for a fill and a falling one for a close, with a toast either way naming
+  what filled and what a closed trade came to. A stop that triggered while you were reading
+  something else is the thing you most need to know and the thing you are least likely to be
+  looking at.
+
+- **ProjectX tells Midorii when something happens, instead of being asked every five seconds.**
+  A fill, a stop that triggered, a change to the balance — all of it now arrives over the
+  gateway's account feed and is read within a round trip of happening, rather than whenever the
+  next poll came round. The visible part is that a filled stop leaves the screen immediately;
+  the less visible part matters more, because the gap between a stop filling and its leftover
+  target being cleared away was the same five seconds, and that leftover order is one that
+  could have opened a position in the opposite direction. Where the feed cannot be opened,
+  everything falls back to asking on a timer exactly as before — slower, and still correct.
+
+- **A History tab for a ProjectX account.** The gateway reports fills rather than trades, so
+  the two halves of a round trip are paired back together: an entry averaged over the fills
+  that built it, an exit, and the venue's own realised figure less the commission on both
+  sides. Partial exits close the part they covered and leave the rest open, and a fill that
+  turns a long into a short ends one trade and starts another. Two columns stay empty on
+  purpose — R needs the risk a trade opened with and the exit reason needs to know whether a
+  stop or a target did it, and the gateway records neither. The ticket also shows a real
+  two-sided price on this venue now, so you can see what a buy costs and what a sell gets
+  rather than the same number twice.
+
+- **Session limits — what stops a session rather than what sizes a trade.** Three of them,
+  under Session limits in the trading settings: the most the account may give back, the most
+  that may be held at once, and a run of losing trades to stop at. All three start off, because
+  a limit nobody chose would refuse an order for a reason they never agreed to. A session runs
+  from 17:00 New York to the next, which is the futures day rather than the calendar one, and
+  only orders that would ADD to a position are refused — closing what is open always works,
+  which is the whole point of a limit that has already been hit. This is Midorii's own guard
+  and not your firm's: it cannot see trades placed on their platform and does not know their
+  threshold, so treat a refusal as a warning that came early rather than as proof the account
+  is still within its rules.
+
+- **Keys for the things you do while watching the chart.** Buy, Sell, Flatten, Cancel orders
+  and Break-even, each bound to Shift and a letter out of the box and each rebindable under
+  Keys in the trading settings — click the binding and press what you want. Buy and Sell send
+  the ticket exactly as it stands, so the size, the brackets and any refusal are the ones
+  already on screen rather than a second opinion assembled by the key. Nothing fires while a
+  field has focus or while a dialog is open, and every default sits behind a modifier: a bare
+  letter is one stray keystroke away from flattening a position.
+
+### Fixed
+
+- **A dropped ProjectX connection now keeps trying to come back.** After the live feed went — a
+  network that blinked, a laptop that slept — the app tried once to reopen it and then stopped,
+  silently. If that one attempt failed, the chart went on showing the last candle it had and the
+  price simply stood still, with nothing to say the feed was gone. It now keeps trying for as long
+  as anything is still waiting on the market, and waits a little longer between attempts (up to
+  half a minute) so an outage that lasts is not hammered at.
+
+- **A ProjectX position is drawn on the chart again — and so are the orders waiting under it.**
+  Nothing a ProjectX account held ever reached the chart: no entry line, no stop, no target, no
+  running result. That also took the gestures with it, because the gestures are the lines —
+  there was no stop to drag to a new level and no entry to pull one off. A position now draws
+  the way every other account's does, with the stop and the target where they are and what each
+  one is worth if it trades, counted in ticks times the value of a tick so that four points on
+  one NQ reads as eighty dollars rather than four. Resting orders are drawn beside it and are
+  listed in the dock under the chart, where each can be cancelled on its own; previously that
+  list was always empty while the count above it said otherwise.
+
+- **A stop typed into the ticket now actually reaches a ProjectX order.** The panel takes a stop
+  and a target as levels, and this venue takes them as a distance from the fill — so the ticket's
+  levels were dropped on the way out, without a word, and the order arrived unprotected while the
+  screen showed it protected. They are now measured against where the order goes in: the typed
+  price for a resting order, the last trade for a market one. Anything that cannot be converted
+  honestly — a stop on the winning side, a level with no price to measure from — refuses the
+  order and says why, rather than sending it bare.
+
+- **The Trade menu could be left dead by a failed start.** Switching to paper trading set a
+  guard that was only released on the way out through the bottom of the function. Anything that
+  went wrong before that — and the menu stopped responding for the rest of the session, without
+  a word. It is released however the start ends now, which is what every other broker in that
+  menu already did.
+
+- **Trading settings are reachable from whichever account you are on.** The gear was on the
+  Paper trading row alone, so changing the risk on a funded account meant opening a menu called
+  Paper trading. Every broker row carries it, and the one section that really is the paper
+  account's — what it starts with and what it is charged — says so in its heading.
+
+- **A protective order left over at the wrong size is brought back.** Taking part of a position
+  off on ProjectX left its stop standing at the size the position used to be, because on that
+  venue a stop is an ordinary resting order and the gateway has no opinion about it. A stop for
+  two contracts working against a position of one would have closed the one and opened another
+  the other way. It is resized on the next read now — and said out loud if it cannot be.
+
+- **Break-even is no longer offered on a stop that is already there.** The check compared two
+  prices exactly, and both had been through a divide and a round on the way, so a stop sitting
+  on the entry could still be offered the gesture that would put it there.
+
+- **Risk on a futures contract is counted in money again.** Every figure the ticket showed —
+  what the stop costs, what the position is worth, how much of the account it uses — was worked
+  out as though one point of price were one dollar. On a contract it is not: one NQ moving four
+  points is eighty dollars, not four. So a trade sized from risk came out by that multiple too
+  large, and the "1% of the account" under the button was nothing of the sort. The ticket, the
+  quick panel and a block traded from the chart now all measure in what a point is actually
+  worth on the instrument in front of you. The quick panel is the one to re-check first if you
+  had settled on numbers that felt right: its risk box sets the stop distance directly, so a
+  risk of a hundred dollars now puts the stop where a hundred dollars of that contract is,
+  rather than a hundred points away.
+
+  Capital.com is unchanged and still measures in points. What a point is worth there can only
+  be learned from a position that has already moved, and a figure invented for an instrument
+  nobody has asked about would be worse than the honest one that is there now.
+
+- **The size on the ticket is the size that goes out.** Venues deal in whole contracts, or in
+  hundredths, or on whatever grid they publish, and the panel used to show the unrounded figure
+  and let the venue round it on arrival — upwards, sometimes, which quietly raised what the
+  trade could lose past the number it had been sized from. Sizes are now put on the instrument's
+  own grid before they are shown, always downwards, and a trade that comes to less than the
+  smallest deal is refused with the size it would need rather than raised to it.
+
+- **An order you left working on a ProjectX contract stays working.** The sweep that clears a
+  stop left over from a closed position was also taking deliberate resting entries with it, a
+  few seconds after they were placed, because an entry has no position by definition. Orders
+  placed from Midorii are now recognised and left alone. A working entry is also no longer
+  mistaken for a position's target — a sell limit above a long is the shape of both, and reading
+  it as protection meant dragging the target moved somebody's entry.
+
 ## [v0.5.0]
 
 ### Added

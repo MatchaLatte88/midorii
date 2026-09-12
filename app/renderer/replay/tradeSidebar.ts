@@ -4,6 +4,8 @@ import { equityPath } from '../runs/runStats';
 import { bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPlan, ticketRefusal } from './orderTicket';
 import type { BracketSettings, TicketAccount, TicketDraft, TicketSizing } from './orderTicket';
 import { loadOverlayDisplay, onOverlayDisplayChange, saveOverlayDisplay } from './overlayDisplay';
+import { mountPriceLadder, type LadderOrder, type LadderPosition, type PriceLadder } from './priceLadder';
+import { mountTimeAndSales, type TapePrint, type TimeAndSales } from './timeAndSales';
 import { DEFAULT_RISK } from './replayOrders';
 import type { RiskSettings } from './replayOrders';
 import type { HistoryRow } from './tradeBook';
@@ -86,8 +88,13 @@ const CSS = `
 .midorii-side[data-collapsed] .midorii-side-head { padding: 0; justify-content: center; }
 .midorii-side[data-collapsed] .midorii-side-tabs,
 .midorii-side[data-collapsed] .midorii-side-body,
+.midorii-side[data-collapsed] .midorii-side-ladder,
 .midorii-side[data-collapsed] .midorii-side-hist,
 .midorii-side[data-collapsed] .midorii-side-foot { display: none; }
+
+/* The ladder fills what is left of the column, like the record does. */
+.midorii-side-ladder { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.midorii-side-ladder[hidden] { display: none; }
 .midorii-side-rail { display: none; }
 .midorii-side[data-collapsed] .midorii-side-rail {
     all: unset;
@@ -567,6 +574,9 @@ ${overlayScrollbarCss('.midorii-side-hist-list')}
 .midorii-side .down { color: var(--vela-down); }
 `;
 
+/** Which of the panel's three faces is showing. */
+type TabName = 'trade' | 'ladder' | 'tape' | 'history';
+
 /** Nothing to state yet — a dash, never a zero. */
 const NONE = '—';
 
@@ -612,6 +622,26 @@ export interface TradeSidebarOptions {
     /** Where an edited list of those sizes goes. Without it the row cannot be edited. */
     onQuickSizes?(next: number[]): void;
     /**
+     * What the ladder needs, where this account can offer one.
+     *
+     * Absent — a replay, an account with no working book, an instrument with no published
+     * increment — and the tab is not offered at all rather than offered empty.
+     */
+    ladder?: {
+        quote(): { bid: number; ask: number } | null;
+        positions(): readonly LadderPosition[];
+        orders(): readonly LadderOrder[];
+        cancelOrder(id: number): void;
+    };
+    /**
+     * Whether this account's feed carries the prints themselves.
+     *
+     * The tab is offered on that alone — a venue whose feed is candles has no tape to show,
+     * and an empty one would be a promise the data cannot keep. Prints arrive through
+     * {@link TradeSidebar.pushPrints}.
+     */
+    tape?: boolean;
+    /**
      * Which way of saying how big the ticket should open on — read once, at mount.
      *
      * Read once and not on every repaint, unlike the settings above it: this one is changed
@@ -638,6 +668,18 @@ export interface TradeSidebar {
     risk(): RiskSettings;
     /** Repaint the derived figures from the account as it stands. Never touches the boxes. */
     refresh(): void;
+    /**
+     * Point the ticket one way and send it — exactly what pressing the button does.
+     *
+     * For a key binding. A hotkey that built an order of its own would be a second answer to
+     * how big, where the stop goes and whether it may be sent at all; this way the key and
+     * the button are the same press, refusals included, and there is nothing to keep in step.
+     */
+    submit(which: 'buy' | 'sell'): void;
+    /** Fold a bar into the ladder's session volume. Does nothing without a ladder. */
+    markVolume(price: number, volume: number): void;
+    /** Hand the tape a burst of prints. Does nothing without one. */
+    pushPrints(prints: readonly TapePrint[]): void;
     /**
      * Let go of what the panel listens to outside itself — the chart-card switches it mirrors.
      *
@@ -980,7 +1022,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
     const tabs = doc.createElement('div');
     tabs.className = 'midorii-side-tabs';
-    const tab = (name: 'trade' | 'history', label: string): HTMLButtonElement => {
+    const tab = (name: TabName, label: string): HTMLButtonElement => {
         const b = doc.createElement('button');
         b.className = 'midorii-side-tab';
         b.type = 'button';
@@ -990,8 +1032,13 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         return b;
     };
     const tradeTab = tab('trade', 'Trade');
+    const ladderTab = tab('ladder', 'Ladder');
+    const tapeTab = tab('tape', 'Tape');
     const historyTab = tab('history', 'History');
-    // Nothing to show without an account that keeps a history, so nothing is offered.
+    /* Nothing to show without an account that keeps one, so nothing is offered. A tab that is
+     * always there and always empty is a worse answer than no tab. */
+    ladderTab.hidden = opts.ladder == null;
+    tapeTab.hidden = opts.tape !== true;
     historyTab.hidden = opts.history == null;
 
     const fold = doc.createElement('button');
@@ -1334,21 +1381,54 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
      * wholesale by a reset, so its length identifies it. */
     let drawnHistory = -1;
 
-    el.append(head, rail, quote, types.el, body, hist, foot);
+    /* The ladder is built once and hidden with its tab, never rebuilt on a switch: it carries
+     * this session's volume and the size somebody picked, and both would be thrown away. */
+    const ladderHost = doc.createElement('div');
+    ladderHost.className = 'midorii-side-ladder';
+    let ladder: PriceLadder | null = null;
+    if (opts.ladder) {
+        const feeds = opts.ladder;
+        ladder = mountPriceLadder(ladderHost, {
+            price: () => opts.account().price,
+            quote: feeds.quote,
+            tick: () => opts.tick?.() ?? null,
+            positions: feeds.positions,
+            orders: feeds.orders,
+            sizes: () => opts.quickSizes?.() ?? [1],
+            /* The same call the ticket's own button makes, so a press on the ladder meets the
+             * session limits and the venue's refusals in the same words. */
+            order: (spec) => opts.actions.order(spec),
+            cancelOrder: feeds.cancelOrder,
+        });
+    }
+
+    const tapeHost = doc.createElement('div');
+    tapeHost.className = 'midorii-side-ladder';
+    const tape: TimeAndSales | null = opts.tape === true
+        ? mountTimeAndSales(tapeHost, { priceText: (price) => formatPrice(price) })
+        : null;
+
+    el.append(head, rail, quote, types.el, body, ladderHost, tapeHost, hist, foot);
     host.appendChild(el);
 
-    /** Which half is on. The other is hidden rather than unmounted — a ticket half-typed is
+    /** Which face is on. The others are hidden rather than unmounted — a ticket half-typed is
      *  not a thing to throw away because the record was glanced at. */
-    function setTab(next: 'trade' | 'history'): void {
-        for (const [b, name] of [[tradeTab, 'trade'], [historyTab, 'history']] as const) {
+    function setTab(next: TabName): void {
+        for (const [b, name] of [[tradeTab, 'trade'], [ladderTab, 'ladder'], [tapeTab, 'tape'], [historyTab, 'history']] as const) {
             if (name === next) b.dataset.on = '';
             else delete b.dataset.on;
         }
         /* The foot goes with the ticket: Buy and Sell under a list of finished trades would
          * send an order from a panel that is not showing what it was sized against. */
         for (const part of [quote, types.el, body, foot]) part.hidden = next !== 'trade';
+        ladderHost.hidden = next !== 'ladder';
+        tapeHost.hidden = next !== 'tape';
         hist.hidden = next !== 'history';
-        rail.textContent = next === 'trade' ? 'Trade' : 'History';
+        rail.textContent = next === 'trade' ? 'Trade'
+            : next === 'ladder' ? 'Ladder'
+                : next === 'tape' ? 'Tape' : 'History';
+        // Re-priced on the way in: it has been hidden and the market has moved under it.
+        if (next === 'ladder') ladder?.refresh();
     }
 
     /** Redraw the curve over the window as it stands, and the money it comes to. */
@@ -1631,6 +1711,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         cancelAll.disabled = counts.orders === 0;
         flatten.disabled = counts.positions === 0;
 
+        if (!ladderHost.hidden) ladder?.refresh();
         renderHistory();
     }
 
@@ -1658,6 +1739,26 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         el,
         risk: () => ({ ...risk }),
         refresh,
-        dispose: stopWatchingDisplay,
+        markVolume(price: number, volume: number): void {
+            ladder?.mark(price, volume);
+        },
+        pushPrints(prints: readonly TapePrint[]): void {
+            /* Kept up even while the tab is not showing: a tape somebody switches to should be
+             * the last two hundred prints, not the ones since they looked. */
+            tape?.push(prints);
+        },
+        submit(which: 'buy' | 'sell'): void {
+            /* Pointed first, then sent — the same two steps a press on the quote and then on
+             * the button are, in the same order, so the refusal a key runs into is the one
+             * that would have been on screen. */
+            side = which;
+            refresh();
+            send();
+        },
+        dispose(): void {
+            stopWatchingDisplay();
+            ladder?.destroy();
+            tape?.destroy();
+        },
     };
 }

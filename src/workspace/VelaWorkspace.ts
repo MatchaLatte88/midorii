@@ -1198,6 +1198,22 @@ export class VelaWorkspace {
         for (const cell of this.cellsById.values()) cell.refreshSettingsSections();
     }
 
+    /**
+     * Limit the symbol search to `providers` (registered names) until called again; null
+     * lifts it. Only what the search OFFERS — `setSymbol` and restored state are untouched.
+     */
+    setSymbolScope(providers: readonly string[] | null): void {
+        this.symbolPicker.setScope(providers);
+    }
+
+    /**
+     * Open the symbol search for one answer, limited to `providers` for this pick alone.
+     * Resolves with the chosen symbol without switching any chart, or null when dismissed.
+     */
+    pickSymbol(opts: { providers?: readonly string[]; query?: string } = {}): Promise<string | null> {
+        return this.symbolPicker.choose(opts);
+    }
+
     /** Show a toast over the grid — the same surface the shell's own notices use
      *  (alerts, script errors) and the one contributions reach via `ctx.toast`. */
     toast(message: string, kind: 'info' | 'success' | 'error' = 'info', durationMs = 3000): void {

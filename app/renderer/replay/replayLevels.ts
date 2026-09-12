@@ -1,14 +1,19 @@
-import { readLineId } from './replayIndicator';
+import { readLineId, readOrderLineId } from './replayIndicator';
 import type { Vela } from '../../../src';
 import type { TradingController } from '../trading/TradingController';
 
 /**
- * The levels of an open position, taken hold of on the chart.
+ * The levels on the chart, taken hold of — a position's, and the orders waiting under it.
  *
  * Typing a stop into a field works, but it is not how anyone moves a stop: you look at the
  * chart, see where the level should be, and put it there. So the two lines a position draws are
  * draggable, and dropping one re-protects the position — through the same `protect` call a
  * typed level goes through, so a level moved by hand is the same order as a level typed in.
+ *
+ * A RESTING ORDER is the same gesture about the same kind of thing, so it works the same way:
+ * drag its line to move it, press the ✕ on its tag to cancel it. The one difference is that
+ * there is no losing side to hold it to — an order may wait wherever it was put, and what the
+ * venue makes of a limit dragged through the market is the venue's to say.
  *
  * A position with no protection has no such lines, which is exactly when one is needed most.
  * There its ENTRY is the handle: a drag off it pulls a level out (`priceline:spawned`), and
@@ -64,6 +69,21 @@ export function wirePositionLevels(opts: LevelWiringOptions): () => void {
     const positionOf = (id: number) => controller.positions().find((p) => p.id === id) ?? null;
 
     const offMoved = chart.on('priceline:moved', ({ id, price }) => {
+        /* A resting order first: it is the same gesture as a stop and reaches the same kind of
+         * answer, but it belongs to the working book rather than to a position, so there is no
+         * losing side to hold it to — an order may wait wherever it was put. What the VENUE
+         * makes of a limit dragged through the market is the venue's to say, and it says it
+         * the same way it says everything else: by refusing, out loud. */
+        const orderId = readOrderLineId(id);
+        if (orderId != null) {
+            if (!controller.moveOrder) {
+                notify('This account cannot move a resting order from the chart.', 'error');
+                controller.refreshVisuals();
+                return;
+            }
+            controller.moveOrder(orderId, price);
+            return;
+        }
         const target = readLineId(id);
         if (!target || target.level === 'entry') return;
         const position = positionOf(target.positionId);
@@ -97,6 +117,11 @@ export function wirePositionLevels(opts: LevelWiringOptions): () => void {
     });
 
     const offAction = chart.on('priceline:action', ({ id }) => {
+        const orderId = readOrderLineId(id);
+        if (orderId != null) {
+            controller.cancelOrder?.(orderId);
+            return;
+        }
         const target = readLineId(id);
         if (!target) return;
         controller.closeOne(target.positionId);

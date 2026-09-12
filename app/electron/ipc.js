@@ -24,7 +24,9 @@ import {
   configureProjectX, projectXAccount, projectXAccounts, projectXAvailableContracts, projectXBars,
   projectXConfigured, projectXContracts, projectXEnvironment, projectXOpenOrders, projectXPositions,
   projectXCancelOrder, projectXClosePosition, projectXModifyOrder, projectXPlaceOrder,
-  projectXProbe, projectXSelectAccount, projectXSubscribe, projectXSubscribeQuotes,
+  projectXProbe, projectXSelectAccount, projectXSubscribe, projectXSubscribePrints, projectXSubscribeQuotes,
+  projectXSubscribeUser,
+  projectXTrades,
 } from './data/projectx.js';
 import {
   binanceSpotAccount, binanceSpotCancelAll, binanceSpotCancelOrder, binanceSpotClose,
@@ -1144,6 +1146,10 @@ export function registerIpc() {
 
   ipcMain.handle('projectx:open-orders', () => projectXOpenOrders());
 
+  /* Executions, for the record beside the chart. Half-turns as the gateway states them —
+   * what makes a trade out of two of them is decided in the renderer. */
+  ipcMain.handle('projectx:trades', (_e, { from, to } = {}) => projectXTrades({ from, to }));
+
   /* ─── ProjectX trading ────────────────────────────────────────────────
    *
    * The channels that move money. Everything crossing here is checked rather than
@@ -1218,6 +1224,42 @@ export function registerIpc() {
   });
 
   ipcMain.handle('projectx:unsubscribe-quotes', (_e, id) => { projectXQuoteSubs.get(id)?.(); });
+
+  /* The tape — every print, in the batches the hub delivers them in. */
+  const projectXPrintSubs = new Map();
+
+  ipcMain.handle('projectx:subscribe-prints', async (event, { contractId } = {}) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = await projectXSubscribePrints(
+      requireString(contractId, 'contractId'),
+      (prints) => { if (!sender.isDestroyed()) sender.send('projectx:prints', { subscriptionId: id, prints }); },
+    );
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(projectXPrintSubs, sender, id, unsubscribe);
+    return id;
+  });
+
+  ipcMain.handle('projectx:unsubscribe-prints', (_e, id) => { projectXPrintSubs.get(id)?.(); });
+
+  /* The account side of the same socket family — orders, positions, trades and the balance,
+   * pushed as they happen instead of being asked for on a timer. Nothing is validated on the
+   * way through because nothing here is an instruction: it is the gateway saying something
+   * changed, and what the renderer does with it is ask. */
+  const projectXUserSubs = new Map();
+
+  ipcMain.handle('projectx:subscribe-user', async (event) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = await projectXSubscribeUser(
+      (update) => { if (!sender.isDestroyed()) sender.send('projectx:user-event', { subscriptionId: id, ...update }); },
+    );
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(projectXUserSubs, sender, id, unsubscribe);
+    return id;
+  });
+
+  ipcMain.handle('projectx:unsubscribe-user', (_e, id) => { projectXUserSubs.get(id)?.(); });
 
   /* ─── Capital.com trading ────────────────────────────────────────────
    *

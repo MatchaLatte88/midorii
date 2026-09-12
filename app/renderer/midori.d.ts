@@ -453,6 +453,47 @@ export interface MidoriProjectXBar {
  * and the main process folds them into the last known state before this crosses the bridge.
  * A field is null only where nothing has ever been seen for it.
  */
+/**
+ * One execution on a ProjectX account — a HALF-TURN, as the gateway states it.
+ *
+ * `profitAndLoss` is null on the fill that opened a position and carries the realised result
+ * on the one that closed it, which is the whole reason a record of round trips has to be
+ * built rather than read: two of these are one trade.
+ */
+export interface MidoriProjectXTrade {
+    id: number;
+    accountId: number;
+    contractId: string;
+    /** ISO 8601, with an offset. */
+    creationTimestamp: string;
+    price: number;
+    /** Null on a half-turn that opened. The venue's own realised figure where it is not. */
+    profitAndLoss: number | null;
+    fees: number;
+    /** 0 buys, 1 sells — the same pair the order endpoints use. */
+    side: number;
+    size: number;
+    /** Cancelled by the venue after the fact. Left out of any record it appears in. */
+    voided: boolean;
+    orderId: number;
+}
+
+/**
+ * One print on the tape, as the market hub states it.
+ *
+ * `type` is the AGGRESSOR — which side crossed the spread to make this trade happen — and it
+ * is the whole reason a tape is read rather than a price list. Measured against a live feed
+ * rather than taken from the documentation, which does not say.
+ */
+export interface MidoriProjectXPrint {
+    /** ISO 8601, with an offset. */
+    timestamp: string;
+    price: number;
+    volume: number;
+    /** 0 bought into the offer, 1 sold into the bid. */
+    type: number;
+}
+
 export interface MidoriProjectXQuote {
     contractId: string;
     last: number | null;
@@ -1215,6 +1256,14 @@ declare global {
                 /** Resting orders on the chosen account. Rejects when none is chosen. */
                 openOrders(): Promise<unknown[]>;
                 /**
+                 * Executions on the chosen account — HALF-TURNS, not round trips.
+                 *
+                 * `profitAndLoss` is null on the fill that opened and carries the realised
+                 * result on the one that closed; pairing them is `projectxHistory.ts`.
+                 * Defaults to the last thirty days.
+                 */
+                trades(range?: { from?: number; to?: number }): Promise<MidoriProjectXTrade[]>;
+                /**
                  * Place an order. Brackets are given in TICKS from the fill, which is the
                  * gateway's own shape — and they can only be set HERE, when the order is
                  * placed. Protecting a position that is already open means resting orders
@@ -1248,9 +1297,36 @@ declare global {
                 /** Returns its own unsubscribe. The bar is the one being BUILT from the tape,
                  *  re-sent on every print rather than only when it closes. */
                 onBar(handler: (payload: { subscriptionId: string; bar: MidoriProjectXBar }) => void): () => void;
+                /**
+                 * The tape — every print on a contract, in the batches the hub delivers.
+                 *
+                 * Costs nothing extra on the wire: it rides the same subscription the bars and
+                 * the quotes do. What it adds is the prints themselves, with the aggressor side
+                 * on each one, rather than only their effect on a bar.
+                 */
+                subscribePrints(query: { contractId: string }): Promise<string>;
+                unsubscribePrints(subscriptionId: string): Promise<void>;
+                onPrints(handler: (payload: { subscriptionId: string; prints: MidoriProjectXPrint[] }) => void): () => void;
                 subscribeQuotes(query: { contractId: string }): Promise<string>;
                 unsubscribeQuotes(subscriptionId: string): Promise<void>;
                 onQuote(handler: (payload: { subscriptionId: string; quote: MidoriProjectXQuote }) => void): () => void;
+                /**
+                 * The account side of the gateway's realtime feed — orders, positions, trades
+                 * and the balance, as they happen.
+                 *
+                 * Resolves once the socket is actually up, so a caller can tell whether it is
+                 * being pushed to or is still on its own timer. The payload is passed through
+                 * untouched and is deliberately NOT what anything reads: an event here means
+                 * "something changed, ask again", which is the same rule the rest of this
+                 * venue follows. Subscribing follows whichever account is chosen.
+                 */
+                subscribeUser(): Promise<string>;
+                unsubscribeUser(subscriptionId: string): Promise<void>;
+                onUserEvent(handler: (payload: {
+                    subscriptionId: string;
+                    event: 'GatewayUserAccount' | 'GatewayUserOrder' | 'GatewayUserPosition' | 'GatewayUserTrade';
+                    payload: unknown;
+                }) => void): () => void;
             };
             /** Spot trading on Binance's demo host. No production environment is exposed. */
             binanceSpot: {

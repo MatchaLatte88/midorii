@@ -1,6 +1,8 @@
 import { Dialog, NumberInput, Select, Switch, TextField, injectStyles } from '../../../src/ui';
 import { DEFAULT_PAPER_SETTINGS, needsFreshAccount, type PaperSettings } from './paperSettings';
 import { normalizeQuickSizes } from '../replay/orderTicket';
+import { TRADE_ACTIONS, formatHotkey, keyOf, loadHotkeys, saveHotkeys, type Hotkey } from './hotkeys';
+import { chimeOn, setChime } from './fillChime';
 
 /**
  * What a paper account is, before it has traded anything — and what it costs.
@@ -52,6 +54,15 @@ const CSS = `
     color: var(--vela-danger);
     min-height: 1.45em;
 }
+.midorii-paper-key {
+    min-width: 10ch;
+    font-family: var(--vela-font-mono);
+    font-size: 11px;
+}
+.midorii-paper-key[data-listening='1'] {
+    border-color: var(--vela-accent);
+    color: var(--vela-accent);
+}
 /* Only the danger tone is this dialog's own — the plain and primary shapes are the kit's
    footer buttons, which every other dialog in the app now wears. */
 .vela-dialog-btn[data-tone='danger'] { color: var(--vela-danger); }
@@ -100,6 +111,65 @@ function section(text: string, doc: Document): HTMLElement {
     el.className = 'midorii-paper-sect';
     el.textContent = text;
     return el;
+}
+
+/**
+ * One rebindable key: what it does, and a button that listens for the next press.
+ *
+ * Captured from a real key event rather than typed, because what has to be stored is the
+ * event — which key, with which modifiers — and asking somebody to spell that out is asking
+ * them to get it wrong. Escape clears the binding; clicking away leaves it as it was.
+ */
+function hotkeyRow(
+    label: string,
+    hint: string,
+    current: () => Hotkey | null,
+    onBind: (next: Hotkey | null) => void,
+    doc: Document,
+): HTMLElement {
+    const capture = doc.createElement('button');
+    capture.type = 'button';
+    capture.className = 'vela-dialog-btn midorii-paper-key';
+    capture.title = `${hint} Press to rebind; Escape clears it.`;
+
+    let listening = false;
+    const paint = (): void => {
+        capture.textContent = listening ? 'Press a key…' : formatHotkey(current());
+        capture.dataset.listening = listening ? '1' : '0';
+    };
+
+    const onKey = (event: KeyboardEvent): void => {
+        if (!listening) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === 'Escape') {
+            stop();
+            onBind(null);
+            paint();
+            return;
+        }
+        const pressed = keyOf(event);
+        if (!pressed) return;   // a modifier on its own is not a binding
+        stop();
+        onBind(pressed);
+        paint();
+    };
+    const onBlur = (): void => { stop(); paint(); };
+    function stop(): void {
+        listening = false;
+        doc.removeEventListener('keydown', onKey, true);
+        capture.removeEventListener('blur', onBlur);
+    }
+
+    capture.onclick = () => {
+        if (listening) { stop(); paint(); return; }
+        listening = true;
+        paint();
+        doc.addEventListener('keydown', onKey, true);
+        capture.addEventListener('blur', onBlur);
+    };
+    paint();
+    return row(label, capture, doc);
 }
 
 function button(text: string, doc: Document, primary = false): HTMLButtonElement {
@@ -230,6 +300,29 @@ export async function openPaperSettings(
                 syncBracketUnit();
             },
         });
+        /* Stored the moment one is rebound rather than on Save, because they are this
+         * machine's and not the account's: nothing about a key can force a fresh account, and
+         * a binding that vanished because somebody closed the dialog with Escape would be a
+         * setting that silently did not take. */
+        let hotkeys = loadHotkeys();
+
+        /* Stored on the flip, like the keys and for the same reason: it describes this machine,
+         * and a preference lost to an Escape is a preference somebody set twice. */
+        const fillSound = new Switch({ checked: chimeOn(), onChange: (on) => setChime(on) });
+
+        const dailyLoss = new NumberInput({
+            value: draft.dailyLossLimit, min: 0, max: 1e9, step: 50, size: 'sm', fill: false,
+            onChange: (v) => { draft.dailyLossLimit = v; },
+        });
+        const maxPosition = new NumberInput({
+            value: draft.maxPositionSize, min: 0, max: 1e9, step: 1, size: 'sm', fill: false,
+            onChange: (v) => { draft.maxPositionSize = v; },
+        });
+        const lossStreak = new NumberInput({
+            value: draft.lossStreakLimit, min: 0, max: 100, step: 1, size: 'sm', fill: false,
+            onChange: (v) => { draft.lossStreakLimit = v; },
+        });
+
         const bracketStopRow = row('Stop distance', bracketStop.el, doc);
         const bracketTargetRow = row('Target distance', bracketTarget.el, doc);
 
@@ -273,7 +366,7 @@ export async function openPaperSettings(
         save.onclick = () => finish({ settings: { ...draft }, resetsAccount: needsFreshAccount(original, draft) });
 
         const dialog = new Dialog({
-            title: 'Paper trading',
+            title: 'Trading settings',
             eyebrow: 'Trading',
             host,
             draggable: true,
@@ -282,7 +375,7 @@ export async function openPaperSettings(
             onOpenChange: (open) => { if (!open) finish(null); },
             content: (body) => {
                 body.append(
-                    section('The account', doc),
+                    section('The paper account', doc),
                     note(
                         'What the account starts with and what it is charged. These are fixed '
                         + 'when the account is created — changing one starts a new account.',
@@ -318,6 +411,41 @@ export async function openPaperSettings(
                     row('Distances are read in', bracketUnit.el, doc),
                     bracketStopRow,
                     bracketTargetRow,
+
+                    section('Session limits', doc),
+                    note(
+                        'What stops a session rather than what sizes a trade. Zero is off, and all three '
+                        + 'start off. A session runs from 17:00 New York to the next — the futures day, not '
+                        + 'the calendar one — and only orders that would ADD to a position are refused: '
+                        + 'closing what is open always works.',
+                        doc,
+                    ),
+                    note(
+                        'This is Midorii\'s own guard, not your firm\'s. It cannot see trades placed on '
+                        + 'their platform and does not know their threshold, so treat a refusal here as a '
+                        + 'warning that came early, never as proof the account is still within its rules.',
+                        doc,
+                    ),
+                    row('Loss limit per session', dailyLoss.el, doc),
+                    row('Most that may be held at once', maxPosition.el, doc),
+                    row('Stop after this many losses in a row', lossStreak.el, doc),
+
+                    section('Keys', doc),
+                    note(
+                        'Each of these is a button that is already on the trading chart — the key is the '
+                        + 'same press without the reach. Buy and Sell send the ticket exactly as it stands, '
+                        + 'so the size, the brackets and any refusal are the ones on screen. Nothing fires '
+                        + 'while a field has focus.',
+                        doc,
+                    ),
+                    ...TRADE_ACTIONS.map(({ id, label, hint }) => hotkeyRow(
+                        label, hint,
+                        () => hotkeys[id],
+                        (next) => { hotkeys = { ...hotkeys, [id]: next }; saveHotkeys(hotkeys); },
+                        doc,
+                    )),
+
+                    row('A fill makes a sound', fillSound.el, doc),
 
                     section('Quick sizes', doc),
                     note(

@@ -231,6 +231,8 @@ contextBridge.exposeInMainWorld('midori', {
     selectAccount: (id) => ipcRenderer.invoke('projectx:select-account', id),
     positions: () => ipcRenderer.invoke('projectx:positions'),
     openOrders: () => ipcRenderer.invoke('projectx:open-orders'),
+    /* Executions — half-turns, with the realised result on the closing one. */
+    trades: (range) => ipcRenderer.invoke('projectx:trades', range),
     /* Trading. A ProjectX stop is a resting ORDER rather than an attribute of the
        position — see app/renderer/trading/ProjectXController.ts for what follows from it. */
     placeOrder: (spec) => ipcRenderer.invoke('projectx:place-order', spec),
@@ -249,12 +251,29 @@ contextBridge.exposeInMainWorld('midori', {
       ipcRenderer.on('projectx:bar', listener);
       return () => ipcRenderer.off('projectx:bar', listener);
     },
+    /* The tape: prints as they happen, in the batches the hub sends them in. */
+    subscribePrints: (query) => ipcRenderer.invoke('projectx:subscribe-prints', query),
+    unsubscribePrints: (subscriptionId) => ipcRenderer.invoke('projectx:unsubscribe-prints', subscriptionId),
+    onPrints: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('projectx:prints', listener);
+      return () => ipcRenderer.off('projectx:prints', listener);
+    },
     subscribeQuotes: (query) => ipcRenderer.invoke('projectx:subscribe-quotes', query),
     unsubscribeQuotes: (subscriptionId) => ipcRenderer.invoke('projectx:unsubscribe-quotes', subscriptionId),
     onQuote: (handler) => {
       const listener = (_event, payload) => handler(payload);
       ipcRenderer.on('projectx:quote', listener);
       return () => ipcRenderer.off('projectx:quote', listener);
+    },
+    /* The account side: the gateway saying an order, a position, a trade or the balance
+       changed. Treated as a doorbell rather than as news — see data/projectx.js. */
+    subscribeUser: () => ipcRenderer.invoke('projectx:subscribe-user'),
+    unsubscribeUser: (subscriptionId) => ipcRenderer.invoke('projectx:unsubscribe-user', subscriptionId),
+    onUserEvent: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('projectx:user-event', listener);
+      return () => ipcRenderer.off('projectx:user-event', listener);
     },
   },
 

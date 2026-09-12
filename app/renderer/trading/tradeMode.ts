@@ -16,10 +16,11 @@ import { BybitController } from './BybitController';
 import { mountBybitTrading, type BybitMount } from './bybitMount';
 import { categoryOf, venueSymbol } from '../providers/BybitProvider';
 import { ProjectXController } from './ProjectXController';
-import { mountProjectXTrading, type ProjectXMount } from './projectxMount';
+import { PROJECTX_ACCENT, mountProjectXTrading, type ProjectXMount } from './projectxMount';
 import type { ProjectXDealing } from '../providers/ProjectXProvider';
 import type { MidoriProjectXAccount } from '../midori';
 import { formatMoney } from '../format';
+import { loadAccountMarket, marketForAccount, saveAccountMarket } from './accountMarkets';
 
 /**
  * The Trade menu — which broker, if any, the chart is wired to.
@@ -39,11 +40,6 @@ import { formatMoney } from '../format';
 
 /** Which broker the chart is wired to. */
 export type TradeBroker = 'off' | 'paper' | 'capital' | 'binance-spot' | 'bybit' | 'projectx';
-
-/** The colour ProjectX rows are marked with wherever they appear — the menu here, and the
- *  account band on the chart. Amber because this venue lists SEVERAL accounts and they
- *  have to read as one group without repeating the venue's name in every label. */
-export const PROJECTX_ACCENT = '#d99a2b';
 
 export interface TradeModeOptions {
     workspace: VelaWorkspace;
@@ -129,6 +125,8 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     let projectxAccounts: MidoriProjectXAccount[] = [];
     let projectxChosen: number | null = null;
     const writer = paperWriter();
+    /** Stops remembering the armed live account's market — null while none is armed. */
+    let forgetMarket: (() => void) | null = null;
 
     /** Reading the account off disk is a round trip, and the menu can be clicked again
      *  while it is in flight. Without this the second click builds a second account over
@@ -145,6 +143,11 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     };
 
     function items(): MenuItemDescriptor[] {
+        /* Every broker row carries it: the settings behind it are how trading is done on
+         * whichever account is on, and reaching them only through the paper row meant
+         * somebody on a funded account opened a menu called Paper trading to change the
+         * risk on it. */
+        const gear = { icon: 'gear' as const, label: 'Trading settings' };
         const list: MenuItemDescriptor[] = [
             { id: 'off', label: 'Just Watching', checked: broker === 'off' },
             {
@@ -152,7 +155,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 label: 'Paper trading',
                 checked: broker === 'paper',
                 separatorBefore: true,
-                trailing: { icon: 'gear', label: 'Paper trading settings' },
+                trailing: gear,
             },
         ];
         /* Only where an account actually exists to trade. An entry that is always there and
@@ -164,6 +167,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 label: capital.live ? 'Capital.com — live money' : 'Capital.com — demo',
                 checked: broker === 'capital',
                 separatorBefore: true,
+                trailing: gear,
             });
         }
         if (binanceSpot?.configured) {
@@ -172,6 +176,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 label: 'Binance Spot — demo',
                 checked: broker === 'binance-spot',
                 separatorBefore: !capital?.configured,
+                trailing: gear,
             });
         }
         /* One entry for both of Bybit's products, because the chart already says which of
@@ -189,6 +194,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 ].filter(Boolean).join(' '),
                 checked: broker === 'bybit',
                 separatorBefore: !capital?.configured && !binanceSpot?.configured,
+                trailing: gear,
             });
         }
         /* One row per account, not one per venue. Each is marked with the venue's colour so
@@ -203,6 +209,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                     label: `${account.name} — ${formatMoney(account.balance)}`,
                     checked: broker === 'projectx' && projectxChosen === account.id,
                     accent: PROJECTX_ACCENT,
+                    trailing: gear,
                     separatorBefore: index === 0 && first,
                     ...(account.canTrade === false ? { disabled: true } : {}),
                 });
@@ -211,17 +218,60 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         return list;
     }
 
+    /**
+     * The market to arm an account on — the one it was left on, see accountMarkets.ts.
+     *
+     * With nothing remembered and another venue on screen, the symbol search opens on this
+     * venue alone. Not on a resume (`ask` false): a dialog nobody asked for at startup is
+     * worse than the chart staying on Just Watching.
+     */
+    async function marketFor(account: string, provider: string, ask: boolean): Promise<{ symbol: string; timeframe: string | null } | null> {
+        const choice = marketForAccount(
+            loadAccountMarket(account),
+            ws.chart.market.symbol ?? '',
+            provider,
+            (symbol) => ws.chart.data.resolve(symbol)?.provider ?? null,
+        );
+        if (choice || !ask) return choice;
+        const picked = await ws.pickSymbol({ providers: [provider] });
+        return picked ? { symbol: picked, timeframe: null } : null;
+    }
+
+    /**
+     * Put the chart on the market an account was just armed on, and keep the search to that
+     * venue while it is: a symbol from anywhere else is one the account has no way to trade.
+     * Called after the confirmation, so a "no" leaves the chart exactly where it was.
+     */
+    function showAccountMarket(account: string, provider: string, market: { symbol: string; timeframe: string | null }): void {
+        ws.active.setSymbol(market.symbol);
+        if (market.timeframe) ws.active.setTimeframe(market.timeframe);
+        ws.setSymbolScope([provider]);
+        const remember = (): void => {
+            const { symbol, timeframe } = ws.chart.market;
+            if (!symbol || !timeframe || ws.chart.data.resolve(symbol)?.provider !== provider) return;
+            saveAccountMarket(account, { symbol, timeframe });
+        };
+        remember();
+        forgetMarket = ws.chart.on('market:changed', remember);
+    }
+
     /** Wire the chart to Binance's demo Spot account. Production has no path into this mode. */
-    async function startBinanceSpot(): Promise<void> {
+    async function startBinanceSpot(ask = true): Promise<void> {
         if (broker === 'binance-spot' || starting) return;
-        const symbol = ws.chart.market.symbol ?? '';
-        const resolved = ws.chart.data.resolve(symbol);
-        if (resolved?.provider !== 'binance' || resolved.ticker.endsWith('.P')) {
-            ws.toast('Binance Spot Demo needs a Binance Spot market on the chart — choose a symbol without the .P futures suffix.', 'error');
-            return;
-        }
         starting = true;
         try {
+            const market = await marketFor('binance-spot', 'binance', ask);
+            const refusal = 'Binance Spot Demo needs a Binance Spot market on the chart — choose a symbol without the .P futures suffix.';
+            if (!market) {
+                // A dismissed symbol search is already an answer; only a resume has nobody to ask.
+                if (!ask) ws.toast(refusal, 'error');
+                return;
+            }
+            const resolved = ws.chart.data.resolve(market.symbol);
+            if (resolved?.provider !== 'binance' || resolved.ticker.endsWith('.P')) {
+                ws.toast(refusal, 'error');
+                return;
+            }
             const [info, account] = await Promise.all([
                 window.midori.binanceSpot.symbolInfo(resolved.ticker),
                 window.midori.binanceSpot.account(),
@@ -238,6 +288,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             if (!go) return;
 
             stop();
+            showAccountMarket('binance-spot', 'binance', market);
             spot = new BinanceSpotController({
                 symbol: info.symbol,
                 info,
@@ -274,20 +325,22 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
      * send. The product is not asked for either — `BTCUSDT` is the spot pair and `BTCUSDT.P`
      * the perpetual, so the symbol has already answered it.
      */
-    async function startBybit(): Promise<void> {
+    async function startBybit(ask = true): Promise<void> {
         if (broker === 'bybit' || starting) return;
-        const symbol = ws.chart.market.symbol ?? '';
-        const resolved = ws.chart.data.resolve(symbol);
-        if (resolved?.provider !== 'bybit') {
-            ws.toast('Bybit trading needs a Bybit market on the chart — pick one from the symbol list first.', 'error');
-            return;
-        }
         starting = true;
         try {
+            const env = await window.midori.bybit.environment();
+            const accountKey = `bybit:${env.live ? 'live' : 'demo'}`;
+            const market = await marketFor(accountKey, 'bybit', ask);
+            const resolved = market ? ws.chart.data.resolve(market.symbol) : null;
+            if (!market || resolved?.provider !== 'bybit') {
+                // A dismissed symbol search is already an answer; only a resume has nobody to ask.
+                if (!ask) ws.toast('Bybit trading needs a Bybit market on the chart — pick one from the symbol list first.', 'error');
+                return;
+            }
             const ticker = resolved.ticker.toUpperCase();
             // What the suffix means is the provider's to say, not a second copy of it here.
             const category = categoryOf(ticker);
-            const env = await window.midori.bybit.environment();
             const [info, wallet] = await Promise.all([
                 window.midori.bybit.instrument({ category, symbol: venueSymbol(ticker) }),
                 window.midori.bybit.wallet().catch(() => null),
@@ -304,6 +357,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             if (!go) return;
 
             stop(); // whatever was on comes off first — one account at a time
+            showAccountMarket(accountKey, 'bybit', market);
             bybit = new BybitController({
                 ticker,
                 info,
@@ -338,14 +392,8 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
      * the gateway calls an evaluation and a funded account alike "simulated", so a dialog
      * saying "ProjectX — simulated" would be true of both and useful for neither.
      */
-    async function startProjectX(accountId: number): Promise<void> {
+    async function startProjectX(accountId: number, ask = true): Promise<void> {
         if (starting) return;
-        const symbol = ws.chart.market.symbol ?? '';
-        const resolved = ws.chart.data.resolve(symbol);
-        if (resolved?.provider !== 'projectx') {
-            ws.toast('ProjectX trading needs a futures contract on the chart — pick one from the symbol list first.', 'error');
-            return;
-        }
         starting = true;
         try {
             const account = projectxAccounts.find((a) => a.id === accountId);
@@ -353,11 +401,19 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 ws.toast('That ProjectX account is no longer listed. Open the menu again.', 'error');
                 return;
             }
+            const accountKey = `projectx:${accountId}`;
+            const market = await marketFor(accountKey, 'projectx', ask);
+            const resolved = market ? ws.chart.data.resolve(market.symbol) : null;
+            if (!market || resolved?.provider !== 'projectx') {
+                // A dismissed symbol search is already an answer; only a resume has nobody to ask.
+                if (!ask) ws.toast('ProjectX trading needs a futures contract on the chart — pick one from the symbol list first.', 'error');
+                return;
+            }
             /* The contract comes off the symbol's own metadata, which the provider fills in
              * — the ticker on the chart may be a product root (NQ) and every order has to
              * carry the dated contract it resolved to. Asked through the chart rather than
              * through a second provider instance, so it is the same answer the chart drew. */
-            const info = await ws.chart.data.symbolInfo(symbol);
+            const info = await ws.chart.data.symbolInfo(market.symbol);
             const dealing = (info as { dealing?: ProjectXDealing } | undefined)?.dealing;
             if (!dealing?.contractId) {
                 ws.toast(`ProjectX has no contract matching ${resolved.ticker}.`, 'error');
@@ -379,6 +435,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             projectxChosen = accountId;
 
             stop(); // whatever was on comes off first — one account at a time
+            showAccountMarket(accountKey, 'projectx', market);
             projectx = new ProjectXController({
                 ticker: contractName,
                 dealing,
@@ -408,17 +465,19 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
      * Bound to the market on screen, and refused off it: the account trades ONE instrument
      * and the venue names it its own way, so a chart on Bitcoin has nothing to send.
      */
-    async function startCapital(): Promise<void> {
+    async function startCapital(ask = true): Promise<void> {
         if (broker === 'capital' || starting) return;
-        const symbol = ws.chart.market.symbol ?? '';
-        const resolved = ws.chart.data.resolve(symbol);
-        if (resolved?.provider !== 'capital') {
-            ws.toast('Live trading needs a Capital.com market on the chart — pick one from the symbol list first.', 'error');
-            return;
-        }
         starting = true;
         try {
             const env = await window.midori.capital.environment();
+            const accountKey = `capital:${env.live ? 'live' : 'demo'}`;
+            const market = await marketFor(accountKey, 'capital', ask);
+            const resolved = market ? ws.chart.data.resolve(market.symbol) : null;
+            if (!market || resolved?.provider !== 'capital') {
+                // A dismissed symbol search is already an answer; only a resume has nobody to ask.
+                if (!ask) ws.toast('Live trading needs a Capital.com market on the chart — pick one from the symbol list first.', 'error');
+                return;
+            }
             const account = await window.midori.capital.account().catch(() => null);
             const go = await askToArm(ws.root, {
                 live: env.live,
@@ -430,6 +489,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             if (!go) return;
 
             stop(); // whatever was on comes off first — one account at a time
+            showAccountMarket(accountKey, 'capital', market);
             live = new CapitalController({
                 epic: resolved.ticker,
                 notify: (message, kind) => ws.toast(message, kind === 'success' ? 'success' : kind),
@@ -440,7 +500,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             /* The venue's own rules for this instrument, so a size is made acceptable before
              * it is sent rather than refused after. Best effort: an order still goes out
              * without them, and the venue applies them itself. */
-            void ws.chart.data.symbolInfo(symbol).then((info) => {
+            void ws.chart.data.symbolInfo(market.symbol).then((info) => {
                 const dealing = (info as { dealing?: unknown } | undefined)?.dealing;
                 if (dealing) live?.setDealing(dealing as Parameters<CapitalController['setDealing']>[0]);
             });
@@ -469,12 +529,22 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     async function startPaper(): Promise<void> {
         if (broker === 'paper' || starting) return;
         starting = true;
+        /* Released however this leaves, which the venue starts already do with a `finally`.
+         * Without one, anything that threw on the way — a mount that could not be built —
+         * left the flag set, and every later press on the Trade menu returned at the guard
+         * above without a word. A dead menu, and no way back to it but a restart. */
+        try {
+            await openPaper();
+        } finally {
+            starting = false;
+        }
+    }
 
+    async function openPaper(): Promise<void> {
         let stored: Awaited<ReturnType<typeof loadPaperAccount>>;
         try {
             stored = await loadPaperAccount();
         } catch (err: unknown) {
-            starting = false;
             /* An account that cannot be read is not an account to guess at: better to say so
              * and stay on Just Watching than to open a fresh one over the top of weeks of
              * trades that may still be on disk. */
@@ -518,7 +588,6 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             theme: opts.theme(),
         });
         broker = 'paper';
-        starting = false;
         saveActiveBroker(broker);
         persist();
         void mount.resync();
@@ -527,6 +596,9 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     /** Back to a chart that is only a chart. The account is put down, not closed. */
     function stop(): void {
         if (broker === 'off') return;
+        forgetMarket?.();
+        forgetMarket = null;
+        ws.setSymbolScope(null);
         if (broker === 'capital') {
             liveMount?.unmount();
             liveMount = null;
@@ -676,9 +748,11 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 else if (id === 'bybit') void startBybit().catch(report);
                 else if (id.startsWith('projectx:')) void startProjectX(Number(id.slice('projectx:'.length))).catch(report);
             },
-            onTrailing: (id) => {
-                if (id === 'paper') openSettings();
-            },
+            /* Any row's gear opens the same settings, because they ARE the same settings:
+             * how a trade is sized, what a fresh ticket is bracketed with, the quick sizes,
+             * the session limits and the keys apply to whichever account is being traded.
+             * Only the account's own shape is the paper one's, and that section says so. */
+            onTrailing: () => openSettings(),
         });
         return menu;
     }
@@ -765,16 +839,16 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 /* Which venues this machine still has credentials for is a round trip, and
                  * a venue it no longer has would reach the dialog only to fail behind it. */
                 await venuesRead;
-                if (resume === 'capital' && capital?.configured) return startCapital();
-                if (resume === 'binance-spot' && binanceSpot?.configured) return startBinanceSpot();
-                if (resume === 'bybit' && bybitVenue?.configured) return startBybit();
+                if (resume === 'capital' && capital?.configured) return startCapital(false);
+                if (resume === 'binance-spot' && binanceSpot?.configured) return startBinanceSpot(false);
+                if (resume === 'bybit' && bybitVenue?.configured) return startBybit(false);
                 /* ProjectX resumes only onto the account that is still chosen — the mode
                  * alone does not say which one, and there is no safe way to pick. An
                  * evaluation that ended, or a key replaced since, leaves the chart on Just
                  * Watching rather than arming whichever account happens to be first. */
                 if (resume === 'projectx' && projectxVenue?.configured && projectxChosen != null
                     && projectxAccounts.some((a) => a.id === projectxChosen)) {
-                    return startProjectX(projectxChosen);
+                    return startProjectX(projectxChosen, false);
                 }
                 return undefined;
             })
