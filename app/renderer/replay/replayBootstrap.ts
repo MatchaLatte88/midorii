@@ -20,6 +20,8 @@ import { wirePositionStyle } from '../trading/positionStyleSettings';
 import { wireOverlaySettings } from './overlaySettings';
 import { shareChartDoc } from '../shell/sharedChartDoc';
 import { loadReplayWindow } from './replayWindow';
+import { TickFeed } from './tickFeed';
+import type { TapePrint } from './timeAndSales';
 
 /**
  * The timeframe a fresh replay opens on.
@@ -32,11 +34,17 @@ import { loadReplayWindow } from './replayWindow';
  */
 const DEFAULT_TIMEFRAME = '60';
 
+/** Where a session plays a recording, it opens on minutes: ticks are practised at the ladder,
+ *  and an hourly candle growing for an hour is not what anybody watching a tape is reading. */
+const TICK_TIMEFRAME = '1';
+
 export interface ReplaySetup {
     symbol: string;
     /** The replay "clock" at session start — nothing at or after this is revealed yet. */
     startTime: number;
     balance?: number;
+    /** The recording to play on ticks — a contract name, `NQU6` — or none. */
+    ticks?: string | null;
 }
 
 /** What a mounted replay hands back. (Not the engine's ReplaySession — that's the account.) */
@@ -46,20 +54,46 @@ export interface MountedReplay {
     controller: ReplayController;
 }
 
+/** Tells two provider names made in the same millisecond apart. */
+let providerSerial = 0;
+
+/**
+ * A name for a replay provider.
+ *
+ * Underscore, not hyphen: Vela parses a symbol's `provider:` prefix as `[A-Za-z0-9_.]+` — a
+ * hyphen makes the prefix unparseable and the provider is then never found (the chart just
+ * stays empty, with no error anywhere). A fresh name per provider also keeps the shared
+ * closed-bar cache from serving one provider's candles to the next — which is exactly what
+ * going back to an earlier candle relies on.
+ */
+function providerNameFor(): string {
+    providerSerial += 1;
+    return `replay_${Date.now().toString(36)}${providerSerial.toString(36)}`;
+}
+
+/** What a controller is handed from the chart it drives. */
+interface ControllerWiring {
+    rechart: (timeframe: string, clock: number) => Promise<ReplayProvider>;
+    notify: (message: string, kind: 'info' | 'error') => void;
+}
+
+/** What a controller is built from, once the chart it drives exists. */
+type MakeController = (
+    provider: ReplayProvider,
+    bars: ReplayBar[],
+    startIndex: number,
+    wiring: ControllerWiring,
+) => ReplayController;
+
 /** Everything a mounted replay shares, whether it is new or resumed. */
 async function mount(
     container: HTMLElement,
     cfg: { symbol: string; timeframe: string; clock: number; bars: ReplayBar[] },
-    makeController: (provider: ReplayProvider, bars: ReplayBar[], startIndex: number) => ReplayController,
+    makeController: MakeController,
     theme: VelaTheme,
 ): Promise<MountedReplay> {
     const archive = new LocalArchiveProvider();
-    // Underscore, not hyphen: Vela parses a symbol's `provider:` prefix as
-    // `[A-Za-z0-9_.]+` — a hyphen makes the prefix unparseable and the provider is
-    // then never found (the chart just stays empty, with no error anywhere).
-    // A per-session name also keeps the shared closed-bar cache from serving one
-    // session's bars to the next one on the same symbol/timeframe.
-    const providerName = `replay_${Date.now().toString(36)}`;
+    let providerName = providerNameFor();
     const provider = new ReplayProvider(archive, providerName, cfg.timeframe, cfg.clock);
 
     /* A session is a chart, the ticket beside it and the book under it — two axes, so two
@@ -97,7 +131,35 @@ async function mount(
     doc.attach(ws);
     await ws.chart.ready();
 
-    const controller = makeController(provider, cfg.bars, barIndexAt(cfg.bars, cfg.clock - 1));
+    /**
+     * Put the chart back on an earlier instant.
+     *
+     * A fresh provider under a fresh name rather than the running one wound back: the chart
+     * already holds every candle after that instant, and the shared cache would hand them
+     * straight back on the reload. Drawings survive — a market switch leaves them alone. The
+     * provider it replaces is let go only once the chart is on the new one; where the switch
+     * fails, the chart is put back where it was before the error goes on.
+     */
+    const rechart = async (timeframe: string, clock: number): Promise<ReplayProvider> => {
+        const previous = { name: providerName, timeframe: ws.chart.market.timeframe ?? timeframe };
+        const name = providerNameFor();
+        const next = new ReplayProvider(archive, name, timeframe, clock);
+        ws.chart.data.registerProvider(name, next);
+        try {
+            await ws.chart.setMarket({ symbol: `${name}:${cfg.symbol}`, timeframe });
+        } catch (err) {
+            ws.chart.data.unregisterProvider(name);
+            await ws.chart.setMarket({ symbol: `${previous.name}:${cfg.symbol}`, timeframe: previous.timeframe })
+                .catch((restoreErr: unknown) => console.error('[midorii] could not put the replay chart back', restoreErr));
+            throw err;
+        }
+        ws.chart.data.unregisterProvider(previous.name);
+        providerName = name;
+        return next;
+    };
+
+    const notify = (message: string, kind: 'info' | 'error'): void => ws.toast(message, kind === 'error' ? 'error' : 'info');
+    const controller = makeController(provider, cfg.bars, barIndexAt(cfg.bars, cfg.clock - 1), { rechart, notify });
 
     // Added straight on the chart, not through the widget context: the replay's
     // visuals are recomputed state, so they must stay out of the undo timeline
@@ -158,8 +220,33 @@ function guarded(ws: VelaWorkspace, run: () => void): void {
  * theme changes, which is a thing the settings dialog can do mid-session.
  */
 function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayController, theme: VelaTheme): TradeSidebar {
+    const feed = controller.ticks;
+
+    /* What the recording is of — above all its price increment, which the ladder is drawn on.
+     * Written beside the recording when the gateway had listed the contract; where it had not,
+     * worked out from the prints themselves as they play, which is the increment the market
+     * actually moved in and never a guess. */
+    let tickSize: number | null = null;
+    let inferredTick: number | null = null;
+    if (feed) {
+        void window.midori.ticks.meta(feed.source)
+            .then((meta) => {
+                if (meta?.tickSize && meta.tickSize > 0) {
+                    tickSize = meta.tickSize;
+                    sidebar.refresh();
+                }
+            })
+            .catch((err: unknown) => console.error('[midorii] could not read what the recording is of', err));
+    }
+
     const sidebar = mountTradeSidebar(main, {
-        account: () => ({ equity: controller.session.broker.equity, price: controller.session.bar.close }),
+        account: () => ({
+            equity: controller.session.broker.equity,
+            price: controller.session.bar.close,
+            /* The recorded bid and ask, while the quote is fresh — what a market order here is
+             * filled at, and what the ticket's two sides show. */
+            ...(controller.session.broker.quote ?? {}),
+        }),
         counts: () => {
             const book = controller.book();
             return { positions: book.positions.length, orders: book.orders.length };
@@ -169,7 +256,53 @@ function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayCont
             flatten: () => guarded(ws, () => controller.flatten()),
             cancelAll: () => guarded(ws, () => controller.cancelAll()),
         },
+        ...(feed
+            ? {
+                tick: () => tickSize ?? inferredTick,
+                ladder: {
+                    quote: () => controller.session.broker.quote,
+                    positions: () => controller.session.broker.positions.map((p) => ({
+                        size: p.size, entryPrice: p.entryPrice, stopLoss: p.stopLoss ?? null, takeProfit: p.takeProfit ?? null,
+                    })),
+                    orders: () => controller.book().orders
+                        .filter((o) => o.price != null)
+                        .map((o) => ({ id: o.id, side: o.side, price: o.price!, size: o.size })),
+                    cancelOrder: (id: number) => guarded(ws, () => controller.cancelOrder(id)),
+                },
+                /* Prints only flow while the recording is being played, so the tape is offered
+                 * only then — an empty tape on candles would promise prints that never come. */
+                tape: () => controller.mode === 'ticks',
+            }
+            : {}),
     });
+
+    if (feed) {
+        /* The ladder folds volume as a running figure (see priceLadder.ts), so it is handed one:
+         * every print adds its own size at its own price, and a new candle never reads as a
+         * drop that has to be guessed at. */
+        let traded = 0;
+        let lastPrint: number | null = null;
+        controller.onPrints = (prints) => {
+            const tape: TapePrint[] = [];
+            for (const [time, , price, size, side] of prints) {
+                tape.push({ time, price, size, side: side === 1 ? 'sell' : 'buy' });
+                traded += size;
+                sidebar.markVolume(price, traded);
+                if (lastPrint !== null && price !== lastPrint) {
+                    const step = Math.round(Math.abs(price - lastPrint) * 1e9) / 1e9;
+                    if (step > 0 && (inferredTick === null || step < inferredTick)) inferredTick = step;
+                }
+                lastPrint = price;
+            }
+            sidebar.pushPrints(tape);
+        };
+        /* Going back leaves a tape and a volume profile of a market that has not happened yet. */
+        controller.onJump = () => {
+            traded = 0;
+            lastPrint = null;
+            sidebar.resetMarket();
+        };
+    }
 
     ensureUIHost(sidebar.el, theme);
     ws.chart.on('theme:changed', (theme) => applyThemeTokens(sidebar.el, theme));
@@ -255,15 +388,17 @@ function followChartTimeframe(ws: VelaWorkspace, controller: ReplayController): 
 /** Start a fresh replay at `startTime`, on the default timeframe. `theme` is the palette
  *  the app is currently wearing — a session is built in it rather than corrected into it. */
 export async function startReplay(container: HTMLElement, cfg: ReplaySetup, theme: VelaTheme): Promise<MountedReplay> {
-    const timeframe = DEFAULT_TIMEFRAME;
+    const timeframe = cfg.ticks ? TICK_TIMEFRAME : DEFAULT_TIMEFRAME;
     const { bars } = await loadReplayWindow(cfg.symbol, timeframe, cfg.startTime);
     return mount(
         container,
         { symbol: cfg.symbol, timeframe, clock: cfg.startTime, bars },
-        (provider, window_, startIndex) => new ReplayController({
+        (provider, window_, startIndex, { rechart, notify }) => new ReplayController({
             provider, bars: window_, startIndex, balance: cfg.balance,
-            symbol: cfg.symbol, timeframe,
+            symbol: cfg.symbol, timeframe, rechart,
+            ticks: cfg.ticks ? new TickFeed(cfg.ticks) : null,
             onPlayStateChange: () => syncControls(),
+            onNotice: notify,
         }),
         theme,
     );
@@ -286,12 +421,17 @@ export async function resumeReplay(container: HTMLElement, sessionId: string, th
     return mount(
         container,
         { symbol: record.symbol, timeframe: record.timeframe, clock: record.clock, bars },
-        (provider, window_, startIndex) => new ReplayController({
+        (provider, window_, startIndex, { rechart, notify }) => new ReplayController({
             provider, bars: window_, startIndex, forming,
             symbol: record.symbol, timeframe: record.timeframe,
             restoreFrom: record.session,
             restoredSessionId: record.id,
+            // What lets a session picked up today still go back to a candle from yesterday.
+            journal: record.journal ?? null,
+            ticks: record.ticks ? new TickFeed(record.ticks) : null,
+            rechart,
             onPlayStateChange: () => syncControls(),
+            onNotice: notify,
         }),
         theme,
     );

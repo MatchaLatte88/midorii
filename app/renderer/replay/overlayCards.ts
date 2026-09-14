@@ -1,4 +1,6 @@
-import { injectStyles, iconEl } from '../../../src/ui';
+import { Menu, injectStyles, iconEl, registerIcon, svg16, type MenuItemDescriptor } from '../../../src/ui';
+import { loadOverlayDisplay, onOverlayDisplayChange, saveOverlayDisplay, type OverlayDisplay } from './overlayDisplay';
+import { loadQuoteDisplay, onQuoteDisplayChange, saveQuoteDisplay } from '../quotes/quoteDisplay';
 
 /**
  * The chrome the chart's floating cards share: pick one up, put it down somewhere else, and
@@ -7,19 +9,17 @@ import { injectStyles, iconEl } from '../../../src/ui';
  * The account card, the quick ticket and the bid/ask readout all float over live bars in a
  * corner, and a corner is exactly where a chart's own action tends to be. None of them is
  * worth moving the chart to read around, so each can be dragged anywhere over the plot and
- * each can be dismissed — with one button per chart to bring back whatever was dismissed,
- * since a card that can be closed and not reopened is a card people lose.
+ * each can be dismissed — with a View menu per chart that lists every card with its own
+ * switch, since a card that can be closed and not reopened is a card people lose.
  *
  * Where a card sits and whether it is on the chart at all are both remembered per machine: a
  * layout somebody arranged once and had to arrange again next session is not a layout, and a
  * card somebody dismissed on purpose coming back at every launch is not a dismissal.
  *
- * Closing a card is still not the same as switching it off in Settings (see
- * `overlayDisplay.ts`), and the difference is what the chart says afterwards. A closed card
- * leaves the restore button behind — the chart is telling you something is put away and where
- * to get it back. A card switched off leaves nothing: no button, no trace, gone until somebody
- * goes looking in Settings for it. "Not right now" and "not at all", and both survive a
- * restart.
+ * The View menu's switch for a card is the same switch the chart's gear offers under Chart
+ * cards (see `overlayDisplay.ts`), so the two doors cannot disagree. The card's own close
+ * button only puts it away; the menu shows that as off too, and switching it on brings the
+ * card back whichever of the two took it off the chart. Both survive a restart.
  *
  * A dragged card keeps its own pixels
  * -----------------------------------
@@ -42,24 +42,35 @@ const STYLE_ID = 'midorii-card';
  * The chart pins its own pane buttons there — maximize, and a study pane's move/collapse
  * cluster — 6px clear of the axis and 24px square, on a layer above anything a host puts in
  * the same place. They only appear on hover, which is what makes sharing the spot a bad idea:
- * a button under them would work until somebody moved the mouse. So that spot is left free and
- * the restore button sits beside it, at the same size, on the same line, with the same gap —
- * see `PaneControls.ts`, which wears this card's own surface and border for the same reason.
+ * a button under them would work until somebody moved the mouse. So while the price pane has
+ * a cluster — only once there is a second pane — that spot is left free and the full-screen
+ * button sits beside it; with a lone pane there is nothing to share and it sits against the
+ * axis. The View menu goes beside the full-screen button, at the same size, on the same line,
+ * with the same gap — see `PaneControls.ts`, which wears this card's own surface and border
+ * for the same reason. The renderer publishes what the cluster claims as
+ * `--vela-pane-controls-width`, so all of this follows the panes coming and going.
  */
-const PANE_CLUSTER_RIGHT = 6;
-const PANE_CLUSTER_SIZE = 24;
-/** The restore button, matched to the cluster it stands next to. */
+const PANE_CONTROLS = 'var(--vela-pane-controls-width, 0px)';
+/** The corner buttons, matched to the cluster they stand next to. */
 const DOCK_SIZE = 24;
 const DOCK_GAP = 6;
-/** Where the restore button's own right edge falls, past the axis. */
-const DOCK_RIGHT = PANE_CLUSTER_RIGHT + PANE_CLUSTER_SIZE + DOCK_GAP;
+/** Where the full-screen button's own right edge falls, past the axis and the pane cluster. */
+const FULL_RIGHT = DOCK_GAP;
+/** Where the View menu's own right edge falls, one step left of the full-screen button. */
+const VIEW_RIGHT = FULL_RIGHT + DOCK_SIZE + DOCK_GAP;
 /**
- * What a card at its default position gives up while the restore button is on screen.
+ * What a card at its default position gives up to the corner buttons.
  *
- * Measured from the card's own 10px inset, so it clears the button and leaves the same gap
- * everything else in this corner leaves.
+ * Measured from the card's own 10px inset, so it clears the leftmost button on screen and
+ * leaves the same gap everything else in this corner leaves.
  */
-const CARD_INSET = DOCK_RIGHT + DOCK_SIZE + DOCK_GAP - 10;
+const INSET_FULL_ONLY = `calc(${PANE_CONTROLS} + ${FULL_RIGHT + DOCK_SIZE + DOCK_GAP - 10}px)`;
+const INSET_WITH_VIEW = `calc(${PANE_CONTROLS} + ${VIEW_RIGHT + DOCK_SIZE + DOCK_GAP - 10}px)`;
+
+/* The pane cluster beside these already uses `maximize` for a pane taking the chart, so full
+ * screen wears arrows of its own rather than a look-alike of the button next to it. */
+registerIcon('midorii-fullscreen', svg16('<path d="M9.5 2.5h4v4M13.5 2.5 9.5 6.5M6.5 13.5h-4v-4M2.5 13.5l4-4"/>'));
+registerIcon('midorii-fullscreen-exit', svg16('<path d="M13.5 6.5h-4v-4M9.5 6.5l4-4M2.5 9.5h4v4M6.5 9.5l-4 4"/>'));
 
 const CSS = `
 /* A display set by a class beats the user agent's own rule for [hidden], so a card switched
@@ -92,11 +103,12 @@ const CSS = `
 .midorii-card-close:focus-visible { opacity: 1; }
 .midorii-card-close:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 
-.midorii-card-dock {
+.midorii-card-dock,
+.midorii-card-full {
     all: unset;
     position: absolute;
     top: calc(var(--vela-price-pane-top, 0px) + 10px);
-    right: calc(var(--vela-scale-gutter, 0px) + ${DOCK_RIGHT}px);
+    right: calc(var(--vela-scale-gutter, 0px) + ${PANE_CONTROLS} + ${VIEW_RIGHT}px);
     z-index: 4;
     box-sizing: border-box;
     width: ${DOCK_SIZE}px;
@@ -111,7 +123,10 @@ const CSS = `
     font-size: 12px;
     cursor: pointer;
 }
-.midorii-card-dock:hover { color: var(--vela-fg-bright); background: var(--vela-hover); }
+.midorii-card-full { right: calc(var(--vela-scale-gutter, 0px) + ${PANE_CONTROLS} + ${FULL_RIGHT}px); }
+.midorii-card-dock:hover,
+.midorii-card-full:hover,
+.midorii-card-dock[data-state='open'] { color: var(--vela-fg-bright); background: var(--vela-hover); }
 .midorii-card-dock[hidden] { display: none !important; }
 `;
 
@@ -128,6 +143,41 @@ export type OverlayLayout = Partial<Record<OverlayCardId, CardPlacement>>;
 
 const LAYOUT_KEY = 'midorii-overlay-layout';
 const IDS: readonly OverlayCardId[] = ['account', 'quick', 'quote', 'live'];
+
+interface CardSetting {
+    /** How the View menu names it — the same words the gear's Chart cards tab uses. */
+    label: string;
+    get(): boolean;
+    set(on: boolean): void;
+    /** Hear about a save that may have changed it. Returns its own unsubscribe. */
+    watch(listener: () => void): () => void;
+}
+
+/** One flag of the floating-card settings, as a {@link CardSetting}. */
+function displaySetting(label: string, key: keyof OverlayDisplay): CardSetting {
+    return {
+        label,
+        get: () => loadOverlayDisplay()[key],
+        set: (on) => saveOverlayDisplay({ ...loadOverlayDisplay(), [key]: on }),
+        watch: (listener) => onOverlayDisplayChange(listener),
+    };
+}
+
+/**
+ * The switch each card answers to. The bid/ask card's lives with the other two ways of
+ * showing a quote — see `quotes/quoteDisplay.ts` — and is the same switch from here.
+ */
+const CARD_SETTINGS: Record<OverlayCardId, CardSetting> = {
+    account: displaySetting('Account card', 'showAccount'),
+    quick: displaySetting('Quick Buy / Sell panel', 'showQuick'),
+    quote: {
+        label: 'Bid / ask card',
+        get: () => loadQuoteDisplay().showCard,
+        set: (on) => saveQuoteDisplay({ ...loadQuoteDisplay(), showCard: on }),
+        watch: (listener) => onQuoteDisplayChange(listener),
+    },
+    live: displaySetting('Live account band', 'showLive'),
+};
 
 /** A stored layout, with anything that cannot be a position dropped rather than trusted. */
 export function normalizeOverlayLayout(raw: unknown): OverlayLayout {
@@ -257,17 +307,18 @@ export interface OverlayCard {
     /** Re-place, or re-clamp, after the cell changed shape. */
     reflow(): void;
     /**
-     * Whether this chart has the card at all — a Settings switch, or a market that does not
-     * quote what the card exists to show. Unavailable is not the same as closed: it is not on
-     * screen and the restore button does not offer it, because there is nothing to restore.
+     * Whether this chart can have the card at all — a market that does not quote what the
+     * card exists to show cannot. Unavailable is not the same as switched off: it is not on
+     * screen and the View menu does not list it, because there is nothing to show. The card's
+     * own Settings switch is read by the card itself and needs no caller.
      */
     setAvailable(available: boolean): void;
     destroy(): void;
 }
 
 /**
- * Give `el` the shared chrome: a drag, a close button, and a seat in the cell's restore
- * button. `el` must already be mounted in `cell`, which must be a positioning context.
+ * Give `el` the shared chrome: a drag, a close button, and a row in the cell's View menu.
+ * `el` must already be mounted in `cell`, which must be a positioning context.
  */
 export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: OverlayCardOptions): OverlayCard {
     const doc = cell.ownerDocument;
@@ -277,6 +328,16 @@ export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: Overla
     let placement: CardPlacement | null = loadOverlayLayout()[opts.id] ?? null;
     let available = true;
     let closed = loadClosedCards().has(opts.id);
+    const setting = CARD_SETTINGS[opts.id];
+    let enabled = setting.get();
+    /* Compared before repainting: the bid/ask record also carries the lines and the scale
+     * tags, and a save about those is no reason to move this card. */
+    const stopWatching = setting.watch(() => {
+        const next = setting.get();
+        if (next === enabled) return;
+        enabled = next;
+        paint();
+    });
 
     /** Put the card away, or take it back out, and remember which. */
     const setClosed = (next: boolean): void => {
@@ -288,7 +349,7 @@ export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: Overla
     const close = doc.createElement('button');
     close.className = 'midorii-card-close';
     close.type = 'button';
-    close.title = 'Put this card away — the button in the corner brings it back';
+    close.title = 'Put this card away — the View menu in the corner brings it back';
     close.setAttribute('aria-label', 'Hide this card');
     close.appendChild(iconEl('close', doc));
     close.onclick = (e) => {
@@ -331,7 +392,7 @@ export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: Overla
     }
 
     function paint(): void {
-        el.hidden = !available || closed;
+        el.hidden = !available || !enabled || closed;
         dock.sync();
         if (!el.hidden) reflow();
         opts.onVisibility?.(!el.hidden);
@@ -386,8 +447,16 @@ export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: Overla
     // ── the corner, and the cell changing shape ─────────────────────────
     const dock = dockFor(cell);
     const leave = dock.add({
-        restore: () => setClosed(false),
-        isClosed: () => available && closed,
+        id: opts.id,
+        label: setting.label,
+        available: () => available,
+        shown: () => enabled && !closed,
+        /* On clears both ways a card leaves the chart, so the switch always brings it back;
+         * off is the Settings switch, the one the gear shows. */
+        setShown: (on) => {
+            if (on && closed) setClosed(false);
+            if (on !== enabled) setting.set(on);
+        },
         reflow,
     });
 
@@ -395,7 +464,7 @@ export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: Overla
     observer?.observe(cell);
 
     // `paint` rather than `reflow`: a card that was put away in an earlier session starts put
-    // away, and the corner button has to be offering it from the first frame.
+    // away, and the View menu has to be showing it as off from the first frame.
     paint();
 
     return {
@@ -406,17 +475,22 @@ export function makeOverlayCard(cell: HTMLElement, el: HTMLElement, opts: Overla
         },
         destroy(): void {
             observer?.disconnect();
+            stopWatching();
             leave();
             close.remove();
         },
     };
 }
 
-// ── the restore button ──────────────────────────────────────────────────
+// ── the corner: View menu and full screen ───────────────────────────────
 
 interface Seat {
-    restore(): void;
-    isClosed(): boolean;
+    id: OverlayCardId;
+    label: string;
+    /** Whether the View menu lists it — see {@link OverlayCard.setAvailable}. */
+    available(): boolean;
+    shown(): boolean;
+    setShown(on: boolean): void;
     /** Re-place a card that is placed relative to another one. */
     reflow(): void;
 }
@@ -424,36 +498,84 @@ interface Seat {
 interface Dock {
     /** Seat a card. Returns its own release. */
     add(seat: Seat): () => void;
-    /** Show or hide the button, per what is currently put away, and re-place what is left. */
+    /** Re-read every seat into the menu and the corner, and re-place what is on screen. */
     sync(): void;
 }
 
 const docks = new WeakMap<HTMLElement, Dock>();
 
 /**
- * The one button per chart that brings closed cards back.
+ * The corner buttons a chart with cards gets: the View menu, one switch per card, and full
+ * screen for the chart on its own.
  *
- * It sits in the corner the cards were dismissed from, one step left of the chart's own pane
- * buttons — see {@link PANE_CLUSTER_SIZE} for why that step is not optional. While it is there the
- * cards still ON the chart — the ones that have never been dragged, at least — shift left far
- * enough to clear both, through a custom property they read in their own `right`. Two overlays
+ * They sit one step left of the chart's own pane buttons whenever the price pane has them —
+ * see {@link PANE_CONTROLS} for why that step is not optional. The cards that have never been dragged shift left far enough
+ * to clear them, through a custom property they read in their own `right`. Two overlays
  * sharing one corner would otherwise be two overlays on top of each other.
+ *
+ * Full screen takes the cell, not the window: the chart and what floats on it, without the
+ * app's bars or the panel beside it. The chart's own dialogs live inside the cell and come
+ * along; anything hung on the document outside it does not show until full screen is left.
  */
 function dockFor(cell: HTMLElement): Dock {
     const existing = docks.get(cell);
     if (existing) return existing;
 
     const doc = cell.ownerDocument;
-    const button = doc.createElement('button');
-    button.className = 'midorii-card-dock';
-    button.type = 'button';
-    button.title = 'Bring the chart cards back';
-    button.setAttribute('aria-label', 'Show the hidden chart cards');
-    button.appendChild(iconEl('eye', doc));
-    button.hidden = true;
-    cell.appendChild(button);
+    const view = doc.createElement('button');
+    view.className = 'midorii-card-dock';
+    view.type = 'button';
+    view.title = 'View — which chart cards are shown';
+    view.setAttribute('aria-label', 'Choose which chart cards are shown');
+    view.appendChild(iconEl('eye', doc));
+    view.hidden = true;
+
+    const full = doc.createElement('button');
+    full.className = 'midorii-card-full';
+    full.type = 'button';
+    const paintFull = (): void => {
+        const on = doc.fullscreenElement === cell;
+        full.replaceChildren(iconEl(on ? 'midorii-fullscreen-exit' : 'midorii-fullscreen', doc));
+        full.title = on ? 'Leave full screen' : 'Show the chart full screen';
+        full.setAttribute('aria-label', full.title);
+    };
+    full.onclick = () => {
+        const change = doc.fullscreenElement === cell ? doc.exitFullscreen() : cell.requestFullscreen();
+        change.catch((err: unknown) => console.error('[midorii] could not change full screen', err));
+    };
+    /* Heard on the cell: the event is fired at the element going in or out and bubbles from
+     * there, so nothing is left listening on the document once the cell is gone. Esc leaves
+     * full screen by itself, and this is how the icon hears about it. */
+    cell.addEventListener('fullscreenchange', paintFull);
+    paintFull();
+
+    cell.append(view, full);
 
     const seats = new Set<Seat>();
+
+    /** The rows, in the one order the cards are always named in. */
+    const listed = (): Seat[] => [...seats]
+        .filter((seat) => seat.available())
+        .sort((a, b) => IDS.indexOf(a.id) - IDS.indexOf(b.id));
+
+    const items = (): MenuItemDescriptor[] => listed().map((seat) => ({
+        id: seat.id,
+        label: seat.label,
+        checked: seat.shown(),
+        toggle: true,
+    }));
+
+    const menu = new Menu({
+        trigger: view,
+        host: cell,
+        placement: 'bottom-end',
+        items: [],
+        onSelect: (id) => {
+            const seat = listed().find((s) => s.id === id);
+            // The switch repaints the card, which syncs the dock and with it these rows.
+            seat?.setShown(!seat.shown());
+        },
+    });
 
     const dock: Dock = {
         add(seat) {
@@ -464,22 +586,16 @@ function dockFor(cell: HTMLElement): Dock {
             };
         },
         sync() {
-            const anyClosed = [...seats].some((seat) => seat.isClosed());
-            button.hidden = !anyClosed;
-            if (anyClosed) cell.style.setProperty('--midorii-overlay-inset', `${CARD_INSET}px`);
-            else cell.style.removeProperty('--midorii-overlay-inset');
-            /* One card going away moves the corner the others are placed from — the button
-             * takes room, and a card placed under the one that just closed now has nothing
-             * to sit under. A ResizeObserver does not answer for this: a card switched to
-             * display:none reports no resize at all, so the card below it would be left
-             * hanging in the gap. */
+            const rows = items();
+            view.hidden = rows.length === 0;
+            menu.setItems(rows);
+            cell.style.setProperty('--midorii-overlay-inset', view.hidden ? INSET_FULL_ONLY : INSET_WITH_VIEW);
+            /* One card going away moves the corner the others are placed from — a card placed
+             * under the one that just closed now has nothing to sit under. A ResizeObserver
+             * does not answer for this: a card switched to display:none reports no resize at
+             * all, so the card below it would be left hanging in the gap. */
             for (const seat of [...seats]) seat.reflow();
         },
-    };
-
-    button.onclick = () => {
-        // A copy: restoring repaints, which syncs the dock, which reads this same set.
-        for (const seat of [...seats]) seat.restore();
     };
 
     docks.set(cell, dock);

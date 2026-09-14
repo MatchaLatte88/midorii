@@ -60,7 +60,7 @@ export interface ProjectXControllerOptions {
 /** The gateway's own position kinds. */
 const POSITION_TYPE = { undefined: 0, long: 1, short: 2 } as const;
 /** Its order kinds and sides, mirrored from app/electron/data/projectx.js. */
-const ORDER_TYPE = { limit: 1, market: 2, stop: 4 } as const;
+const ORDER_TYPE = { limit: 1, market: 2, stop: 4, trailingStop: 5 } as const;
 const ORDER_SIDE = { buy: 0, sell: 1 } as const;
 
 interface ProjectXPosition extends ControlledPosition {
@@ -71,6 +71,8 @@ interface ProjectXPosition extends ControlledPosition {
     targetOrderId: number | null;
     stopLoss: number | null;
     takeProfit: number | null;
+    /** The stop is a trailing stop order rather than a fixed one. */
+    trailing: boolean;
     /** Computed here, because the gateway states no unrealized figure on a position. */
     unrealized: number;
 }
@@ -243,7 +245,7 @@ export class ProjectXController implements TradingController {
             // An order the venue states no price for has no row to sit on; a zero would be a
             // price nobody asked for, printed where a real one belongs.
             .filter((o): o is { id: number; side: 'buy' | 'sell'; price: number; size: number; kind: 'limit' | 'stop' } => o.price != null);
-        return venueBook(this.open, rows, (p) => p.unrealized);
+        return venueBook(this.open, rows, (p) => p.unrealized, (p) => this.breakEvenRefusal(p.id));
     }
 
     /**
@@ -498,6 +500,109 @@ export class ProjectXController implements TradingController {
             window.midori.projectx.closePosition(position.contractId),
             `close ${this.ticker}`,
         );
+    }
+
+    /**
+     * Take part of a position off at market — the gateway's own partial close.
+     *
+     * Down to whole contracts, and refused where that leaves nothing to take or everything:
+     * half of one contract is not an order, and "part" that is the whole position is a close,
+     * which has its own call. The stop and target are brought down to the new size by the
+     * reconcile that follows ({@link resizeGuards}).
+     */
+    closePart(size: number, positionId?: number | null): void {
+        const position = this.positionFor(positionId);
+        if (!position) throw new Error(`No open ${this.ticker} position to take part of.`);
+        const held = Math.abs(position.size);
+        const part = this.sizeOnGrid(Math.abs(size));
+        if (!(part >= this.dealing.minSize)) {
+            throw new Error(`${held} ${this.ticker} cannot be split into whole contracts — close the position instead.`);
+        }
+        if (part >= held) throw new Error('That is the whole position — close it instead.');
+        void this.send(
+            window.midori.projectx.closePosition(position.contractId, part),
+            `close ${part} ${this.ticker}`,
+        ).catch(() => { /* send has already put the venue's refusal in front of the person */ });
+    }
+
+    /**
+     * Turn the position round: one market order for twice its size, the other way.
+     *
+     * One order rather than a close and an open, so there is no moment of being flat between
+     * two instructions of which the second can be refused. The stop and target go FIRST: they
+     * face the other way from the new position, and a sell stop left under a short adds to it
+     * when it triggers. If they cannot be cancelled nothing is sent; if the order is refused
+     * after they were, the position is still open without them, and that is said out loud.
+     */
+    reverse(positionId?: number | null): void {
+        const position = this.positionFor(positionId);
+        if (!position) throw new Error(`No open ${this.ticker} position to reverse.`);
+        void this.flip(position);
+    }
+
+    private async flip(position: ProjectXPosition): Promise<void> {
+        const guards = [position.stopOrderId, position.targetOrderId].filter((id): id is number => id != null);
+        try {
+            await Promise.all(guards.map((id) => window.midori.projectx.cancelOrder(id)));
+        } catch (e) {
+            this.notify(
+                `Not reversed — the ${this.ticker} stop or target could not be cancelled first. `
+                + `${e instanceof Error ? e.message : String(e)}`,
+                'error',
+            );
+            await this.reconcile().catch(() => { /* the refusal was already reported */ });
+            return;
+        }
+        const size = Math.abs(position.size);
+        await this.send(window.midori.projectx.placeOrder({
+            contractId: position.contractId,
+            side: position.size > 0 ? 'sell' : 'buy',
+            type: 'market',
+            size: size * 2,
+        }), `reverse ${size} ${this.ticker}`).catch(() => {
+            if (guards.length) {
+                this.notify(`The ${this.ticker} position is still open WITHOUT its stop and target — they were cancelled before the reverse was refused.`, 'error');
+            }
+        });
+    }
+
+    /**
+     * Replace the stop with a trailing stop `distance` behind the market.
+     *
+     * The gateway takes the trail as a PRICE LEVEL and measures the distance from the last
+     * trade itself, so the level sent is the last price less the distance for a long and plus
+     * it for a short. The new stop is placed before the old one is cancelled: for a round trip
+     * there are two stops, never none.
+     */
+    setTrailing(distance: number, positionId?: number | null): void {
+        const position = this.positionFor(positionId);
+        if (!position) throw new Error(`No open ${this.ticker} position to trail.`);
+        if (!(this.lastPrice > 0)) throw new Error('No price yet to trail from.');
+        if (!(distance >= this.dealing.tickSize)) {
+            throw new Error(`A trail needs at least one tick (${this.dealing.tickSize}).`);
+        }
+        const long = position.size > 0;
+        const trailPrice = this.onTick(long ? this.lastPrice - distance : this.lastPrice + distance);
+        void this.replaceStop(position, {
+            type: 'trailingStop',
+            trailPrice,
+        }, 'set the trailing stop').catch(() => { /* reported by send */ });
+    }
+
+    /** Place a new stop in the closing direction, then cancel the one it replaces. */
+    private async replaceStop(
+        position: ProjectXPosition,
+        stop: { type: 'stop'; stopPrice: number } | { type: 'trailingStop'; trailPrice: number },
+        what: string,
+    ): Promise<void> {
+        const previous = position.stopOrderId;
+        await this.send(window.midori.projectx.placeOrder({
+            contractId: position.contractId,
+            side: position.size > 0 ? 'sell' : 'buy',
+            size: Math.abs(position.size),
+            ...stop,
+        }), what);
+        if (previous != null) await this.send(window.midori.projectx.cancelOrder(previous), 'remove the previous stop');
     }
 
     refreshVisuals(): void {
@@ -769,6 +874,13 @@ export class ProjectXController implements TradingController {
 
         const level = this.onTick(price);
 
+        /* A level set on a trailing stop fixes it there. The trail cannot be modified into a
+         * plain stop, so it is replaced — new one first, for the reason given above. */
+        if (which === 'stop' && existingId != null && position.trailing) {
+            await this.replaceStop(position, { type: 'stop', stopPrice: level }, 'set the stop');
+            return;
+        }
+
         if (existingId != null) {
             // Moved, not replaced: no window in which the position is unprotected.
             await this.send(
@@ -894,13 +1006,13 @@ export class ProjectXController implements TradingController {
         const orphans = this.resting.filter((o) => (
             !held.has(o.contractId)
             && !this.working.has(o.id)
-            && (o.type === ORDER_TYPE.stop || o.type === ORDER_TYPE.limit)
+            && (o.type === ORDER_TYPE.stop || o.type === ORDER_TYPE.trailingStop || o.type === ORDER_TYPE.limit)
         ));
         if (!orphans.length) return;
         for (const order of orphans) {
             try {
                 await window.midori.projectx.cancelOrder(order.id);
-                this.notify(`Cancelled a ${order.type === ORDER_TYPE.stop ? 'stop' : 'target'} left over from a closed ${this.ticker} position.`, 'info');
+                this.notify(`Cancelled a ${order.type === ORDER_TYPE.limit ? 'target' : 'stop'} left over from a closed ${this.ticker} position.`, 'info');
             } catch (e) {
                 /* Said once, loudly: an orphan that cannot be cancelled is the dangerous
                  * case — it is a live order against nothing, and the person has to know. */
@@ -923,7 +1035,7 @@ export class ProjectXController implements TradingController {
         const guards = this.resting.filter((o) => (
             o.contractId === raw.contractId && o.side === closing && !this.working.has(o.id)
         ));
-        const stop = guards.find((o) => o.type === ORDER_TYPE.stop) ?? null;
+        const stop = guards.find((o) => o.type === ORDER_TYPE.stop || o.type === ORDER_TYPE.trailingStop) ?? null;
         const target = guards.find((o) => o.type === ORDER_TYPE.limit) ?? null;
         return {
             id: raw.id,
@@ -935,6 +1047,7 @@ export class ProjectXController implements TradingController {
             targetOrderId: target?.id ?? null,
             stopLoss: stop?.stopPrice ?? null,
             takeProfit: target?.limitPrice ?? null,
+            trailing: stop?.type === ORDER_TYPE.trailingStop,
             unrealized: 0,
         };
     }
@@ -1014,6 +1127,8 @@ export class ProjectXController implements TradingController {
                     tag: o.type === ORDER_TYPE.stop ? 'stop' : 'limit',
                 }))
                 .filter((o): o is { id: number; side: 'buy' | 'sell'; price: number; size: number; tag: string } => o.price != null),
+            // A resting order here is an ordinary order and `moveOrder` changes it in place.
+            ordersMovable: true,
             // The gateway reports what the account HOLDS, not the prints that made it.
             fills: [],
             currency: this.accountCurrency(),

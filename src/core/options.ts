@@ -19,6 +19,9 @@ export type MarketSession = 'regular' | 'extended';
 /** Narrow an untrusted string (persisted document, URL param) to a {@link MarketSession}. */
 export const normalizeSession = (v: unknown): MarketSession | undefined => (v === 'regular' || v === 'extended' ? v : undefined);
 
+/** How many bars of history a market loads when it names no depth of its own. */
+export const DEFAULT_BARS = 2000;
+
 /** How the chart obtains its candles. */
 export interface MarketConfig {
     /** The market's symbol. A bare ticker (`'BTCUSDT'`) resolves against the registered

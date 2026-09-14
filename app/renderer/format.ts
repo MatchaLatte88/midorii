@@ -80,10 +80,12 @@ export function formatPrice(price: number): string {
  * whose result cannot be stated in R at all. Uses `riskPerUnit` rather than the stop the trade
  * ended with, which for anything moved to break-even is a distance of almost nothing.
  */
-export function rMultiple(trade: { netPnl: number; size: number; riskPerUnit: number | null }): number | null {
+export function rMultiple(trade: { netPnl: number; size: number; riskPerUnit: number | null; pointValue?: number | null }): number | null {
     const risk = trade.riskPerUnit;
     if (risk == null || !(risk > 0) || !(trade.size > 0)) return null;
-    return trade.netPnl / (risk * trade.size);
+    // `riskPerUnit` is in points; the result is money. Absent means a point is worth one.
+    const perPoint = trade.pointValue != null && trade.pointValue > 0 ? trade.pointValue : 1;
+    return trade.netPnl / (risk * trade.size * perPoint);
 }
 
 /** A signed R multiple, or a dash for a trade that had no stop to measure against. */

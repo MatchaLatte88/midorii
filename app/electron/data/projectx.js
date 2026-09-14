@@ -457,7 +457,7 @@ export async function projectXClosePosition(contractId, size = null) {
  */
 export async function projectXContracts(searchText) {
   const json = await authedPost('/api/Contract/search', { live: creds?.live === true, searchText });
-  return json?.contracts ?? [];
+  return rememberContracts(json?.contracts ?? []);
 }
 
 /**
@@ -470,7 +470,69 @@ export async function projectXContracts(searchText) {
  */
 export async function projectXAvailableContracts() {
   const json = await authedPost('/api/Contract/available', { live: creds?.live === true });
-  return json?.contracts ?? [];
+  return rememberContracts(json?.contracts ?? []);
+}
+
+/** contractId → the contract as the gateway last listed it. */
+const contractsById = new Map();
+
+function rememberContracts(contracts) {
+  for (const contract of contracts) {
+    if (typeof contract?.id === 'string' && typeof contract?.name === 'string') {
+      contractsById.set(contract.id, contract);
+    }
+  }
+  return contracts;
+}
+
+/** The price increment and its value for a contract the gateway has listed, or null. */
+export function projectXContractInfo(contractId) {
+  const contract = contractsById.get(contractId);
+  if (!contract) return null;
+  return {
+    tickSize: Number.isFinite(contract.tickSize) ? contract.tickSize : null,
+    tickValue: Number.isFinite(contract.tickValue) ? contract.tickValue : null,
+  };
+}
+
+/**
+ * The name of a contract — `NQU6` for `CON.F.US.ENQ.U26`.
+ *
+ * From the gateway's own contract lists where they have been read, which they always have by
+ * the time anything streams: a chart resolves its symbol through one before it subscribes.
+ * Where not, it is read off the id itself (`ENQ` and `U26`), which is the same contract
+ * under a spelling nobody types but nobody can mistake for another either.
+ */
+export function projectXContractName(contractId) {
+  const known = contractsById.get(contractId)?.name;
+  if (known) return known.toUpperCase();
+  const parts = String(contractId).split('.');
+  return parts.slice(-2).join('').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'CONTRACT';
+}
+
+/**
+ * Everyone who wants the market feed raw, as it arrives — the recorder, today.
+ *
+ * Told after the relay has done its own work: prints after they have been folded into the
+ * bars, quotes after the delta has been folded into a complete one. A listener that throws is
+ * reported and does not stop the feed reaching the chart.
+ */
+const marketListeners = new Set();
+
+export function projectXOnMarketData(listener) {
+  marketListeners.add(listener);
+  return () => marketListeners.delete(listener);
+}
+
+function tellMarketListeners(kind, contractId, payload) {
+  for (const listener of marketListeners) {
+    try {
+      if (kind === 'prints') listener.onPrints?.(contractId, payload);
+      else listener.onQuote?.(contractId, payload);
+    } catch (e) {
+      console.warn(`[midorii] ProjectX market listener failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 }
 
 // ── Bars ────────────────────────────────────────────────────────────────────
@@ -497,11 +559,14 @@ const TF_TO_UNIT = {
   '15S': { unit: 1, unitNumber: 15, ms: 15_000 },
   '30S': { unit: 1, unitNumber: 30, ms: 30_000 },
   1: { unit: 2, unitNumber: 1, ms: 60_000 },
+  2: { unit: 2, unitNumber: 2, ms: 2 * 60_000 },
+  3: { unit: 2, unitNumber: 3, ms: 3 * 60_000 },
   5: { unit: 2, unitNumber: 5, ms: 5 * 60_000 },
   15: { unit: 2, unitNumber: 15, ms: 15 * 60_000 },
   30: { unit: 2, unitNumber: 30, ms: 30 * 60_000 },
   60: { unit: 3, unitNumber: 1, ms: 60 * 60_000 },
   240: { unit: 3, unitNumber: 4, ms: 4 * 60 * 60_000 },
+  480: { unit: 3, unitNumber: 8, ms: 8 * 60 * 60_000 },
   D: { unit: 4, unitNumber: 1, ms: 24 * 60 * 60_000 },
   W: { unit: 5, unitNumber: 1, ms: 7 * 24 * 60 * 60_000 },
 };
@@ -798,6 +863,7 @@ function handleHubMessage(msg) {
     /* An array, not a tick: up to twenty prints arrive in one message, and reading only
      * the first would silently drop most of the tape. */
     for (const trade of payload) foldTrade(contractId, trade);
+    tellMarketListeners('prints', contractId, payload);
     /* And on to anyone reading the tape itself. Handed the batch whole rather than one at a
      * time: a tape is read in bursts, and twenty repaints for one message is twenty times the
      * work for a list that would look identical. */
@@ -838,6 +904,7 @@ function handleHubMessage(msg) {
      * that keeps a quote must not watch its own copy change underneath it. */
     const quote = { contractId, ...state };
     for (const cb of quoteSubscribers.get(contractId) ?? []) cb(quote);
+    tellMarketListeners('quote', contractId, { ...state });
   }
 }
 

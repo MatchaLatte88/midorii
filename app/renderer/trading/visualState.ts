@@ -38,10 +38,11 @@ export function visualState(broker: Broker, price: number, symbol?: string): Rep
             /* Money a level is worth = the distance it would travel, times what is held.
              * R divides that by the risk the trade OPENED with (`riskPerUnit`), which is
              * the point of the unit: moving a stop must not restate what one R was. */
-            const at = (level: number | null): number | null => (level == null ? null : (level - p.entryPrice) * p.size);
-            const risk = p.riskPerUnit != null ? Math.abs(p.riskPerUnit * p.size) : null;
+            const perPoint = broker.pointValue ?? 1;
+            const at = (level: number | null): number | null => (level == null ? null : (level - p.entryPrice) * p.size * perPoint);
+            const risk = p.riskPerUnit != null ? Math.abs(p.riskPerUnit * p.size * perPoint) : null;
             const inR = (money: number | null): number | null => (money == null || !risk ? null : money / risk);
-            const openPnl = (price - p.entryPrice) * p.size;
+            const openPnl = (price - p.entryPrice) * p.size * perPoint;
             return {
                 id: p.id,
                 side: p.size > 0 ? 'buy' as const : 'sell' as const,

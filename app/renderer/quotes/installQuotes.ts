@@ -57,7 +57,7 @@ export function installQuotes(workspace: VelaWorkspace): void {
         /* Through the card rather than by setting `hidden` here: the readout is a floating
          * card now, and its own close button owns that flag. Two hands on it would have this
          * repaint undo a dismissal on the next tick. */
-        strip?.setAvailable(quoting && display.showCard);
+        strip?.setAvailable(quoting); // the card reads its own Settings switch
         if (last) {
             strip?.update(last, tick);
             indicator?.setInputs(quoteIndicatorInputs(last.bid, last.ask, display));

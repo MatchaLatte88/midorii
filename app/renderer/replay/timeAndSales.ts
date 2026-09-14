@@ -163,6 +163,8 @@ export interface TimeAndSales {
     readonly el: HTMLElement;
     /** Take a burst of prints. Repaints once, however many arrived. */
     push(prints: readonly TapePrint[]): void;
+    /** Forget every print — the instrument they were for has changed. */
+    clear(): void;
     destroy(): void;
 }
 
@@ -234,6 +236,11 @@ export function mountTimeAndSales(host: HTMLElement, opts: TimeAndSalesOptions):
         push(prints: readonly TapePrint[]): void {
             rows = foldPrints(rows, prints);
             peak = rows.reduce((most, row) => (row.size > most ? row.size : most), 0);
+            render();
+        },
+        clear(): void {
+            rows = [];
+            peak = 0;
             render();
         },
         destroy(): void {

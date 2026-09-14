@@ -43,6 +43,16 @@ export interface ReplayVisualState {
      * small lie a trading screen does not get to tell.
      */
     currency?: string | null;
+    /**
+     * Whether a resting order's line may be DRAGGED to move the order.
+     *
+     * Absent means no, which is the safe end of it: a line that can be grabbed and then springs
+     * back is worse than one that was never draggable, because the gesture has already been made
+     * by the time anything says otherwise. Only an account that can actually move an order — see
+     * `TradingController.moveOrder` — sets this. Cancelling is not gated: every account here can
+     * cancel, so the ✕ on the tag is always real.
+     */
+    ordersMovable?: boolean;
     orders: Array<{
         id: number;
         side: 'buy' | 'sell';
@@ -262,9 +272,11 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
 
     /* A resting order has not happened yet: it is only drawn ahead of the playhead.
      *
-     * Taken hold of the same way a stop is, because it is the same gesture about the same kind
-     * of thing — a level you want moved. The ✕ on its tag cancels it, which is the one
-     * destructive thing an order offers, exactly as the entry tag's ✕ closes a position.
+     * Taken hold of the same way a stop is — where the account can move one. Not every one can:
+     * a spot balance and a replay have no call for it, and drawing a handle they would refuse
+     * would be a gesture that undoes itself. The ✕ on its tag cancels it, which every account
+     * here CAN do, so that half is never gated.
+     *
      * Neither decides anything here: the drop is reported and the account answers. */
     for (const o of state.orders) {
         lines.push(line(`ord_${o.id}`, nowTime, nowTime, o.price, ORDER_COLOR, 'dashed', 'right'));
@@ -274,7 +286,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
             /* Which way it goes and how big, not just what kind it is: a chart with three
              * resting orders on it is read by their sizes, and "limit" is true of all three. */
             title: [o.tag ?? o.side, o.size != null ? formatSize(o.size) : null].filter(Boolean).join('  '),
-            axisTag: true, draggable: true, action: 'close',
+            axisTag: true, draggable: state.ordersMovable === true, action: 'close',
         });
     }
 
@@ -381,6 +393,7 @@ function register(type: string, title: string): void {
     registerNativeIndicator({
         type,
         title,
+        internal: true,
         paneHint: 'price',
         overlay: true,
         multiInstance: false,

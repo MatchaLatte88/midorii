@@ -76,6 +76,10 @@ export function wirePositionLevels(opts: LevelWiringOptions): () => void {
          * the same way it says everything else: by refusing, out loud. */
         const orderId = readOrderLineId(id);
         if (orderId != null) {
+            /* Unreachable through the chart: an account that cannot move an order does not draw
+             * a draggable line in the first place (`ordersMovable` on the state). Kept because
+             * the two facts live in different files, and the failure if they ever disagree
+             * should be a sentence rather than a silent no-op. */
             if (!controller.moveOrder) {
                 notify('This account cannot move a resting order from the chart.', 'error');
                 controller.refreshVisuals();

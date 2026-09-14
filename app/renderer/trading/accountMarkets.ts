@@ -62,6 +62,35 @@ export function saveAccountMarket(account: string, market: AccountMarket): void 
  * screen when that one is this venue's, keeping its timeframe (`null`); else nothing — the
  * person has to choose one.
  */
+/**
+ * Whether the chart has moved to another instrument than the one an account was armed on.
+ *
+ * Compared as the provider resolves them rather than as strings: the same contract can be
+ * written with and without its prefix, and a timeframe change keeps the instrument. A symbol
+ * nothing resolves is another instrument — the account certainly cannot trade it.
+ */
+export function leftArmedMarket(
+    armed: { provider: string; ticker: string } | null,
+    now: { provider: string; ticker: string } | null,
+): boolean {
+    if (!armed) return false;
+    return now?.provider !== armed.provider || now.ticker.toUpperCase() !== armed.ticker.toUpperCase();
+}
+
+/**
+ * What to say about what an account leaves open on the instrument the chart has moved away from,
+ * or null when it leaves nothing. Open at the venue is not the same as gone, and a chart that no
+ * longer draws a position is exactly where somebody forgets they are carrying one.
+ */
+export function leftBehindNotice(ticker: string, left: { positions: number; orders: number }): string | null {
+    const parts: string[] = [];
+    if (left.positions > 0) parts.push(`${left.positions} open ${left.positions === 1 ? 'position' : 'positions'}`);
+    if (left.orders > 0) parts.push(`${left.orders} working ${left.orders === 1 ? 'order' : 'orders'}`);
+    if (parts.length === 0) return null;
+    return `${parts.join(' and ')} on ${ticker} stay at the venue and are no longer shown here. `
+        + `Switch back to ${ticker} to manage them.`;
+}
+
 export function marketForAccount(
     remembered: AccountMarket | null,
     onScreen: string,

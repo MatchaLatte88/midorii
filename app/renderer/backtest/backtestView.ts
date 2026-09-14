@@ -143,11 +143,14 @@ ${overlayScrollbarCss('.midorii-backtest-body')}
  *  multiple of its base bar, so this is a menu rather than a limit. */
 const TIMEFRAMES: ReadonlyArray<{ value: string; label: string }> = [
     { value: '1', label: '1m' },
+    { value: '2', label: '2m' },
+    { value: '3', label: '3m' },
     { value: '5', label: '5m' },
     { value: '15', label: '15m' },
     { value: '30', label: '30m' },
     { value: '60', label: '1h' },
     { value: '240', label: '4h' },
+    { value: '480', label: '8h' },
     { value: 'D', label: '1d' },
 ];
 

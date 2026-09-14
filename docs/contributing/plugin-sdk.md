@@ -156,6 +156,12 @@ carry several instances (a study users stack at different settings); every add t
 creates a fresh instance. A type that pushes a bespoke layer payload through `pushData`
 must stay single-instance — the renderer's native layer is keyed by type.
 
+The context's `emitAlert(...)` raises an alert through both `chart.on('alert', ...)` and
+the indicator handle's `on('alert', ...)`, matching alerts raised by a scripting engine.
+Native indicators own their deduplication policy: do not replay historical conditions when
+an indicator starts or when its inputs change, and do not repeat a forming-bar alert on every
+tick.
+
 A native whose visuals come entirely from a bespoke renderer layer (its `type` equals a
 registered layer id) can override the axis of the pane it OWNS by emitting **`paneAxis`**
 on its output: such content is not value-mapped (the layer paints in pixel bands), so a

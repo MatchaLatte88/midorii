@@ -7,18 +7,20 @@ import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIn
 import { wirePositionLevels } from '../replay/replayLevels';
 import { wireOrderEntry } from '../replay/replayOrders';
 import { makeOverlayCard } from '../replay/overlayCards';
-import { loadOverlayDisplay, onOverlayDisplayChange } from '../replay/overlayDisplay';
 import { mountQuickPanel, type QuickPanel } from '../replay/quickPanel';
 import { formatMoney } from '../format';
 import type { CapitalController } from './CapitalController';
 import type { LiveTradeRecord } from './CapitalController';
 import { journalRows, loadJournal, recordTrade, settleEstimates } from './liveJournal';
 import type { PaperSettings } from './paperSettings';
-import { bracketsOf, limitsOf, riskOf } from './paperSettings';
-import { limitRefusal, sessionState } from './riskLimits';
+import { bracketsOf, riskOf } from './paperSettings';
+import { sessionState } from './riskLimits';
+import { flattenAll, wireProp } from './propBand';
 import { mountAccountBand } from './accountBand';
 import { installTradeHotkeys, loadHotkeys } from './hotkeys';
 import { tickSizeOf } from '../alerts/symbolTick';
+import { historyStats } from './accountStats';
+import { wirePositionStyle } from './positionStyleSettings';
 import type { ThemeName, VelaTheme } from '../../../src';
 
 /**
@@ -85,6 +87,9 @@ export interface CapitalMountOptions {
     /** The row the chart lives in. */
     main: HTMLElement;
     controller: CapitalController;
+    /** Which account this is, as the trade menu keys it — `capital:live` or `capital:demo`.
+     *  The limits and the trailing mark are kept under it, so the two sides keep their own. */
+    accountKey: string;
     /** Read fresh at every order — the settings dialog changes them mid-session. */
     settings: () => PaperSettings;
     /** Put edited settings back where they came from — see the paper mount's own note. */
@@ -121,6 +126,8 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
     registerTradeIndicator();
     const indicator = chart.addNativeIndicator(TRADE_INDICATOR_TYPE);
     controller.attachIndicator(indicator);
+    // How positions are drawn, and the Trading tab in the chart settings that says so.
+    off.push(wirePositionStyle({ workspace: ws, indicator }).dispose);
 
     /* ── the ticket beside the plot ──────────────────────────────────────
      *
@@ -134,24 +141,43 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
     let journal: LiveTradeRecord[] = [];
 
 
+    /* This account's own limits — the floor under it, its daily limit, its goal — and the
+     * figures for the band. Kept under the account's key, so the demo and the live side do not
+     * share one set of numbers. See propBand.ts. */
+    const prop = wireProp({
+        account: opts.accountKey,
+        name: opts.live ? 'Capital.com — live money' : 'Capital.com — demo',
+        host: ws.root,
+        currency: () => controller.accountCurrency(),
+        equity: () => controller.equity(),
+        /* The venue states the balance with the open result already inside it, so the open part
+         * is the positions' own — which is what makes the daily limit count a trade still on. */
+        openPnl: () => controller.positions().reduce((sum, p) => sum + p.upl, 0),
+        history: () => journalRows(journal),
+        flatten: () => flattenAll(controller),
+        notify: (message, kind) => ws.toast(message, kind),
+        onChange: () => paint(),
+    });
+
     /**
-     * The session limits, applied at the one place every way in passes through.
+     * The limits, applied at the one place every way in passes through.
      *
      * Each gesture that can place an order calls this rather than carrying its own copy of
      * the rule. It refuses by throwing, so the reason reaches the person the same way every
      * other refusal does — and it only ever refuses an order that would ADD to what is on.
      */
     const guardLimits = (spec: { side: 'buy' | 'sell'; size: number }): void => {
-        const refusal = limitRefusal(
-            limitsOf(opts.settings()),
-            sessionState(journalRows(journal)),
-            { net: controller.positions().reduce((sum, p) => sum + p.size, 0), side: spec.side, size: spec.size },
-        );
-        if (refusal) throw new Error(refusal);
+        prop.guard({
+            net: controller.positions().reduce((sum, p) => sum + p.size, 0),
+            side: spec.side,
+            size: spec.size,
+        });
     };
 
     const sidebar = mountTradeSidebar(opts.main, {
-        account: () => ({
+        account: () => {
+            const pointValue = controller.pointValue();
+            return {
             equity: controller.equity(),
             price: controller.price(),
             available: controller.available(),
@@ -163,13 +189,15 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
             ...(controller.quote() ?? {}),
             /* The grid a size has to land on, so the figure on the ticket is the figure that
              * goes out — this venue refuses anything off its increment, and the ticket used to
-             * show a size the controller then quietly rounded on the way past.
-             *
-             * No point value: on this venue it can only be learned from a position that has
-             * already moved, so the ticket goes on measuring in points rather than being given
-             * a one that might be wrong. */
+             * show a size the controller then quietly rounded on the way past. */
             ...(controller.dealingRules() ?? {}),
-        }),
+            /* What a point is worth, where the venue's own figures can say it — see
+             * `CapitalController.pointValue`. Passed only when it is KNOWN: absent means one,
+             * which is what every figure here assumed before, so an instrument whose factor
+             * cannot be stated honestly is left exactly as it was rather than guessed at. */
+            ...(pointValue != null ? { pointValue } : {}),
+            };
+        },
         counts: () => ({ positions: controller.positions().length, orders: controller.orders().length }),
         actions: {
             order: (spec) => guarded(ws, () => { guardLimits(spec); controller.order(spec); }),
@@ -261,13 +289,15 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
 
     /* ── what is open, under the chart ────────────────────────────────────
      *
-     * The replay's own dock, on the venue's book. Four of its buttons are not offered here
-     * and the dock does not draw them: taking half off, reversing, break-even and trailing
-     * are things an ENGINE does to a position it owns, and this one belongs to Capital.com.
-     * What is left — the stop, the target, closing, cancelling — is every instruction the
-     * venue actually accepts, and each one goes through the same controller an order does. */
+     * The replay's own dock, on the venue's book. Two of its buttons are not offered here and
+     * the dock does not draw them: the venue's API has no partial close, and a reverse would
+     * be a close and an open as two instructions, of which the second can be refused after the
+     * first has filled. Break-even and the trail are the venue's own and go through the same
+     * controller an order does. */
     const dock = mountTradeDock(opts.stack, {
         closePosition: (id) => guarded(ws, () => controller.closeOne(id)),
+        breakEven: (id) => guarded(ws, () => controller.breakEven(id)),
+        setTrailing: (distance, id) => guarded(ws, () => controller.setTrailing(distance, id)),
         protect: (levels, id) => guarded(ws, () => controller.protect(levels, id)),
         cancelOrder: (id) => guarded(ws, () => controller.cancelOrder(id)),
         cancelAll: () => guarded(ws, () => controller.cancelAll()),
@@ -288,8 +318,8 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
         beforeOrder: guardLimits,
         notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
     }));
-    /* The keys — the same ones every traded chart here answers to. No break-even: this venue
-     * hangs protection off the position and has no such gesture of its own to bind. */
+    /* The keys — the same ones every traded chart here answers to. Break-even applies to the
+     * first open position, as it does on the other accounts. */
     off.push(installTradeHotkeys({
         root: ws.root,
         bindings: loadHotkeys,
@@ -300,6 +330,7 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
                 for (const position of controller.positions()) guarded(ws, () => controller.closeOne(position.id));
             },
             cancelAll: () => guarded(ws, () => controller.cancelAll()),
+            breakEven: () => guarded(ws, () => controller.breakEven()),
         },
     }));
 
@@ -315,7 +346,7 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
     if (!cell) console.warn('[midorii] no chart cell to mount the live account band into');
     const badgeTitle = opts.live
         ? 'Orders from this chart are real orders on a real account.'
-        : 'Real prices, money that is not real. Set CAPITAL_ENV in .env.local to change which account this is.';
+        : 'Real prices, money that is not real. The Trade menu switches to the live account.';
 
     const band = cell ? mountAccountBand({
         cell,
@@ -370,8 +401,17 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
                 },
                 optional: true,
             },
+            ...prop.columns,
         ],
         actions: [
+            prop.action,
+            {
+                id: 'break-even',
+                label: 'Break-even',
+                refusal: () => controller.breakEvenRefusal(),
+                title: () => `Move the stop to ${controller.positions()[0]?.entryPrice ?? 'the entry'}.`,
+                run: () => guarded(ws, () => controller.breakEven()),
+            },
             {
                 id: 'flatten',
                 label: 'Close all',
@@ -441,8 +481,6 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
         },
     }) : null;
     if (overlay) {
-        overlay.setAvailable(loadOverlayDisplay().showLive);
-        off.push(onOverlayDisplayChange((display) => overlay.setAvailable(display.showLive)));
         off.push(() => overlay.destroy());
     }
 
@@ -460,12 +498,18 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
         off.push(() => quick?.destroy());
     }
 
-    const paint = (): void => {
-        /* No account line with it: that summary is a history of what has been done, and this
-         * account keeps none here — the band carries the figures a venue answers for. */
-        dock.render(controller.book());
+    function paint(): void {
+        /* One reading, at the top, for everything below it — see the note in propBand.ts. */
+        prop.read();
+        /* The account line, from the journal — the one record of what this account has done
+         * that this app keeps. Measured against the balance without what is open. */
+        const realised = controller.equity() - controller.positions().reduce((sum, p) => sum + p.upl, 0);
+        dock.render(controller.book(), { stats: historyStats(journalRows(journal), realised) });
         band?.refresh();
-    };
+        /* Last, so whatever is about to be closed was on the screen first. Does nothing unless
+         * this account is set to close out on a breach. */
+        prop.enforce();
+    }
     controller.onChange = (): void => {
         paint();
         sidebar.refresh();

@@ -90,6 +90,19 @@ contextBridge.exposeInMainWorld('midori', {
     deleteSession: (id) => ipcRenderer.invoke('replay:deleteSession', id),
   },
 
+  /* The feed recorder — every print and quote on a ProjectX contract that is open, written
+     down so a day can be replayed at the ladder. */
+  recorder: {
+    status: () => ipcRenderer.invoke('recorder:status'),
+    setEnabled: (enabled) => ipcRenderer.invoke('recorder:set-enabled', enabled),
+  },
+
+  /* What the recorder kept, read back for a replay. */
+  ticks: {
+    read: (request) => ipcRenderer.invoke('ticks:read', request),
+    meta: (name) => ipcRenderer.invoke('ticks:meta', name),
+  },
+
   /* The paper account — one record, not a library. Read when paper trading is
      switched on, written whenever the account moves, cleared when it is started
      over. A FINISHED one goes to `replay.save` instead, onto the run shelf. */
@@ -165,6 +178,20 @@ contextBridge.exposeInMainWorld('midori', {
     clear: () => ipcRenderer.invoke('live:clear'),
   },
 
+  /** Optional, chart-only market data. The main process owns its network session. */
+  experimentalFeed: {
+    search: (query) => ipcRenderer.invoke('experimental-feed:search', query),
+    symbolInfo: (symbol) => ipcRenderer.invoke('experimental-feed:symbol-info', symbol),
+    bars: (query) => ipcRenderer.invoke('experimental-feed:bars', query),
+    subscribe: (query) => ipcRenderer.invoke('experimental-feed:subscribe', query),
+    unsubscribe: (subscriptionId) => ipcRenderer.invoke('experimental-feed:unsubscribe', subscriptionId),
+    onBar: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('experimental-feed:bar', listener);
+      return () => ipcRenderer.off('experimental-feed:bar', listener);
+    },
+  },
+
   /** Capital.com forex/CFD data — the session (login, keepalive, the WebSocket)
    *  lives in the main process; see app/renderer/providers/CapitalProvider.ts. */
   capital: {
@@ -178,6 +205,9 @@ contextBridge.exposeInMainWorld('midori', {
       clear: () => ipcRenderer.invoke('capital:credentials-clear'),
     },
     environment: () => ipcRenderer.invoke('capital:environment'),
+    /* Move to the other account on the credentials already stored. The key stays where it
+       is — only which endpoint it is used against changes. */
+    setEnvironment: (env) => ipcRenderer.invoke('capital:set-environment', env),
     markets: (searchTerm) => ipcRenderer.invoke('capital:markets', searchTerm),
     marketInfo: (epic) => ipcRenderer.invoke('capital:market-info', epic),
     prices: (query) => ipcRenderer.invoke('capital:prices', query),

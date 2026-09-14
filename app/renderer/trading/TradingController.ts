@@ -46,14 +46,17 @@ export interface TradingController {
     /**
      * What one point of price movement is worth, per unit, in the account's money.
      *
-     * Absent means one, which is what a spot account is and what everything here assumed
-     * before a futures contract was one of the things being traded: one NQ moving four points
-     * is eighty dollars, not four, and a trade sized without knowing that is sized by that
-     * multiple too large. Optional because a venue that cannot state it honestly must not
-     * state a one instead — see `CapitalController`, which can only learn it from a position
-     * that already exists.
+     * Absent — or null — means one, which is what a spot account is and what everything here
+     * assumed before a futures contract was one of the things being traded: one NQ moving four
+     * points is eighty dollars, not four, and a trade sized without knowing that is sized by
+     * that multiple too large.
+     *
+     * Null rather than absent where a venue KNOWS it sometimes and not others: Capital.com can
+     * state it from its own figures on most instruments and cannot on one that books in a
+     * currency the account is not held in, until a position has shown it. The caller falls back
+     * to one either way; the distinction is that a venue which cannot say must not say one.
      */
-    pointValue?(): number;
+    pointValue?(): number | null;
     /**
      * The largest size at or below `size` this venue would accept, or 0 where none is.
      *

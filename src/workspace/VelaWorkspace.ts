@@ -144,7 +144,9 @@ export interface WorkspaceEventMap extends Record<string, unknown> {
     'state:changed': undefined;
 }
 
-const DEFAULT_TIMEFRAMES = ['1', '5', '15', '30', '60', '240', 'D', 'W', 'M'];
+/** The menu every market starts from. Narrowed per market to what its venue serves —
+ *  see `timeframesFor` (a Capital.com instrument has no 30s or 8h to offer). */
+const DEFAULT_TIMEFRAMES = ['30S', '1', '2', '3', '5', '15', '30', '60', '240', '480', 'D', 'W', 'M'];
 const GAP_PX = 2; // grid gap — the visible seam between cells (splitter strips center on it)
 const POOL_CAP = 16; // dormant slot states kept across layout shrinks
 const TIME_AXIS_H = 22; // px the renderer reserves for a time axis (mirrors NativeRenderer's)
@@ -285,6 +287,8 @@ export class VelaWorkspace {
     private favs: string[] = [];
     /** Favorite timeframes — the shared topbar's quick-switch chips, one set for the grid. */
     private tfFavs: string[] = [];
+    /** Favorite indicators — the picker's starred rows, one set for the grid. */
+    private indFavs: string[] = [];
     /** Live sync configuration (mutable copy of the option). */
     private readonly syncOpts: SyncOptions = {};
     // ── persistence (state surface + adapter plumbing) ──
@@ -371,6 +375,7 @@ export class VelaWorkspace {
         this.timezone = boot?.timezone ?? opts.timezone ?? 'Etc/UTC';
         if (boot?.favorites) this.favs = [...boot.favorites];
         if (boot?.timeframeFavorites) this.tfFavs = [...boot.timeframeFavorites];
+        if (boot?.indicatorFavorites) this.indFavs = [...boot.indicatorFavorites];
         const sync = boot?.sync ?? opts.sync;
         for (const kind of SYNC_KINDS) this.applySyncSetting(kind, sync?.[kind]);
         // Single-chart mode pins the grid to '1' — a persisted document's layout is
@@ -403,12 +408,18 @@ export class VelaWorkspace {
         // on the same registry, symbol index, and closed-bar cache.
         for (const [name, make] of Object.entries(opts.providers ?? {})) void this.feed.registerProvider(name, make());
         void this.feed.ready().then(() => {
-            if (!this.destroyed) this.refreshRetention(); // re-key on canonical tickers once indexes settle
+            if (this.destroyed) return;
+            this.refreshRetention(); // re-key on canonical tickers once indexes settle
+            // A BARE symbol does not resolve to a venue until the indexes are in, so the
+            // first paint offers the whole menu. Re-narrow once it can be answered.
+            const cell = this.activeId ? this.cellsById.get(this.activeId) : undefined;
+            if (cell) this.topbar.setTimeframes(this.timeframesFor(cell.symbol));
         });
 
         // ── shared dialogs/pickers (they act on the ACTIVE cell at call time) ──
         this.symbolPicker = new SymbolPicker({
             host: this.root,
+            search: (query, providers) => this.feed.searchSymbols(query, providers),
             // Row icons come from each descriptor's OWNING provider (resolveSymbolIcon).
             iconFor: (d) => this.feed.symbolIconOf(d),
             onSelect: (ticker) => this.active.setSymbol(ticker),
@@ -435,6 +446,8 @@ export class VelaWorkspace {
                       onChart: () => this.active.onChartRows(),
                       onAdd: (i) => this.active.addFromLibrary(i),
                       onRemove: (i) => this.active.removeFromChart(i),
+                      isFavorite: (key) => this.indFavs.includes(key),
+                      onFavorite: (key, on) => this.setIndicatorFavorite(key, on),
                       onOpenChange: (open) => {
                           // Same rule as the symbol search: the renderer's in-chart dialogs never see
                           // an outside-dismiss from a topbar dialog — close them on every cell.
@@ -888,6 +901,7 @@ export class VelaWorkspace {
         if (this.activeId) state.activeCellId = this.activeId;
         if (this.favs.length > 0) state.favorites = [...this.favs];
         if (this.tfFavs.length > 0) state.timeframeFavorites = [...this.tfFavs];
+        if (this.indFavs.length > 0) state.indicatorFavorites = [...this.indFavs];
         if (this.trackSizes.size > 0) state.trackSizes = Object.fromEntries([...this.trackSizes].map(([k, v]) => [k, { ...v }]));
         const panels = this.dock.getState();
         if (panels) state.panels = panels;
@@ -929,6 +943,10 @@ export class VelaWorkspace {
         if (st.timeframeFavorites) {
             this.tfFavs = [...st.timeframeFavorites];
             this.topbar.setTimeframeFavorites(this.tfFavs);
+        }
+        if (st.indicatorFavorites) {
+            this.indFavs = [...st.indicatorFavorites];
+            this.indicatorPicker?.sync();
         }
         // Absent in documents written before the dock existed — those leave the column closed.
         this.dock.applyState(st.panels);
@@ -1276,6 +1294,7 @@ export class VelaWorkspace {
         const cell = this.activeId ? this.cellsById.get(this.activeId) : undefined;
         if (!cell) return;
         this.topbar.setSymbol(cell.symbol);
+        this.topbar.setTimeframes(this.timeframesFor(cell.symbol));
         this.topbar.setTimeframe(cell.timeframe);
         this.topbar.setPriceStyle(cell.priceStyle);
         this.topbar.setIndicatorCount(cell.indicatorCount);
@@ -1934,6 +1953,7 @@ export class VelaWorkspace {
         const cell = this.cellsById.get(id);
         if (!cell) return;
         this.topbar.setSymbol(cell.symbol);
+        this.topbar.setTimeframes(this.timeframesFor(cell.symbol));
         this.topbar.setTimeframe(cell.timeframe);
         this.mobileBar?.setSymbol(cell.symbol);
         this.mobileBar?.setTimeframe(cell.timeframe);
@@ -1966,6 +1986,26 @@ export class VelaWorkspace {
         this.indicatorPicker?.sync();
     }
 
+    /**
+     * The offered timeframes for `symbol` — the configured menu, minus whatever the
+     * symbol's own venue cannot serve.
+     *
+     * A provider that declares nothing (`supportedTimeframes` is optional on the port)
+     * is taken at its word that it serves everything, and so is one whose declaration
+     * would leave the menu empty: an over-eager filter that hides every entry is worse
+     * than one that offers a timeframe the venue then warns about.
+     */
+    private timeframesFor(symbol: string): readonly string[] {
+        const all = this.opts.timeframes ?? DEFAULT_TIMEFRAMES;
+        const resolved = this.feed.resolveSymbol(symbol);
+        if (!resolved) return all;
+        const supported = this.feed.providerInstance(resolved.provider)?.info?.()?.supportedTimeframes;
+        if (!supported || supported.length === 0) return all;
+        const offered = new Set(supported);
+        const kept = all.filter((tf) => offered.has(tf));
+        return kept.length > 0 ? kept : all;
+    }
+
     /** Timeframe changes routed from the topbar menu / quick entry (chip state follows). */
     private setActiveTimeframe(tf: string): void {
         this.bottombar?.setActiveRange(null);
@@ -1978,6 +2018,14 @@ export class VelaWorkspace {
         if (on === this.tfFavs.includes(tf)) return;
         this.tfFavs = on ? [tf, ...this.tfFavs] : this.tfFavs.filter((f) => f !== tf);
         this.topbar.setTimeframeFavorites(this.tfFavs);
+        this.markStateDirty();
+    }
+
+    /** Star/unstar an indicator — a WORKSPACE preference (one set, whatever the active
+     *  cell); the picker re-renders on its own click, the set persists with the document. */
+    private setIndicatorFavorite(key: string, on: boolean): void {
+        if (on === this.indFavs.includes(key)) return;
+        this.indFavs = on ? [...this.indFavs, key] : this.indFavs.filter((f) => f !== key);
         this.markStateDirty();
     }
 
@@ -2031,6 +2079,7 @@ export class VelaWorkspace {
             },
             onOpenChange: (open) => this.trackDialog(open),
         });
+        this.tfDrawer.setTimeframes(this.timeframesFor(this.active.symbol));
         this.tfDrawer.open();
     }
 

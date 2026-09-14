@@ -23,6 +23,8 @@ export interface AnalysisTrade {
     closedAt: number;
     /** What the trade risked per unit when it opened, or null when it carried no stop. */
     riskPerUnit: number | null;
+    /** Money per point per unit on the account that closed it. Absent means one. */
+    pointValue?: number;
 }
 
 /** One side of the book, on its own. */
@@ -106,7 +108,7 @@ export function tradeBreakdown(trades: readonly AnalysisTrade[]): TradeBreakdown
 
         const risk = t.riskPerUnit;
         if (risk != null && risk > 0 && t.size > 0) {
-            rSum += t.netPnl / (risk * t.size);
+            rSum += t.netPnl / (risk * t.size * (t.pointValue != null && t.pointValue > 0 ? t.pointValue : 1));
             rTrades += 1;
         }
     }

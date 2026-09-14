@@ -63,7 +63,7 @@ const TF_TO_GRAN: Record<string, number> = {
 
 /** User-facing timeframe aliases → canonical keys (matches the other Vela layers). */
 const TF_NORMALIZE: Record<string, string> = {
-    '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '45m': '45',
+    '1m': '1', '2m': '2', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '45m': '45',
     '1h': '60', '2h': '120', '3h': '180', '4h': '240', '6h': '360', '8h': '480', '12h': '720',
     '1d': 'D', '1w': 'W', '1mo': 'M', '1D': 'D', '1W': 'W', '4H': '240',
     D: 'D', W: 'W', M: 'M',
@@ -72,7 +72,7 @@ const TF_NORMALIZE: Record<string, string> = {
 /** Native granularities in minutes (the aggregation sub-candle candidates Coinbase serves directly). */
 const NATIVE_MINUTES = [1, 5, 15, 60, 360, 1440];
 const MIN_TO_GRAN: Record<number, number> = { 1: 60, 5: 300, 15: 900, 60: 3600, 360: 21600, 1440: 86400 };
-const SUPPORTED_TIMEFRAMES = ['1', '3', '5', '15', '30', '45', '60', '120', '180', '240', '360', '480', '720', 'D', 'W', 'M'];
+const SUPPORTED_TIMEFRAMES = ['1', '2', '3', '5', '15', '30', '45', '60', '120', '180', '240', '360', '480', '720', 'D', 'W', 'M'];
 
 const MS_PER_DAY = 86_400_000;
 

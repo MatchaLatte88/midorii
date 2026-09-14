@@ -12,6 +12,7 @@ import { STATE_INPUT } from '../replay/replayIndicator';
 import { venueBook, type TradeBook } from '../replay/tradeBook';
 import type { ControlledPosition, TradingController } from './TradingController';
 import { refusalMessage } from './venueRefusal';
+import { chime } from './fillChime';
 
 /**
  * Drives ONE Capital.com instrument on a real account.
@@ -127,6 +128,8 @@ interface LivePosition extends ControlledPosition {
     openedAt: number;
     /** What the venue books this position's result in. */
     currency: string | null;
+    /** The stop trails the market rather than standing at a level. */
+    trailing: boolean;
 }
 
 /** A resting order, plus the number the chart draws it under. */
@@ -166,11 +169,28 @@ export class CapitalController implements TradingController {
     /** Fills reported for closures this app asked for, waiting for the reconcile that
      *  notices the position is gone. Keyed by deal id. */
     private readonly ownExits = new Map<string, { price: number; at: number }>();
+    /**
+     * The trail distance this app set, by deal id.
+     *
+     * Kept because `PUT /positions` replaces the whole protection set and the documented
+     * position read states no trail: moving the target on a trailing position has to re-send
+     * the trail, and this is where its distance is known from. Lost on a restart — see
+     * {@link protect} for what happens then.
+     */
+    private readonly trailDistances = new Map<string, number>();
     private dealing: CapitalDealing | null;
 
     private live: LivePosition[] = [];
-    /** `dealId` → what one point is worth on it, in account money. See {@link pointValueOf}. */
-    private pointValues = new Map<string, number>();
+    /**
+     * What one point of THIS instrument is worth, per unit, in account money — once a position
+     * has shown it.
+     *
+     * Held per instrument rather than per deal, which is what it always was: every position on
+     * one epic converts the same way, and keying it by `dealId` meant the figure was learned
+     * and then thrown away every time a position closed. Learned once, it is the exact answer
+     * including whatever conversion the venue applied.
+     */
+    private learnedPerPoint: number | null = null;
     private resting: RestingOrder[] = [];
     private balance = 0;
     private availableMargin = 0;
@@ -461,7 +481,32 @@ export class CapitalController implements TradingController {
      * last price: it is the number the money is in, financing and conversion included.
      */
     book(): TradeBook {
-        return venueBook(this.live, this.resting, (p) => p.upl);
+        return venueBook(this.live, this.resting, (p) => p.upl, (p) => this.breakEvenRefusal(p.id));
+    }
+
+    /**
+     * What one point of price movement is worth, per unit, in the account's money — or null
+     * where it cannot be said honestly.
+     *
+     * Two ways to know it, and nothing else counts as knowing.
+     *
+     * A position that has MOVED states it exactly: the venue's own unrealized figure divided by
+     * the distance travelled is the factor, and it already carries whatever conversion the
+     * venue applied. That is the best answer and it wins.
+     *
+     * Before any position has moved, the venue's own lot size is the answer — but only where
+     * the instrument books its results in the money the account is held in. A euro account
+     * trading a dollar-denominated index converts at a rate this app is never told, and
+     * `lotSize` alone would then be out by that rate. So that case stays null rather than
+     * guessing, and the ticket goes on measuring in points there exactly as it did before,
+     * until the first position teaches it the real factor.
+     */
+    pointValue(): number | null {
+        if (this.learnedPerPoint != null) return this.learnedPerPoint;
+        const lot = this.dealing?.lotSize;
+        const instrument = this.dealing?.currency;
+        if (lot == null || !(lot > 0) || instrument == null || this.accountCcy == null) return null;
+        return instrument.toUpperCase() === this.accountCcy.toUpperCase() ? lot : null;
     }
 
     /**
@@ -527,12 +572,95 @@ export class CapitalController implements TradingController {
          * untouched side is re-sent exactly as it stands and only an explicit null removes
          * anything — re-stating a level the venue already holds is the cheap risk here, and
          * losing a stop because nobody mentioned it is the expensive one. */
-        const stopLevel = 'stopLoss' in levels ? levels.stopLoss ?? null : position.stopLoss;
         const profitLevel = 'takeProfit' in levels ? levels.takeProfit ?? null : position.takeProfit;
+        const dealId = position.dealId;
+        /* A trailing stop has to be re-sent as a trail, or the amend turns it into a fixed stop
+         * at wherever it has trailed to. Where the distance is not known — a trail set before a
+         * restart, or on the venue's own platform — the amend is refused rather than letting
+         * that happen without a word. */
+        if (position.trailing && !('stopLoss' in levels)) {
+            const stopDistance = this.trailDistances.get(dealId);
+            if (stopDistance == null) {
+                throw new Error(
+                    'This position trails its stop at a distance the venue does not report back. '
+                    + 'Set the stop or the trail again first — changing the target now would replace the trail with a fixed stop.',
+                );
+            }
+            this.submit(
+                () => window.midori.capital.amendPosition({ dealId, trailingStop: true, stopDistance, profitLevel }),
+                'Moving the level',
+            );
+            return;
+        }
+        const stopLevel = 'stopLoss' in levels ? levels.stopLoss ?? null : position.stopLoss;
         this.submit(
-            () => window.midori.capital.amendPosition({ dealId: position.dealId, stopLevel, profitLevel }),
+            () => window.midori.capital.amendPosition({
+                dealId,
+                stopLevel,
+                profitLevel,
+                // A level set on a trailing stop fixes it there, and says so to the venue.
+                ...(position.trailing ? { trailingStop: false } : {}),
+            }),
             'Moving the level',
+            (confirmation) => {
+                if (confirmation.accepted && 'stopLoss' in levels) this.trailDistances.delete(dealId);
+            },
         );
+    }
+
+    /**
+     * Trail the stop `distance` behind the market, keeping the target where it is.
+     *
+     * The venue's own trailing stop — it follows the price on the venue's side, whether or not
+     * this app is running. It has to be enabled for the account on the platform; where it is
+     * not, the venue refuses and the refusal is shown.
+     */
+    setTrailing(distance: number, positionId?: number | null): void {
+        const position = this.find(positionId);
+        if (!position) throw new Error('That position is no longer open.');
+        if (!(distance > 0)) throw new Error('A trail needs a distance above zero.');
+        const dealId = position.dealId;
+        this.submit(
+            () => window.midori.capital.amendPosition({
+                dealId,
+                trailingStop: true,
+                stopDistance: distance,
+                profitLevel: position.takeProfit,
+            }),
+            'Trailing the stop',
+            (confirmation) => {
+                if (confirmation.accepted) this.trailDistances.set(dealId, distance);
+            },
+        );
+    }
+
+    /**
+     * Why break-even is refused right now, or null when it can be done.
+     *
+     * Measured against the price the position would CLOSE at — the bid for a long, the ask for
+     * a short — because a stop at the entry on the wrong side of that price is one the venue
+     * refuses, and one exactly on it closes the trade at once.
+     */
+    breakEvenRefusal(positionId?: number | null): string | null {
+        const position = this.find(positionId);
+        if (!position) return 'That position is no longer open.';
+        const exit = position.exitPrice;
+        if (!(exit > 0)) return 'No price yet.';
+        const inProfit = position.size > 0 ? exit > position.entryPrice : exit < position.entryPrice;
+        if (!inProfit) return 'The trade is not in profit yet.';
+        if (position.stopLoss != null && !position.trailing
+            && Math.abs(position.stopLoss - position.entryPrice) <= Math.abs(position.entryPrice) * 1e-9) {
+            return 'The stop is already at entry.';
+        }
+        return null;
+    }
+
+    /** Move the stop to the entry price, keeping the target. */
+    breakEven(positionId?: number | null): void {
+        const refusal = this.breakEvenRefusal(positionId);
+        if (refusal) throw new Error(refusal);
+        const position = this.find(positionId)!;
+        this.protect({ stopLoss: position.entryPrice }, position.id);
     }
 
     closeOne(positionId: number): void {
@@ -582,7 +710,7 @@ export class CapitalController implements TradingController {
                  * EUR account is not, and one unit of an instrument is not always one point of
                  * it. Both corrections live in the one factor below, so a level says what it is
                  * worth in the money the account is actually kept in. */
-                const perPoint = this.pointValueOf(p);
+                const perPoint = this.pointValue();
                 const at = (level: number | null): number | null => (
                     level == null || perPoint == null ? null : (level - p.entryPrice) * p.size * perPoint
                 );
@@ -603,6 +731,8 @@ export class CapitalController implements TradingController {
                     targetR: null,
                 };
             }),
+            // A working order's level is amendable on this venue — see `moveOrder`.
+            ordersMovable: true,
             orders: this.resting.map((o) => ({ id: o.id, side: o.side, price: o.price, tag: o.kind })),
             fills: [],
             currency: this.accountCcy,
@@ -673,9 +803,15 @@ export class CapitalController implements TradingController {
             }
 
             const before = this.live;
+            const firstRead = this.lastReadAt === 0;
             this.live = marketPositions
                 .filter((p) => !this.ownership || this.ownership.positions.has(p.position.dealId))
                 .map((p) => this.toLive(p));
+            /* Learned here, where the positions are READ, rather than where they are drawn.
+             * It used to happen inside the state push, which meant an account with no chart
+             * indicator attached never learned what a point was worth — a figure the ticket
+             * needs whether or not anything is being painted. */
+            for (const position of this.live) this.learnPerPoint(position);
             const open = new Set(this.live.map((p) => p.dealId));
             for (const dealId of open) this.seenOwnedPositions.add(dealId);
             /* Anything that was open a moment ago and is not now has ENDED — by a stop, a
@@ -683,8 +819,13 @@ export class CapitalController implements TradingController {
              * close was requested, because most closures are not requested by anyone here:
              * a stop firing overnight is the commonest trade there is, and it would be
              * missing from a journal that only wrote down what it had asked for. */
+            /* A deal id that was not there at the last read is a fill, wherever it came from.
+             * The first read is the state of the account, not news. */
+            if (!firstRead && this.live.some((p) => !before.some((b) => b.dealId === p.dealId))) chime('fill');
             for (const gone of before) {
                 if (open.has(gone.dealId)) continue;
+                chime('close');
+                this.trailDistances.delete(gone.dealId);
                 this.record(gone);
                 if (this.ownership?.positions.delete(gone.dealId)) ownershipChanged = true;
                 this.seenOwnedPositions.delete(gone.dealId);
@@ -748,7 +889,7 @@ export class CapitalController implements TradingController {
     }
 
     private toLive(row: MidoriCapitalPosition): LivePosition {
-        const { dealId, direction, size, level, stopLevel, profitLevel, upl, currency } = row.position;
+        const { dealId, direction, size, level, stopLevel, profitLevel, upl, currency, trailingStop } = row.position;
         // A short is closed by buying, so it is marked at the ask; a long at the bid.
         const exitPrice = direction === 'SELL' ? row.market.offer : row.market.bid;
         let id = this.ids.get(dealId);
@@ -769,6 +910,7 @@ export class CapitalController implements TradingController {
             takeProfit: profitLevel,
             upl: upl ?? 0,
             currency: currency ?? null,
+            trailing: trailingStop === true || this.trailDistances.has(dealId),
         };
     }
 
@@ -949,16 +1091,22 @@ export class CapitalController implements TradingController {
      * already charged, so a position held over several nights implies a slightly stale rate.
      * It is right to the cent on the day a trade is taken.
      */
-    private pointValueOf(p: LivePosition): number | null {
+    /**
+     * Take what `p` can teach about the value of a point, if anything.
+     *
+     * The venue's own `upl` against the distance the position has travelled gives the factor
+     * exactly, conversion included. A position that has not moved far enough to be measured
+     * against teaches nothing and is left alone — a factor read off a rounding error would be
+     * worse than no factor at all.
+     */
+    private learnPerPoint(p: LivePosition): void {
         const drift = p.exitPrice - p.entryPrice;
         if (p.exitPrice > 0 && p.upl !== 0 && Math.abs(drift) > p.entryPrice * 1e-5) {
-            this.pointValues.set(p.dealId, p.upl / (drift * p.size));
+            this.learnedPerPoint = p.upl / (drift * p.size);
         }
-        return this.pointValues.get(p.dealId) ?? null;
     }
 
     private forgetPosition(dealId: string): void {
-        this.pointValues.delete(dealId);
         this.seenOwnedPositions.delete(dealId);
         if (this.ownership?.positions.delete(dealId)) this.publishOwnership();
     }

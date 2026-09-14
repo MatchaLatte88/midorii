@@ -2,6 +2,8 @@ import { registerIcon, registerWidgetAction } from '../../../src/plugin';
 import type { VelaWorkspace } from '../../../src/workspace';
 import { SPEEDS, type ReplayController } from './ReplayController';
 import { armOrderTool } from './replayOrders';
+import { lastCrosshairTime } from '../alerts/cursorPrice';
+import { askSetupStrategy, findNextSetup, loadSetupStrategy, saveSetupStrategy, strategyName } from './setupStrategy';
 
 /**
  * The replay controls, contributed into Vela's own topbar — no custom chrome.
@@ -22,6 +24,9 @@ export interface ActiveReplay {
 
 const ICONS: Record<string, string> = {
     'replay-step': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3.5 10.5 8 5 12.5"/><path d="M12 3.5v9"/></svg>',
+    'replay-ticks': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 9h2l1.5-4 2 7 2-9 2 6 1-2h2.5"/></svg>',
+    'replay-bars': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5v11M12 2.5v11"/><rect x="2.5" y="5" width="3" height="6" rx="0.5"/><rect x="10.5" y="4" width="3" height="5" rx="0.5"/></svg>',
+    'replay-setup': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.5" cy="8" r="3.5"/><path d="M6.5 3v1.5M6.5 11.5V13M1.5 8H3M10 8h1.5"/><path d="M12 5.5 14.5 8 12 10.5"/></svg>',
     'replay-skip': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.5 7 8l-4.5 4.5"/><path d="M8 3.5 12.5 8 8 12.5"/></svg>',
     'replay-play': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor"><path d="M4.5 3.2v9.6L12.8 8z"/></svg>',
     'replay-pause': '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor"><rect x="4" y="3.2" width="3" height="9.6" rx="0.6"/><rect x="9" y="3.2" width="3" height="9.6" rx="0.6"/></svg>',
@@ -56,9 +61,15 @@ export function isReplayContext(ctx: { readonly chart: unknown }): boolean {
     return active != null && active.ws.chart === ctx.chart;
 }
 
+/** Put a failed transport call in front of the person who pressed it. */
+function report(ctx: { toast(message: string, kind?: 'info' | 'error' | 'success'): void }) {
+    return (e: unknown): void => ctx.toast(e instanceof Error ? e.message : String(e), 'error');
+}
+
 function registerControls(): void {
     const playing = active?.controller.playing ?? false;
     const speed = active?.controller.speed ?? SPEEDS[2];
+    const onTicks = active?.controller.mode === 'ticks';
 
     registerWidgetAction({
         id: 'replay.step',
@@ -66,10 +77,12 @@ function registerControls(): void {
         align: 'right',
         order: 1,
         iconOnly: true,
-        label: 'Step one bar',
+        label: onTicks ? 'Play to the end of this candle' : 'Step one bar',
         icon: 'replay-step',
         when: onActiveChart,
-        run: () => active?.controller.step(),
+        run: (ctx) => {
+            void active?.controller.stepForward().then(refreshControls).catch(report(ctx));
+        },
     });
 
     registerWidgetAction({
@@ -78,10 +91,70 @@ function registerControls(): void {
         align: 'right',
         order: 2,
         iconOnly: true,
-        label: 'Skip 10 bars',
+        label: onTicks ? 'Play ten candles on' : 'Skip 10 bars',
         icon: 'replay-skip',
         when: onActiveChart,
-        run: () => active?.controller.skip(10),
+        run: (ctx) => {
+            void active?.controller.skipForward(10).then(refreshControls).catch(report(ctx));
+        },
+    });
+
+    /* Candles or ticks — only where the session has a recording to play. The face says what a
+     * press switches TO, the way the play button does. */
+    registerWidgetAction({
+        id: 'replay.playMode',
+        target: 'topbar',
+        align: 'right',
+        order: 0.5,
+        iconOnly: true,
+        label: onTicks ? 'Play on candles' : 'Play the recorded ticks',
+        icon: onTicks ? 'replay-bars' : 'replay-ticks',
+        when: (ctx) => onActiveChart(ctx) && active?.controller.ticks != null,
+        run: (ctx) => {
+            if (!active) return;
+            const next = active.controller.mode === 'ticks' ? 'bars' : 'ticks';
+            void active.controller.setPlayMode(next)
+                .then(() => {
+                    refreshControls();
+                    ctx.toast(next === 'ticks'
+                        ? 'Playing the recorded prints and quotes — the Ladder and the Tape follow them.'
+                        : 'Playing candles, one bar at a time.');
+                })
+                .catch(report(ctx));
+        },
+    });
+
+    registerWidgetAction({
+        id: 'replay.nextSetup',
+        target: 'topbar',
+        align: 'right',
+        order: 2.5,
+        iconOnly: true,
+        label: 'Skip to the next setup',
+        icon: 'replay-setup',
+        when: onActiveChart,
+        run: (ctx) => {
+            if (!active) return;
+            const { controller, ws } = active;
+            void (async () => {
+                let id = loadSetupStrategy();
+                if (!id) {
+                    id = await askSetupStrategy(ws.root, null);
+                    if (!id) return;
+                    saveSetupStrategy(id);
+                }
+                // Stepping under a running timer would interleave two playheads' worth of bars.
+                controller.pause();
+                refreshControls();
+                const index = await findNextSetup(controller, id);
+                if (index == null) {
+                    ctx.toast(`No ${strategyName(id)} setup before the end of the loaded bars.`);
+                    return;
+                }
+                const stepped = await controller.skipToIndex(index);
+                ctx.toast(`${strategyName(id)} setup — ${stepped} ${stepped === 1 ? 'candle' : 'candles'} on.`, 'success');
+            })().catch((e: unknown) => ctx.toast(e instanceof Error ? e.message : String(e), 'error'));
+        },
     });
 
     registerWidgetAction({
@@ -112,10 +185,11 @@ function registerControls(): void {
         when: onActiveChart,
         run: (ctx) => {
             if (!active) return;
-            const next = SPEEDS[(SPEEDS.indexOf(active.controller.speed as typeof SPEEDS[number]) + 1) % SPEEDS.length]!;
+            const { speeds } = active.controller;
+            const next = speeds[(speeds.indexOf(active.controller.speed) + 1) % speeds.length]!;
             active.controller.setSpeed(next);
             refreshControls();
-            ctx.toast(`Replay speed ${next} bars/sec`);
+            ctx.toast(active.controller.mode === 'ticks' ? `Ticks at ${next}× real time` : `Replay speed ${next} bars/sec`);
         },
     });
 
@@ -199,6 +273,53 @@ function registerControls(): void {
     });
 }
 
+/** `2026-09-14 14:35`, in UTC — the replay's clock is UTC, and so is its setup dialog. */
+function candleLabel(ms: number): string {
+    return new Date(ms).toISOString().replace('T', ' ').slice(0, 16);
+}
+
+/**
+ * Right-click a candle, go back to it.
+ *
+ * On the chart's own context menu rather than in the topbar, because the question it answers
+ * is "which candle" and the pointer has already answered it. Only over a candle — over the
+ * empty space to the right of the newest one there is nothing to go back to.
+ */
+function registerJumpHere(): void {
+    registerWidgetAction({
+        id: 'replay.setupStrategy',
+        target: 'context:body',
+        label: 'Next setup: choose strategy…',
+        when: onActiveChart,
+        run: (ctx) => {
+            if (!active) return;
+            void askSetupStrategy(active.ws.root, loadSetupStrategy()).then((id) => {
+                if (!id) return;
+                saveSetupStrategy(id);
+                ctx.toast(`Next setup now looks for ${strategyName(id)}.`);
+            });
+        },
+    });
+
+    registerWidgetAction({
+        id: 'replay.jumpHere',
+        target: 'context:body',
+        label: 'Jump back here',
+        when: (ctx) => onActiveChart(ctx) && lastCrosshairTime() != null,
+        run: (ctx) => {
+            const time = lastCrosshairTime();
+            if (!active || time == null) return;
+            const { controller } = active;
+            void controller.jumpTo(time)
+                .then(() => {
+                    refreshControls(); // playback was stopped for the rebuild
+                    ctx.toast(`Back at ${candleLabel(time)} UTC — everything done after it is gone.`, 'success');
+                })
+                .catch((e: unknown) => ctx.toast(e instanceof Error ? e.message : String(e), 'error'));
+        },
+    });
+}
+
 /** Re-register (faces are static) and let the shell rebuild its topbar. */
 function refreshControls(): void {
     registerControls();
@@ -211,6 +332,7 @@ export function setActiveReplay(next: ActiveReplay | null): void {
     const previous = active;
     active = next;
     registerControls();
+    registerJumpHere();
     next?.ws.refreshActions();
     if (previous && previous !== next) previous.ws.refreshActions();
 }

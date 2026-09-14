@@ -206,6 +206,15 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
     const engine = opts.engine;
     engine.subscribe(() => schedulePaint());
 
+    /* What each venue serves, asked of the providers themselves rather than restated here.
+     * One throwaway instance per source: their constructors only set fields — nothing is
+     * fetched until a bar is asked for — and the answer does not change while the app runs. */
+    const venueTimeframes: Record<string, readonly string[]> = {};
+    for (const [name, make] of Object.entries(opts.providers)) {
+        const supported = make().info?.()?.supportedTimeframes;
+        if (supported && supported.length > 0) venueTimeframes[name.toLowerCase()] = supported;
+    }
+
     let selected = '';
     let pane: Pane = 'live';
     let form: BotForm | null = null;
@@ -783,6 +792,7 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
                     readOnly: running,
                     capitalConfigured,
                     accountTrades,
+                    venueTimeframes,
                     onSave: saveBot,
                     onDelete: () => {
                         const current = engine.find(bot.id);

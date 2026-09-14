@@ -15,10 +15,11 @@ import {
 import type { TradeModeHandle } from '../trading/tradeMode';
 import { loadAlertDisplay, saveAlertDisplay, type AlertDisplay } from '../alerts/alertDisplay';
 import { loadQuoteDisplay, saveQuoteDisplay, type QuoteDisplay } from '../quotes/quoteDisplay';
+import { loadSidebarDisplay, saveSidebarDisplay } from '../replay/sidebarDisplay';
 import type {
     MidoriBinanceSpotCredentialStatus, MidoriBybitAccountSummary, MidoriBybitCredentialStatus,
     MidoriCapitalAccountSummary, MidoriCapitalCredentialStatus,
-    MidoriProjectXAccount, MidoriProjectXCredentialStatus,
+    MidoriProjectXAccount, MidoriProjectXCredentialStatus, MidoriRecorderStatus,
 } from '../midori';
 import { STARTUP_TABS, loadPrefs, savePrefs, type AppPrefs, type StartupTab } from './prefs';
 
@@ -149,13 +150,14 @@ ${overlayScrollbarCss('.midorii-settings-body')}
 `;
 
 /** Which pane is on screen. The rail is the whole of this list, in this order. */
-export type SettingsPane = 'general' | 'customization' | 'trading' | 'brokers';
+export type SettingsPane = 'general' | 'customization' | 'trading' | 'brokers' | 'developer';
 
 const PANES: ReadonlyArray<{ id: SettingsPane; label: string }> = [
     { id: 'general', label: 'General' },
     { id: 'customization', label: 'Customization' },
     { id: 'trading', label: 'Trading' },
     { id: 'brokers', label: 'Broker connection' },
+    { id: 'developer', label: 'Developer' },
 ];
 
 /** Dropdown labels for a position's line styles, and the values behind them. */
@@ -242,6 +244,17 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
     /** What is currently typed into the connection form. Kept across repaints so a half-
      *  entered key is not lost by switching tabs. */
     const brokerDraft = { apiKey: '', identifier: '', password: '', env: 'demo' as 'demo' | 'live' };
+    /**
+     * One sentence the Capital.com card should say after the repaint that follows a switch
+     * between its two accounts.
+     *
+     * Said through here rather than into the status line directly, because the switch ends in
+     * a repaint that builds a new card and a new status line with it — an answer written into
+     * the old one goes with it. Read once and cleared: what it reports is something that just
+     * HAPPENED, and a sentence about the chart being taken off an account is not still true
+     * the next time somebody opens this tab.
+     */
+    let brokerNote: { text: string; error?: boolean } | null = null;
     let spotBroker: MidoriBinanceSpotCredentialStatus | null = null;
     const spotDraft = { apiKey: '', secretKey: '' };
     let bybitBroker: MidoriBybitCredentialStatus | null = null;
@@ -368,6 +381,47 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
             step,
             onChange: (v) => onChange(v / 100),
         });
+    }
+
+    /**
+     * The feed recorder, beside the connection whose feed it writes down.
+     *
+     * Reads its state from the main process, which is where the recorder runs and where its
+     * setting lives. The list under the switch is what the recordings cost, contract by
+     * contract, because "some megabytes a day" is a promise and a number on disk is a fact.
+     */
+    function recorderCard(): HTMLElement {
+        const holder = doc.createElement('div');
+        const listing = note('Reading what has been recorded…');
+        const render = (status: MidoriRecorderStatus): void => {
+            holder.replaceChildren(
+                boolRow('Record the ProjectX feed', status.enabled, (enabled) => {
+                    void window.midori.recorder.setEnabled(enabled)
+                        .then(render)
+                        .catch((err: unknown) => { listing.textContent = err instanceof Error ? err.message : String(err); });
+                }),
+                listing,
+            );
+            const total = status.recordings.reduce((sum, r) => sum + r.bytes, 0);
+            listing.textContent = status.recordings.length === 0
+                ? 'Nothing recorded yet.'
+                : `${status.recordings.map((r) => `${r.name}: ${r.days.length} ${r.days.length === 1 ? 'day' : 'days'}`).join(' · ')} — ${(total / 1_048_576).toFixed(1)} MB in all.`;
+        };
+        void window.midori.recorder.status()
+            .then(render)
+            .catch((err: unknown) => { listing.textContent = err instanceof Error ? err.message : String(err); });
+        holder.append(listing);
+
+        return card(
+            fieldSection('Recording'),
+            note('Every print and every bid and ask on a ProjectX contract that is open in Midorii — a '
+                + 'chart, a ticket, a ladder — written down as it arrives, so the day can be played back in '
+                + 'Replay tick by tick, at the ladder. Nothing extra is subscribed: what is recorded is what '
+                + 'was being watched. The candles are built from the same prints and kept as their own '
+                + 'dataset, named after the contract with .REC on the end. A day that was not recorded '
+                + 'cannot be recorded later, which is why this starts switched on.'),
+            holder,
+        );
     }
 
     function boolRow(label: string, checked: boolean, onChange: (v: boolean) => void): HTMLElement {
@@ -573,6 +627,28 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
 
     }
 
+    function paintDeveloper(): void {
+        inner.append(head(
+            'Developer',
+            'Private, unsupported features for testing this copy of Midorii.',
+        ));
+
+        const warning = note(
+            'This feed is unofficial and fragile. Use it only to display charts. Do not use '
+            + 'it for bots, alerts, backtests, risk checks, or orders.',
+        );
+        warning.className = 'midorii-settings-warn';
+        inner.append(card(
+            fieldSection('Experimental market data'),
+            warning,
+            boolRow('Enable global chart feed', prefs.experimentalMarketFeed, (enabled) => {
+                changePrefs({ experimentalMarketFeed: enabled });
+                paint();
+            }),
+            note('Restart Midorii after changing this setting. It is disabled by default.'),
+        ));
+    }
+
     /**
      * Where a real account is connected.
      *
@@ -620,7 +696,10 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         /* What is stored right now, in words. Whether a .env.local is supplying credentials
          * is worth saying: a connection that works with nothing stored is otherwise a
          * mystery, and so is one that ignores a file somebody edited. */
-        if (broker?.configured) {
+        if (brokerNote) {
+            say(brokerNote.text, brokerNote.error);
+            brokerNote = null;
+        } else if (broker?.configured) {
             say(`Connected as ${broker.identifier ?? 'unknown'} · ${broker.env === 'live' ? 'LIVE MONEY' : 'demo'}`);
         } else if (broker?.envPresent) {
             say('Using credentials from .env.local. Saving here replaces them.');
@@ -745,6 +824,48 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
             forget.textContent = 'Forget';
         };
 
+        /**
+         * Move the stored key to the other account.
+         *
+         * One key against two endpoints, so there is nothing new to store — and until this
+         * existed, changing which of the two was traded meant filling the whole form in again,
+         * because the key and the password are cleared out of it the moment they are saved.
+         * That cost is why the account on screen and the account somebody meant could drift
+         * apart, which is exactly the kind of drift a page about real money should not cause.
+         *
+         * The way to live money asks twice, like everything here that cannot be taken back.
+         * The way out of it does not: there is nothing at risk in that direction.
+         */
+        const target: 'demo' | 'live' = broker?.env === 'live' ? 'demo' : 'live';
+        const swapTo = (): void => {
+            /* The chart is wired to the account being LEFT. Taken off first, and reported:
+             * a ticket left standing would be aimed at the other account a moment later, and
+             * that is the one way this switch could cost money. */
+            const wasArmed = opts.trading.broker === 'capital';
+            if (wasArmed) opts.trading.stop();
+            say(`Switching to ${target === 'live' ? 'live money' : 'demo'}…`);
+            void window.midori.capital.setEnvironment(target)
+                .then((result) => {
+                    listAccounts(result.accounts);
+                    brokerNote = {
+                        text: [
+                            `Now on ${result.env === 'live' ? 'LIVE MONEY' : 'demo'}.`,
+                            wasArmed ? 'The chart was taken off the account it was trading.' : '',
+                            result.persisted
+                                ? ''
+                                : 'Credentials come from .env.local, so this holds for this sitting only — '
+                                    + 'CAPITAL_ENV decides the next one.',
+                        ].filter(Boolean).join(' '),
+                    };
+                    refresh();
+                })
+                .catch((err: unknown) => say(err instanceof Error ? err.message : String(err), true));
+        };
+        const swap = target === 'live'
+            ? armed('Switch to live money', 'Switch to live money — press again', swapTo)
+            : button('Switch to demo');
+        if (target === 'demo') swap.onclick = swapTo;
+
         const rows: HTMLElement[] = [
             fieldSection('Capital.com'),
             note('Create the key under Settings → API integrations on the Capital.com platform; '
@@ -774,7 +895,8 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         if (broker?.configured) {
             const end = doc.createElement('div');
             end.className = 'midorii-settings-actions-end';
-            end.append(forget);
+            // Both act on the connection that already exists, rather than on what is typed above.
+            end.append(swap, forget);
             actions.appendChild(end);
         }
         panel.append(actions, accounts);
@@ -1239,6 +1361,7 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         }
         pxPanel.append(pxActions, pxFacts);
         inner.append(pxPanel);
+        inner.append(recorderCard());
 
         /* Which account is traded — its own row, below the connection rather than inside it,
          * because it is a different kind of decision. The credentials say WHO you are; this
@@ -1527,6 +1650,19 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         end.append(defaults, save);
         inner.append(actions(reset, end));
 
+        /* After the form's own buttons, not inside it: this is how the panel looks, not what
+         * the account is, so it applies the moment it is thrown and Save has nothing to do
+         * with it. */
+        inner.append(card(
+            fieldSection('Trade panel'),
+            note('The panel beside the chart. The Ladder tab lays your orders and position out '
+                + 'against the prices, on accounts that have one; switched off, the tab is not '
+                + 'offered. Applies at once, to every account.'),
+            boolRow('Show the Ladder tab', loadSidebarDisplay().showLadder, (v) => (
+                saveSidebarDisplay({ ...loadSidebarDisplay(), showLadder: v })
+            )),
+        ));
+
         syncSave();
     }
 
@@ -1542,6 +1678,7 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         if (active === 'general') paintGeneral();
         else if (active === 'customization') paintCustomization();
         else if (active === 'brokers') paintBrokers();
+        else if (active === 'developer') paintDeveloper();
         else paintTrading();
     }
 

@@ -14,6 +14,7 @@ const fullDoc: WorkspaceState = {
     timezone: 'Europe/Paris',
     favorites: ['trendline', 'hline'],
     timeframeFavorites: ['15', '60', 'D'],
+    indicatorFavorites: ['native:fvg', 'script:My Script'],
     sync: { viewport: true, symbol: { c1: 'a', c2: 'a' }, crosshair: true, drawings: true, style: true },
     trackSizes: { '4': { cols: [1.4, 0.6], rows: [1, 1] } },
     panels: { open: 'objects', widths: { objects: 320 }, pinned: ['vendor.editor'] },
@@ -119,10 +120,12 @@ describe('sanitizeState (the applyState gate)', () => {
             layout: '1',
             favorites: ['trendline', 7],
             timeframeFavorites: ['60', null, 'D'],
+            indicatorFavorites: ['native:rsi', false],
             charts: [],
         });
         expect(doc!.favorites).toEqual(['trendline']);
         expect(doc!.timeframeFavorites).toEqual(['60', 'D']);
+        expect(doc!.indicatorFavorites).toEqual(['native:rsi']);
         const empty = sanitizeState({ version: 1, layout: '1', timeframeFavorites: [42], charts: [] });
         expect(empty!.timeframeFavorites).toBeUndefined();
     });

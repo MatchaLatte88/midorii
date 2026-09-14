@@ -62,6 +62,15 @@ export interface CapitalDealing {
     minStopDistance: MidoriCapitalRule | null;
     maxStopDistance: MidoriCapitalRule | null;
     lotSize: number | null;
+    /**
+     * The money THIS INSTRUMENT books its results in.
+     *
+     * Not the account's. A euro account trading a US index books that index's result in
+     * dollars and converts it, so the two together are what decide whether a point can be
+     * turned into account money without an exchange rate nobody here has — see
+     * `CapitalController.pointValue`.
+     */
+    currency: string | null;
 }
 
 /** The instrument's live state — see {@link CapitalProvider.snapshot}. */
@@ -87,6 +96,7 @@ export function capitalDealingRules(info: MidoriCapitalMarketInfo): CapitalDeali
         minStopDistance: rules?.minStopOrProfitDistance ?? null,
         maxStopDistance: rules?.maxStopOrProfitDistance ?? null,
         lotSize: info.instrument.lotSize ?? null,
+        currency: info.instrument.currency ?? null,
     };
 }
 

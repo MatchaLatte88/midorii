@@ -115,6 +115,13 @@ export interface DataProvider {
      */
     listSymbols?(): Promise<SymbolDescriptor[]>;
 
+    /**
+     * Search a catalog too large or too fluid to enumerate eagerly. Results do not
+     * enter bare-symbol resolution; each descriptor keeps the provider's directly
+     * loadable ticker and the picker commits it with the provider name.
+     */
+    searchSymbols?(query: string): Promise<SymbolDescriptor[]>;
+
     /** Per-symbol metadata for engine `syminfo.*`. Absent ⇒ the engine synthesizes a fallback. */
     getSymbolInfo?(ticker: string): Promise<SymbolInfo | undefined>;
 

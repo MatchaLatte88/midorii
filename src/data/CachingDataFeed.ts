@@ -1,5 +1,5 @@
 import type { MarketDataFeed, BarRange, SymbolInfo } from '../core/ports/MarketDataFeed';
-import type { MarketConfig } from '../core/options';
+import { DEFAULT_BARS, type MarketConfig } from '../core/options';
 import type { OHLCV } from '../core/model/ohlcv';
 import type { Unsubscribe } from '../core/util/types';
 import { BarStore, seriesKey, sharedBarStore } from './BarStore';
@@ -49,7 +49,7 @@ export class CachingDataFeed implements MarketDataFeed {
         const key = cacheKey(symbol, cfg.timeframe ?? '60', cfg.session);
         this.store.retainSymbol(symbol); // current-symbol-only purge
         const cached = this.store.get(key);
-        const n = cfg.bars ?? 500;
+        const n = cfg.bars ?? DEFAULT_BARS;
 
         // Tail-only path: enough closed history is cached to cover the requested
         // window (`n - 1` accounts for the forming bar we always drop). Fetch just
@@ -80,7 +80,7 @@ export class CachingDataFeed implements MarketDataFeed {
         const symbol = cfg.symbol ?? 'TEST';
         const key = cacheKey(symbol, cfg.timeframe ?? '60', cfg.session);
         const cached = this.store.get(key);
-        const n = cfg.bars ?? 500;
+        const n = cfg.bars ?? DEFAULT_BARS;
         const lastCached = cached?.[cached.length - 1];
         if (cached && lastCached && cached.length >= n - 1 && this.inner.loadRange) return this.load(cfg); // warm: the tail-merge path
         this.store.retainSymbol(symbol);

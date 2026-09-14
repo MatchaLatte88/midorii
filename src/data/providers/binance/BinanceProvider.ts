@@ -36,7 +36,7 @@ const TF_TO_INTERVAL: Record<string, string> = {
 
 /** User-facing timeframe aliases → canonical keys (matches the other Vela layers). */
 const TF_NORMALIZE: Record<string, string> = {
-    '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '45m': '45',
+    '1m': '1', '2m': '2', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '45m': '45',
     '1h': '60', '2h': '120', '3h': '180', '4h': '240', '6h': '360', '8h': '480', '12h': '720',
     '1d': 'D', '1w': 'W', '1mo': 'M', '1D': 'D', '1W': 'W', '4H': '240',
     D: 'D', W: 'W', M: 'M',
@@ -47,7 +47,7 @@ const NATIVE_MINUTES = [1, 3, 5, 15, 30, 60, 120, 240, 360, 480, 720];
 const MIN_TO_INTERVAL: Record<number, string> = {
     1: '1m', 3: '3m', 5: '5m', 15: '15m', 30: '30m', 60: '1h', 120: '2h', 240: '4h', 360: '6h', 480: '8h', 720: '12h',
 };
-const SUPPORTED_TIMEFRAMES = ['1', '3', '5', '15', '30', '45', '60', '120', '180', '240', 'D', 'W', 'M'];
+const SUPPORTED_TIMEFRAMES = ['1', '2', '3', '5', '15', '30', '45', '60', '120', '180', '240', '480', 'D', 'W', 'M'];
 
 /** Normalize a user timeframe to a canonical key. */
 export function normalizeTf(tf: string): string {

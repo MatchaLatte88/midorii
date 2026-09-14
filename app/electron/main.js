@@ -1,7 +1,7 @@
 import { app, BrowserWindow, nativeTheme } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { applyStoredBinanceSpotCredentials, applyStoredBybitCredentials, applyStoredCapitalCredentials, applyStoredProjectXCredentials, registerIpc } from './ipc.js';
+import { applyStoredBinanceSpotCredentials, applyStoredBybitCredentials, applyStoredCapitalCredentials, applyStoredProjectXCredentials, registerIpc, stopRecording } from './ipc.js';
 import { loadEnvLocal } from './loadEnv.js';
 import { TITLEBAR } from './titlebar.js';
 import { guardWindowClose } from './windowCloseGuard.js';
@@ -101,4 +101,16 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+/* The recorder buffers a few seconds of feed at a time. Quitting waits for it once, so the
+ * last seconds of a recorded session are on disk rather than lost with the process. */
+let recordingStopped = false;
+app.on('before-quit', (event) => {
+  if (recordingStopped) return;
+  event.preventDefault();
+  recordingStopped = true;
+  void stopRecording()
+    .catch((err) => console.error('[midorii] could not write out the recording before quitting', err))
+    .finally(() => app.quit());
 });

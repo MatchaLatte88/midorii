@@ -5,6 +5,7 @@ import type { Fill, Background, PriceLine } from '../model/scene';
 import type { DrawingLine, DrawingBox, DrawingLabel, DrawingPolyline, DrawingLinefill, DrawingTable } from '../model/drawings';
 import type { InputSchema, InputValue } from '../model/inputs';
 import type { VisibleRange, IndicatorStatus } from '../ports/IChartRenderer';
+import type { EngineAlert } from '../ports/ScriptingEngine';
 import type { DataControl } from '../DataControl';
 
 /**
@@ -49,6 +50,11 @@ export interface NativeIndicatorContext {
     readonly data: DataControl;
     /** Push a fresh render output; the chart mounts it (first call) or patches it (subsequent). */
     emit(out: NativeIndicatorOutput): void;
+    /**
+     * Raise an alert through the same chart-level and per-handle events as a scripting engine.
+     * Optional so small hand-built contexts and older hosts remain source-compatible.
+     */
+    emitAlert?(alert: EngineAlert): void;
     /**
      * Push a BESPOKE render payload to the renderer's native layer for this indicator's type (for a
      * native whose visuals aren't ordinary series/fills — e.g. volume/VPVR push their layer config).
@@ -105,6 +111,16 @@ export interface NativeIndicatorDescriptor {
     /** Marks the type as beta — surfaced in the catalog so a host "add indicator" UI can badge it. */
     readonly beta?: boolean;
     /**
+     * Who ships the type, as a short tag — a host "add indicator" UI badges and groups by it.
+     * Absent ⇒ no badge: only the studies inherited from Vela carry `'vela'`.
+     */
+    readonly vendor?: string;
+    /**
+     * Host machinery that draws through the native pipeline (alert levels, bid/ask lines, a
+     * position) but is not an indicator anyone picks — kept out of a host "add indicator" UI.
+     */
+    readonly internal?: boolean;
+    /**
      * Allow several instances of this type on one chart — every add creates a new one (a study
      * like a moving average is typically stacked at different lengths). Absent ⇒ SINGLE instance
      * per type: a second add returns the existing handle. A type that pushes a bespoke layer
@@ -139,6 +155,10 @@ export interface NativeIndicatorInfo {
     readonly multiInstance?: boolean;
     /** The type is flagged beta (for a badge in the picker). */
     readonly beta?: boolean;
+    /** Who ships the type (see `NativeIndicatorDescriptor.vendor`). */
+    readonly vendor?: string;
+    /** Host machinery, not a pickable indicator (see `NativeIndicatorDescriptor.internal`). */
+    readonly internal?: boolean;
 }
 
 /** Process-wide catalog of native-indicator types. Built-ins (volume, VPVR) register via the composition root. */

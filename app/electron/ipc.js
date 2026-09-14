@@ -18,8 +18,9 @@ import {
   capitalAccount, capitalActivities, capitalAmendOrder, capitalAmendPosition, capitalCancelOrder, capitalClosePosition, capitalConfigured,
   capitalCreateOrder, capitalEnvironment, capitalMarketInfo, capitalMarkets, capitalOpenPosition, capitalPositions,
   capitalPrices, capitalProbe, capitalSubscribe, capitalSubscribeQuotes, capitalTransactions, capitalWorkingOrders,
-  configureCapital,
+  configureCapital, switchCapitalEnvironment,
 } from './data/capital.js';
+import { experimentalBars, experimentalSearch, experimentalSubscribe, experimentalSymbolInfo } from './data/experimentalFeed.js';
 import {
   configureProjectX, projectXAccount, projectXAccounts, projectXAvailableContracts, projectXBars,
   projectXConfigured, projectXContracts, projectXEnvironment, projectXOpenOrders, projectXPositions,
@@ -27,7 +28,11 @@ import {
   projectXProbe, projectXSelectAccount, projectXSubscribe, projectXSubscribePrints, projectXSubscribeQuotes,
   projectXSubscribeUser,
   projectXTrades,
+  projectXContractInfo, projectXContractName, projectXOnMarketData,
 } from './data/projectx.js';
+import { createTickRecorder } from './data/tickRecorder.js';
+import { listRecordings, readRecordingMeta, readTicks } from './data/store/tickStore.js';
+import { loadRecorderEnabled, saveRecorderEnabled } from './data/store/recorderStore.js';
 import {
   binanceSpotAccount, binanceSpotCancelAll, binanceSpotCancelOrder, binanceSpotClose,
   binanceSpotEnvironment, binanceSpotOpenOrders, binanceSpotPlaceOrder, binanceSpotProbe,
@@ -53,6 +58,11 @@ import { loadBots, saveBots } from './data/store/botStore.js';
 import { clearBotAccount, listBotAccounts, loadBotAccount, saveBotAccount } from './data/store/botAccountStore.js';
 import { applyTitleBarTheme } from './titlebar.js';
 import { approveWindowClose } from './windowCloseGuard.js';
+
+/** A replay journal is one snapshot and a line per trading call — far below this in practice. */
+const MAX_JOURNAL_CHARS = 20_000_000;
+/** The journal format the renderer writes — replay/replayJournal.ts. Kept in step with it by a test. */
+export const REPLAY_JOURNAL_VERSION = 2;
 
 /** Datasets live outside the app bundle so an update never touches them. */
 export function dataDir() {
@@ -93,6 +103,29 @@ export function strategiesDir() {
  * when they are picked up again, and a library of results should not have
  * half-played accounts sitting in it.
  */
+/** The recorded feed — see data/store/tickStore.js. Its own folder: it is market data, but
+ *  it is not candles, and the bar store's catalogue must not trip over it. */
+export function ticksDir() {
+  return path.join(app.getPath('userData'), 'ticks');
+}
+
+/** Where the recorder's one setting lives. */
+function recorderDir() {
+  return path.join(app.getPath('userData'), 'recorder');
+}
+
+/**
+ * The feed recorder, once it exists. Created in `registerIpc` — it needs the app's folders —
+ * and started switched on until its stored setting has been read, since that read is a moment
+ * and a tick in that moment is worth keeping.
+ */
+let recorder = null;
+
+/** Write out whatever the recorder holds. For quitting: nothing recorded is left in memory. */
+export async function stopRecording() {
+  await recorder?.stop();
+}
+
 export function sessionsDir() {
   return path.join(app.getPath('userData'), 'replay-sessions');
 }
@@ -469,6 +502,35 @@ function requireTimeframe(tf) {
 }
 
 export function registerIpc() {
+  recorder = createTickRecorder({
+    ticksRoot: ticksDir(), dataDir: dataDir(), nameOf: projectXContractName, infoOf: projectXContractInfo,
+  });
+  projectXOnMarketData(recorder);
+  void loadRecorderEnabled(recorderDir()).then((on) => recorder.setEnabled(on));
+
+  /* The recorder: whether it runs, and what it has kept. Recordings are listed with their
+   * days and their size, so Settings can say what switching it off would stop costing. */
+  ipcMain.handle('recorder:status', async () => ({
+    enabled: recorder.isEnabled(),
+    recordings: await listRecordings(ticksDir()),
+  }));
+
+  ipcMain.handle('recorder:set-enabled', async (_e, enabled) => {
+    if (typeof enabled !== 'boolean') throw new Error('recorder:set-enabled: say on or off');
+    await saveRecorderEnabled(recorderDir(), enabled);
+    await recorder.setEnabled(enabled);
+    return { enabled: recorder.isEnabled(), recordings: await listRecordings(ticksDir()) };
+  });
+
+  /* A stretch of recorded feed, for a replay to play. Written out first, so a replay opened on
+   * the day being recorded sees everything up to a moment ago rather than up to the last flush. */
+  ipcMain.handle('ticks:read', async (_e, { name, from, to } = {}) => {
+    await recorder.flush();
+    return readTicks(ticksDir(), requireString(name, 'name').toUpperCase(), requireNumber(from, 'from'), requireNumber(to, 'to'));
+  });
+
+  ipcMain.handle('ticks:meta', (_e, name) => readRecordingMeta(ticksDir(), requireString(name, 'name').toUpperCase()));
+
   ipcMain.handle('data:datasets', () => listDatasets(dataDir()));
 
   ipcMain.handle('data:meta', (_e, symbol) => readMeta(dataDir(), requireString(symbol, 'symbol')));
@@ -803,7 +865,7 @@ export function registerIpc() {
    * same bars tomorrow. See ReplaySession.snapshot.
    */
   ipcMain.handle('replay:saveSession', async (_e, request) => {
-    const { id = null, name = '', symbol, timeframe, session, stats = {} } = request ?? {};
+    const { id = null, name = '', symbol, timeframe, session, journal = null, ticks = null, stats = {} } = request ?? {};
 
     requireString(symbol, 'symbol');
     requireTimeframe(timeframe);
@@ -812,6 +874,17 @@ export function registerIpc() {
     }
     if (!Number.isFinite(session.clock) || !Number.isFinite(session.startTime)) {
       throw new Error('replay:saveSession: the session has no clock');
+    }
+    /* The journal is read and checked in full by the renderer when the session is picked up
+     * again (replay/replayJournal.ts); here only its shape and its size, so a runaway caller
+     * cannot write a file nobody can open. */
+    if (journal !== null) {
+      if (typeof journal !== 'object' || journal.version !== REPLAY_JOURNAL_VERSION || !Array.isArray(journal.entries)) {
+        throw new Error('replay:saveSession: this is not a replay journal');
+      }
+      if (JSON.stringify(journal).length > MAX_JOURNAL_CHARS) {
+        throw new Error('replay:saveSession: the replay journal is too large to store');
+      }
     }
 
     return saveSession(sessionsDir(), {
@@ -822,6 +895,8 @@ export function registerIpc() {
       startTime: session.startTime,
       clock: session.clock,
       stats,
+      ...(journal !== null ? { journal } : {}),
+      ...(typeof ticks === 'string' && ticks ? { ticks: ticks.toUpperCase() } : {}),
       session: {
         ...session,
         /* The same condensing a stored run gets, and for the same reason: the
@@ -1044,6 +1119,44 @@ export function registerIpc() {
   ipcMain.handle('window:is-maximized', (event) => (
     BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
   ));
+
+  /* ─── Experimental chart data ────────────────────────────────────────── */
+
+  ipcMain.handle('experimental-feed:search', (_e, query) => experimentalSearch(String(query ?? '')));
+
+  ipcMain.handle('experimental-feed:symbol-info', (_e, symbol) => (
+    experimentalSymbolInfo(requireString(symbol, 'symbol'))
+  ));
+
+  ipcMain.handle('experimental-feed:bars', (_e, { symbol, timeframe, from, to, limit, session } = {}) => (
+    experimentalBars({
+      symbol: requireString(symbol, 'symbol'),
+      timeframe: requireString(timeframe, 'timeframe'),
+      from,
+      to,
+      limit,
+      session,
+    })
+  ));
+
+  const experimentalFeedSubs = new Map();
+
+  ipcMain.handle('experimental-feed:subscribe', (event, { symbol, timeframe, session } = {}) => {
+    const id = randomUUID();
+    const sender = event.sender;
+    const unsubscribe = experimentalSubscribe({
+      symbol: requireString(symbol, 'symbol'),
+      timeframe: requireString(timeframe, 'timeframe'),
+      session,
+    }, (bar) => {
+      if (!sender.isDestroyed()) sender.send('experimental-feed:bar', { subscriptionId: id, bar });
+    });
+    if (sender.isDestroyed()) unsubscribe();
+    else holdSubscription(experimentalFeedSubs, sender, id, unsubscribe);
+    return id;
+  });
+
+  ipcMain.handle('experimental-feed:unsubscribe', (_e, id) => { experimentalFeedSubs.get(id)?.(); });
 
   /* ─── Capital.com (forex/CFD live data) ─────────────────────────────── */
 
@@ -1496,6 +1609,31 @@ export function registerIpc() {
     return { accounts, env: creds.env };
   });
 
+  /**
+   * Move to the other Capital.com account — demo to live, or back — without asking for the
+   * key a second time.
+   *
+   * Which of the two accounts is being traded is a decision somebody makes often; re-typing an
+   * API key and a custom password is the price of changing it today, and that price is why the
+   * account on screen and the account somebody meant can drift apart. The key itself never
+   * moves: it stays where it was stored, and only the field naming the endpoint changes.
+   *
+   * Tried before it takes effect, exactly as saving is — see `switchCapitalEnvironment`. A key
+   * Capital.com has not issued for the other side is refused here, and the account this app is
+   * on is left untouched.
+   */
+  ipcMain.handle('capital:set-environment', async (_e, env) => {
+    const result = await switchCapitalEnvironment(env);
+    /* Written back where the credentials actually live, so the choice survives a restart.
+     * Credentials coming from .env.local have nowhere to be written to: the switch then holds
+     * for this sitting alone and CAPITAL_ENV decides the next one. Which of the two happened
+     * is reported rather than left to be discovered after a restart. */
+    const stored = await readSecret(credentialsDir(), 'capital').catch(() => null);
+    const persisted = !!(stored?.apiKey && stored?.identifier && stored?.password);
+    if (persisted) await saveCredentials(credentialsDir(), 'capital', { ...stored, env: result.env });
+    return { ...result, persisted };
+  });
+
   ipcMain.handle('capital:credentials-clear', async () => {
     await clearCredentials(credentialsDir(), 'capital');
     // Back to whatever the environment says, which may be nothing at all.
@@ -1744,5 +1882,12 @@ function optionalLevels(spec, { keepNull = false } = {}) {
   }
   if (typeof spec.guaranteedStop === 'boolean') out.guaranteedStop = spec.guaranteedStop;
   if (typeof spec.trailingStop === 'boolean') out.trailingStop = spec.trailingStop;
+  /* A distance rather than a level, and the one the venue requires beside `trailingStop` —
+   * so it is checked like a price: positive and finite, or refused before it is sent. */
+  const stopDistance = optionalLevel(spec.stopDistance, 'stopDistance');
+  if (stopDistance !== undefined) out.stopDistance = stopDistance;
+  if (out.trailingStop === true && out.stopDistance === undefined) {
+    throw new Error('A trailing stop needs stopDistance');
+  }
   return out;
 }

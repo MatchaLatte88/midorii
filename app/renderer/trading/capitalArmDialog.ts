@@ -10,10 +10,10 @@ import { Dialog, injectStyles } from '../../../src/ui';
  *
  * So this asks once, per session, and it asks differently depending on which account the
  * credentials point at. On a demo account it is a notice: this is fake money, go ahead. On a
- * live one it names the account, states what is about to become possible, and requires the
- * word to be typed — not because typing proves understanding, but because it makes the
- * difference between demo and live impossible to click past while thinking about something
- * else.
+ * live one it names the account and states what is about to become possible.
+ *
+ * It can be switched off in the trading settings. Stored per machine, like the fill sound:
+ * it describes the person at this desk, not an account.
  */
 
 const STYLE_ID = 'midorii-capital-arm';
@@ -61,25 +61,27 @@ const CSS = `
     font-size: 12px;
     color: var(--vela-fg-bright);
 }
-.midorii-arm-type {
-    width: 100%;
-    box-sizing: border-box;
-    height: var(--vela-control-h);
-    padding: 0 11px;
-    border: 1px solid var(--vela-border);
-    border-radius: var(--vela-control-radius);
-    background: var(--vela-surface-sunken);
-    color: var(--vela-fg-bright);
-    font-family: var(--vela-font-mono);
-    font-size: 13px;
-    outline: none;
-    transition: border-color var(--vela-dur-fast) ease;
-}
-.midorii-arm-type:focus { border-color: var(--vela-danger-line); }
 `;
 
-/** What has to be typed before a LIVE account can be traded from the chart. */
-export const LIVE_CONFIRM_WORD = 'LIVE';
+const STORAGE_KEY = 'midorii-arm-prompt';
+
+/** Whether arming an account asks first on this machine. On until somebody turns it off. */
+export function armPromptOn(): boolean {
+    try {
+        return localStorage.getItem(STORAGE_KEY) !== '0';
+    } catch (err) {
+        console.error('[midorii] could not read the arm-confirmation setting', err);
+        return true;
+    }
+}
+
+export function setArmPrompt(on: boolean): void {
+    try {
+        localStorage.setItem(STORAGE_KEY, on ? '1' : '0');
+    } catch (err) {
+        console.error('[midorii] could not persist the arm-confirmation setting', err);
+    }
+}
 
 export interface ArmOptions {
     /** Whether the credentials point at the real-money account. */
@@ -92,19 +94,15 @@ export interface ArmOptions {
     epic: string;
 }
 
-/** Whether what was typed unlocks a live account. Case-insensitive, trimmed — the point is
- *  the deliberate act, not the keystrokes. */
-export function typedToConfirm(text: string): boolean {
-    return text.trim().toUpperCase() === LIVE_CONFIRM_WORD;
-}
-
 /**
  * Ask before the chart is wired to a real account. Resolves true to go ahead.
  *
  * Called once per time trading is switched on, not once per order: a confirmation on every
- * press is one people learn to dismiss without reading, which is worse than none.
+ * press is one people learn to dismiss without reading, which is worse than none. Resolves
+ * true without asking when the confirmation is switched off.
  */
 export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boolean> {
+    if (!armPromptOn()) return true;
     const doc = host.ownerDocument;
     injectStyles(STYLE_ID, CSS, doc);
 
@@ -129,19 +127,7 @@ export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boo
         };
 
         const go = button(opts.live ? 'Trade this account for real' : 'Start trading the demo account', opts.live ? 'danger' : 'primary');
-        const type = doc.createElement('input');
-        type.className = 'midorii-arm-type';
-        type.type = 'text';
-        type.placeholder = `Type ${LIVE_CONFIRM_WORD} to continue`;
-        type.autocomplete = 'off';
-        if (opts.live) {
-            go.disabled = true;
-            type.oninput = () => { go.disabled = !typedToConfirm(type.value); };
-        }
-        go.onclick = () => {
-            if (opts.live && !typedToConfirm(type.value)) return;
-            finish(true);
-        };
+        go.onclick = () => finish(true);
 
         const dialog = new Dialog({
             title: opts.live ? 'Trade a real account' : 'Trade the demo account',
@@ -179,7 +165,6 @@ export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boo
                     + 'to a new level — goes to the demo venue, and what is drawn is what it reports back.';
 
                 body.append(lead, account, what);
-                if (opts.live) body.append(type);
             },
             footer: (el) => {
                 const cancel = button('Cancel');
@@ -189,6 +174,5 @@ export async function askToArm(host: HTMLElement, opts: ArmOptions): Promise<boo
         });
 
         dialog.show();
-        if (opts.live) queueMicrotask(() => type.focus());
     });
 }

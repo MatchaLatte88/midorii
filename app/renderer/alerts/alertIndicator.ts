@@ -124,6 +124,7 @@ export function registerAlertIndicator(): void {
     registerNativeIndicator({
         type: ALERT_INDICATOR_TYPE,
         title: 'Price alerts',
+        internal: true,
         paneHint: 'price',
         overlay: true,
         multiInstance: false,

@@ -113,6 +113,7 @@ export function registerQuoteIndicator(): void {
     registerNativeIndicator({
         type: QUOTE_INDICATOR_TYPE,
         title: 'Bid / ask',
+        internal: true,
         paneHint: 'price',
         overlay: true,
         multiInstance: false,

@@ -4,7 +4,7 @@
 // needs holding to: a zone shaded the wrong way round, or a colour that silently reverted to
 // the default, is not something anyone reads off a chart as a bug.
 import { describe, it, expect } from 'vitest';
-import { buildReplayOutput, type ReplayVisualState } from '../app/renderer/replay/replayIndicator';
+import { buildReplayOutput, readOrderLineId, type ReplayVisualState } from '../app/renderer/replay/replayIndicator';
 import { DEFAULT_POSITION_STYLE, normalizeStyle, withAlpha, type PositionStyle } from '../app/renderer/trading/positionStyle';
 
 const NOW = 5_000;
@@ -161,5 +161,57 @@ describe('the mark an execution leaves', () => {
         const out = buildReplayOutput(traded(), NOW, styled({}));
         expect(out.boxes).toEqual([]);
         expect(labelsOf(out)).toHaveLength(2);
+    });
+});
+
+/**
+ * A resting order's own line.
+ *
+ * The one assertion that matters is the negative one: a line is only draggable where the
+ * account behind it can actually move an order. A handle that can be grabbed and then springs
+ * back has already taken the gesture by the time anything says otherwise.
+ */
+describe('the line a resting order draws', () => {
+    const order = (over: Partial<ReplayVisualState['orders'][number]> = {}) => ({
+        id: 7, side: 'buy' as const, price: 100, tag: 'limit', ...over,
+    });
+    const state = (over: Partial<ReplayVisualState> = {}): ReplayVisualState => ({
+        positions: [], orders: [order()], ...over,
+    });
+    const lineFor = (over: Partial<ReplayVisualState> = {}) =>
+        buildReplayOutput(state(over), 0).priceLines!.find((l) => l.id === 'ord_7_lvl')!;
+
+    it('is drawn at the price the order waits at', () => {
+        expect(lineFor().price).toBe(100);
+    });
+
+    it('cannot be dragged unless the account said it can move one', () => {
+        // Bybit, Binance Spot and a replay have no `moveOrder` and send no flag.
+        expect(lineFor().draggable).toBe(false);
+        expect(lineFor({ ordersMovable: false }).draggable).toBe(false);
+    });
+
+    it('can be dragged where the account said so', () => {
+        expect(lineFor({ ordersMovable: true }).draggable).toBe(true);
+    });
+
+    it('always carries the ✕, because every account here can cancel', () => {
+        expect(lineFor().action).toBe('close');
+        expect(lineFor({ ordersMovable: true }).action).toBe('close');
+    });
+
+    it('says which way it goes and how big, not just what kind it is', () => {
+        // Three resting orders are told apart by their sizes; "limit" is true of all three.
+        expect(lineFor({ orders: [order({ size: 3 })] }).title).toBe('limit  3');
+    });
+
+    it('falls back to the side where there is no tag and no size', () => {
+        expect(lineFor({ orders: [order({ tag: null })] }).title).toBe('buy');
+    });
+
+    it('is addressed by an id the wiring can read back', () => {
+        expect(readOrderLineId(lineFor().id)).toBe(7);
+        // And a position's own levels are not mistaken for one.
+        expect(readOrderLineId('pos_7_sl')).toBeNull();
     });
 });

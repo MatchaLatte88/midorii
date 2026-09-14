@@ -71,9 +71,10 @@ export class Broker {
    * @param {number} [options.balance=10000]  starting cash, in quote currency
    * @param {object} [options.costs]          overrides for DEFAULT_COSTS
    * @param {'netting'|'hedging'} [options.mode='netting']  see POSITION_MODE
+   * @param {number} [options.pointValue=1]   money per point per unit — see `pointValue`
    */
   constructor(options = {}) {
-    const { balance = 10_000, costs = {}, mode = POSITION_MODE.NETTING } = options;
+    const { balance = 10_000, costs = {}, mode = POSITION_MODE.NETTING, pointValue = 1 } = options;
 
     if (mode !== POSITION_MODE.NETTING && mode !== POSITION_MODE.HEDGING) {
       throw new Error(`Broker: mode must be "netting" or "hedging", got ${JSON.stringify(mode)}`);
@@ -111,6 +112,55 @@ export class Broker {
 
     this.time = null;      // current bar time
     this.lastPrice = null; // last close seen, for mark-to-market
+
+    /**
+     * What one point of price movement is worth, per unit, in account money.
+     *
+     * One for everything this engine was written against — a coin, a share, a CFD unit —
+     * and the contract multiplier on a future: one gold contract moving a point is a hundred
+     * dollars, and an account that booked it as one would state every result, every fee and
+     * every risk a hundred times too small. Every place a price difference or a notional
+     * becomes money multiplies by it; nothing else changes.
+     */
+    this.pointValue = 1;
+    this.setPointValue(pointValue);
+
+    /**
+     * The market's two sides, where a feed states them — null otherwise.
+     *
+     * Only `fillNow` reads it: a market order sent by hand takes the ask or the bid that is
+     * actually there, and pays no simulated spread on top because the quote already is the
+     * spread. Resting orders still fill against bars, which carry one price.
+     */
+    this.quote = null;
+  }
+
+  /**
+   * Change what a point is worth. Refused while anything is open or waiting: those were
+   * sized and priced in the old unit, and restating them in a new one would change what
+   * they had already cost.
+   */
+  setPointValue(value) {
+    if (!Number.isFinite(value) || !(value > 0)) {
+      throw new Error(`Broker: pointValue must be a positive number, got ${value}`);
+    }
+    if (value === this.pointValue) return;
+    if (this.positions.length > 0 || this.pending.length > 0) {
+      throw new Error('Broker: what a point is worth cannot change while something is open or waiting');
+    }
+    this.pointValue = value;
+  }
+
+  /** Set the two sides a market order fills at, or clear them with null. */
+  setQuote(bid, ask) {
+    if (bid == null || ask == null) {
+      this.quote = null;
+      return;
+    }
+    if (!(bid > 0) || !(ask > 0) || ask < bid) {
+      throw new Error(`Broker: a quote needs 0 < bid <= ask, got ${bid} / ${ask}`);
+    }
+    this.quote = { bid, ask };
   }
 
   /* ─── Account ─────────────────────────────────────────────────────────── */
@@ -132,7 +182,7 @@ export class Broker {
     if (this.lastPrice == null) return 0;
     let sum = 0;
     for (const position of this.positions) {
-      sum += (this.lastPrice - position.entryPrice) * position.size;
+      sum += (this.lastPrice - position.entryPrice) * position.size * this.pointValue;
     }
     return sum;
   }
@@ -140,7 +190,7 @@ export class Broker {
   /** What one position is worth right now, marked to the last price. */
   positionPnl(position) {
     if (!position || this.lastPrice == null) return 0;
-    return (this.lastPrice - position.entryPrice) * position.size;
+    return (this.lastPrice - position.entryPrice) * position.size * this.pointValue;
   }
 
   positionById(id) {
@@ -469,8 +519,8 @@ export class Broker {
     // The same fill an exit order would actually get — see _executeOrder.
     const fill = price * (long ? 1 - cost : 1 + cost);
 
-    const gross = (fill - position.entryPrice) * position.size;
-    return gross - position.fees - Math.abs(position.size) * fill * feeRate;
+    const gross = (fill - position.entryPrice) * position.size * this.pointValue;
+    return gross - position.fees - Math.abs(position.size) * fill * feeRate * this.pointValue;
   }
 
   /**
@@ -495,7 +545,8 @@ export class Broker {
     const { feeRate, spreadPct, slippagePct } = this.costs;
     const size = Math.abs(position.size);
 
-    const paid = size > 0 ? position.fees / size : 0;
+    // Fees are money; the level is in points — so what was paid is turned into points first.
+    const paid = size > 0 ? position.fees / (size * this.pointValue) : 0;
     const cost = spreadPct / 2 + slippagePct;
 
     return position.size > 0
@@ -628,6 +679,12 @@ export class Broker {
     if (order.status !== 'pending') {
       throw new Error(`fillNow: this order is already ${order.status}`);
     }
+    /* The side of a stated quote that a market order actually takes, where there is one. */
+    if (this.quote) {
+      const price = order.side === SIDE.BUY ? this.quote.ask : this.quote.bid;
+      this._executeOrder(order, price, { time: this.time }, 'immediate', { quoted: true });
+      return order;
+    }
     if (!Number.isFinite(this.lastPrice)) {
       throw new Error('fillNow: there is no price yet to fill against');
     }
@@ -740,14 +797,15 @@ export class Broker {
     return position.size > 0 ? -price : price;
   }
 
-  _executeOrder(order, rawPrice, step, resolution) {
+  _executeOrder(order, rawPrice, step, resolution, { quoted = false } = {}) {
     const { spreadPct, slippagePct, feeRate } = this.costs;
     const dir = order.side === SIDE.BUY ? 1 : -1;
 
     // Half the spread is paid on every fill; slippage only where the fill is
-    // taken at whatever the market offers.
+    // taken at whatever the market offers. A price taken off a real quote has
+    // the spread in it already.
     const takesLiquidity = order.type === 'market' || order.type === 'stop';
-    const cost = spreadPct / 2 + (takesLiquidity ? slippagePct : 0);
+    const cost = (quoted ? 0 : spreadPct / 2) + (takesLiquidity ? slippagePct : 0);
     const fillPrice = rawPrice * (1 + dir * cost);
 
     let size = order.size;
@@ -762,7 +820,7 @@ export class Broker {
       size = Math.min(size, open);
     }
 
-    const notional = size * fillPrice;
+    const notional = size * fillPrice * this.pointValue;
     const fee = notional * feeRate;
 
     order.status = 'filled';
@@ -988,7 +1046,7 @@ export class Broker {
   /** Books a closed round trip against a position. */
   _recordTrade(position, fill, closing) {
     const closedSize = closing * Math.sign(position.size);
-    const pnl = (fill.price - position.entryPrice) * closedSize;
+    const pnl = (fill.price - position.entryPrice) * closedSize * this.pointValue;
 
     this.balance += pnl;
 
@@ -1010,6 +1068,8 @@ export class Broker {
        * stop was when the trade ended, which for anything managed to
        * break-even is a distance of almost nothing. */
       riskPerUnit: position.riskPerUnit ?? null,
+      /* The unit `riskPerUnit` is in points of, so R can be stated in money terms. */
+      pointValue: this.pointValue,
       exitTag: fill.tag,
     });
 
@@ -1261,6 +1321,7 @@ export class Broker {
       }),
       time: this.time,
       lastPrice: this.lastPrice,
+      pointValue: this.pointValue,
     };
   }
 
@@ -1268,6 +1329,8 @@ export class Broker {
   static restore(data) {
     const broker = new Broker({
       balance: data.initialBalance, costs: data.costs, mode: data.mode,
+      // Absent from anything stored before a point had a value, which is what one meant then.
+      pointValue: data.pointValue ?? 1,
     });
 
     broker.balance = data.balance;

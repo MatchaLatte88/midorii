@@ -46,15 +46,29 @@ const CSS = `
 /** The timeframes a bot may run on. A bot on a one-minute chart rebuilds its detectors
  *  sixty times an hour, which is fine; anything finer is a tick strategy this app has no
  *  data shape for, so it is simply not offered. */
-const TIMEFRAME_OPTIONS = [
+const TIMEFRAME_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
     { value: '1', label: '1 minute' },
+    { value: '2', label: '2 minutes' },
+    { value: '3', label: '3 minutes' },
     { value: '5', label: '5 minutes' },
     { value: '15', label: '15 minutes' },
     { value: '30', label: '30 minutes' },
     { value: '60', label: '1 hour' },
     { value: '240', label: '4 hours' },
+    { value: '480', label: '8 hours' },
     { value: '1D', label: '1 day' },
-] as const;
+];
+
+/** This form's own older wording for the daily bar, still carried by saved bots. The
+ *  venues declare the canonical `D`, so the two have to be spoken to in one spelling. */
+const canonicalTf = (value: string): string => (value === '1D' ? 'D' : value);
+
+/** The provider segment of a market string (`capital:EURUSD` → `capital`), or null when
+ *  it carries none — the same grammar the chart's symbol resolution reads. */
+function venueOf(symbol: string): string | null {
+    const colon = symbol.indexOf(':');
+    return colon > 0 ? symbol.slice(0, colon).trim().toLowerCase() : null;
+}
 
 export interface BotFormOptions {
     /** The bot as it stands. Never mutated — the form works on its own copy. */
@@ -78,6 +92,13 @@ export interface BotFormOptions {
     onResetAccount: () => void;
     /** How many trades the stored account has, so the reset can say what it is filing. */
     accountTrades: number;
+    /**
+     * What a VENUE serves, by the name a market string prefixes itself with — the
+     * providers' own `supportedTimeframes`, so the form narrows its timeframe field to
+     * bars the typed market can actually be fed. A venue absent from the map is taken
+     * to serve everything: the form is not the place to invent a restriction.
+     */
+    venueTimeframes: Readonly<Record<string, readonly string[]>>;
 }
 
 export interface BotForm {
@@ -190,7 +211,9 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
             value: draft.symbol,
             fill: true,
             disabled: readOnly,
-            onChange: (v) => { draft.symbol = v.trim(); markChanged(); },
+            // Repaint: the market decides which timeframes the field below may offer, and
+            // a TextField commits on blur — the focus has already left, so nothing is lost.
+            onChange: (v) => { draft.symbol = v.trim(); markChanged(); paint(); },
         });
         grid.appendChild(fieldRow(
             doc,
@@ -202,7 +225,7 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
         ));
 
         const timeframe = new Select({
-            options: [...TIMEFRAME_OPTIONS],
+            options: timeframeOptions(),
             value: draft.timeframe,
             disabled: readOnly,
             onChange: (v) => { draft.timeframe = v; markChanged(); },
@@ -406,6 +429,25 @@ export function mountBotForm(doc: Document, opts: BotFormOptions): BotForm {
     void window.midori.strategies.load()
         .then((stored) => { storedStrategySettings = stored; })
         .catch((err: unknown) => console.error('[midorii] could not read the strategy settings for the bot form', err));
+
+    /**
+     * The timeframe options for the market currently typed into the form — the venue's
+     * own declaration, not this list in full (Capital.com has no 8-hour bar to give).
+     *
+     * What the bot is SET to always stays in the list. A market can be retyped under a
+     * saved bot, and a field that quietly renamed its own value would be lying about
+     * what the bot runs on; the venue refusing the bars is the honest place to find out.
+     */
+    function timeframeOptions(): Array<{ value: string; label: string }> {
+        const venue = venueOf(draft.symbol);
+        const supported = venue === null ? undefined : opts.venueTimeframes[venue];
+        if (!supported || supported.length === 0) return [...TIMEFRAME_OPTIONS];
+        const offered = new Set(supported);
+        const kept = TIMEFRAME_OPTIONS.filter((o) => offered.has(canonicalTf(o.value)));
+        if (kept.length === 0) return [...TIMEFRAME_OPTIONS];
+        const current = TIMEFRAME_OPTIONS.find((o) => o.value === draft.timeframe);
+        return current && !kept.includes(current) ? [...kept, current] : [...kept];
+    }
 
     /* ── drawing ─────────────────────────────────────────────────────────── */
 

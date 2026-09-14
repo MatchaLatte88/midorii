@@ -128,7 +128,7 @@ Because Hyperliquid coins are bare, a bare `BTC` won't collide with Binance's `B
 
 ## Bringing your own provider
 
-Implement the `DataProvider` interface and register it under any name — see [Adding a data provider](../contributing/adding-a-data-provider.md). The only required method is `getBars`; everything else (`listSymbols`, `getSymbolInfo`, `info`, `subscribe`, `resolveSymbolIcon`) is a progressive enhancement. Symbol icons are the provider's call too: `resolveSymbolIcon(descriptor)` returns the icon URL the shells render in the symbol search, the status line and the object tree (the bundled crypto providers predefine a crypto-icon CDN; no resolver, or no URL, means a colored-initials badge — nothing breaks).
+Implement the `DataProvider` interface and register it under any name — see [Adding a data provider](../contributing/adding-a-data-provider.md). The only required method is `getBars`; everything else (`listSymbols`, `searchSymbols`, `getSymbolInfo`, `info`, `subscribe`, `resolveSymbolIcon`) is a progressive enhancement. Use `searchSymbols(query)` for a catalog that is too large or too fluid to enumerate eagerly. Its results appear in the workspace symbol search and keep their provider-qualified identity, but they do not enter bare-symbol resolution. Symbol icons are the provider's call too: `resolveSymbolIcon(descriptor)` returns the icon URL the shells render in the symbol search, the status line and the object tree (the bundled crypto providers predefine a crypto-icon CDN; no resolver, or no URL, means a colored-initials badge — nothing breaks).
 
 ## See also
 

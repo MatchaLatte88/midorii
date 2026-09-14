@@ -7,7 +7,7 @@ import type { IndicatorModel } from '../model/indicator';
 import type { ValuePatch, SeriesValueDelta } from '../model/patch';
 import { isLineLikeSeries } from '../model/series';
 import type { InputValue } from '../model/inputs';
-import type { VelaTheme, MarketConfig, MarketSwitch, MarketSnapshot, AddIndicatorOptions, PriceStyle, MoveTarget, PaneInfo } from '../options';
+import { DEFAULT_BARS, type VelaTheme, type MarketConfig, type MarketSwitch, type MarketSnapshot, type AddIndicatorOptions, type PriceStyle, type MoveTarget, type PaneInfo } from '../options';
 import type { PaneController } from '../PanesControl';
 import type { PaneAction } from '../ports/IChartRenderer';
 import type { IndicatorHandle } from '../IndicatorHandle';
@@ -432,7 +432,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
 
     private async loadMarketInner(gen: number, opts: { firstLoad: boolean }): Promise<void> {
         const market = this.config.market;
-        const requested = market.bars ?? 500;
+        const requested = market.bars ?? DEFAULT_BARS;
         const initialRange = market.visibleRange;
         // Only a DEEP request is worth splitting, and only when a requested initial window
         // does not pin the frame (a chunked load would paint the wrong range, then jump).
@@ -686,7 +686,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
             // there). Deepening only — the user's own depth is never shrunk.
             if (carried) {
                 const needed = Math.min(Math.ceil((Date.now() - carried.left) / this.barIntervalMs()) + 50, 5000);
-                if (needed > (m.bars ?? 500)) m.bars = needed;
+                if (needed > (m.bars ?? DEFAULT_BARS)) m.bars = needed;
             }
             if (next.data !== undefined) m.data = next.data;
             else if (next.symbol !== undefined) delete m.data; // offline → provider switch
@@ -720,7 +720,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
             // renderer a fresh short head — a shorter, LATER-starting array — which re-frames
             // the viewport and strands every mounted model's anchor behind the new first bar.
             if (depthOnly) {
-                this.extendDepth(gen, m.bars ?? 500);
+                this.extendDepth(gen, m.bars ?? DEFAULT_BARS);
             } else {
                 // Reload through the shared pipeline. The race lets a superseded caller resolve
                 // promptly (e.g. a parked load on an unresolvable symbol) instead of hanging.
@@ -1253,6 +1253,8 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
                 present: present.has(d.type),
                 beta: d.beta,
                 ...(d.multiInstance ? { multiInstance: true } : {}),
+                ...(d.vendor ? { vendor: d.vendor } : {}),
+                ...(d.internal ? { internal: true } : {}),
             })),
         );
     }
@@ -1591,6 +1593,10 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
                 bars: () => this.bars,
                 data: this.dataControl,
                 emit: (out) => this.applyModel(id, this.buildNativeModel(record, out)),
+                emitAlert: (a) => {
+                    this.events.emit('alert', { ...a, indicator: record.title });
+                    handle.emit('alert', { id: a.id, message: a.message, title: a.title, time: a.time });
+                },
                 pushData: (data) => this.renderer.setNativeData?.(record.native!.type, data),
                 setStatus: (status) => {
                     if (record.renderHandle && !record.hidden) this.renderer.setIndicatorStatus?.(record.renderHandle, status);

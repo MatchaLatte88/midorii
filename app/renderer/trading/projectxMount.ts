@@ -11,10 +11,13 @@ import { mountTradeSidebar } from '../replay/tradeSidebar';
 import { mountQuickPanel } from '../replay/quickPanel';
 import type { ProjectXController } from './ProjectXController';
 import type { PaperSettings } from './paperSettings';
-import { bracketsOf, limitsOf, riskOf } from './paperSettings';
-import { limitRefusal, sessionState } from './riskLimits';
+import { bracketsOf, riskOf } from './paperSettings';
+import { sessionState } from './riskLimits';
+import { flattenAll, wireProp } from './propBand';
 import { mountAccountBand } from './accountBand';
 import { installTradeHotkeys, loadHotkeys } from './hotkeys';
+import { historyStats } from './accountStats';
+import { wirePositionStyle } from './positionStyleSettings';
 
 /**
  * A ProjectX account, put on the chart and taken off again.
@@ -47,6 +50,9 @@ export interface ProjectXMountOptions {
     stack: HTMLElement;
     main: HTMLElement;
     controller: ProjectXController;
+    /** Which account this is, as the trade menu keys it — `projectx:1234`. The limits and the
+     *  trailing mark are kept under it, so each account carries its own. */
+    accountKey: string;
     settings: () => PaperSettings;
     onSettings: (next: PaperSettings) => void;
     theme: ThemeName | VelaTheme;
@@ -71,10 +77,29 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
     registerTradeIndicator();
     const indicator = chart.addNativeIndicator(TRADE_INDICATOR_TYPE);
     controller.attachIndicator(indicator);
+    // How positions are drawn, and the Trading tab in the chart settings that says so.
+    off.push(wirePositionStyle({ workspace: ws, indicator }).dispose);
 
+    /* This account's own limits: the floor under it, its daily limit, its goal — and the
+     * figures for the band. Kept under the account's key, so the evaluation and the funded
+     * account beside it do not share one set of numbers. See propBand.ts. */
+    const prop = wireProp({
+        account: opts.accountKey,
+        name: controller.accountName,
+        host: ws.root,
+        currency: () => 'USD',
+        equity: () => controller.equity(),
+        /* The gateway states no unrealized figure on a position; the controller computes it,
+         * and it is what makes the daily limit count the trade that is still open. */
+        openPnl: () => controller.positions().reduce((sum, p) => sum + p.unrealized, 0),
+        history: () => controller.history(),
+        flatten: () => flattenAll(controller),
+        notify: (message, kind) => ws.toast(message, kind),
+        onChange: () => paint(),
+    });
 
     /**
-     * The session limits, applied at the one place every way in passes through.
+     * The limits, applied at the one place every way in passes through.
      *
      * Three gestures place an order here — the ticket, the quick panel and a block traded on
      * the plot — and each of them calls this rather than carrying its own copy of the rule.
@@ -82,16 +107,18 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
      * refusal does.
      */
     const guardLimits = (spec: { side: 'buy' | 'sell'; size: number }): void => {
-        const refusal = limitRefusal(
-            limitsOf(opts.settings()),
-            sessionState(controller.history()),
-            {
-                net: controller.positions().reduce((sum, p) => sum + p.size, 0),
-                side: spec.side,
-                size: spec.size,
-            },
-        );
-        if (refusal) throw new Error(refusal);
+        prop.guard({
+            net: controller.positions().reduce((sum, p) => sum + p.size, 0),
+            side: spec.side,
+            size: spec.size,
+        });
+    };
+
+    /* A reverse leaves the size where it was, so the guard above would wave it through — but it
+     * ends one trade and opens another, and a session that may not open trades may not do that. */
+    const guardReverse = (id: number): void => {
+        const held = controller.positions().find((p) => p.id === id)?.size ?? 0;
+        prop.guard({ net: 0, side: held > 0 ? 'sell' : 'buy', size: Math.abs(held) });
     };
 
     const sidebar = mountTradeSidebar(opts.main, {
@@ -152,6 +179,13 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
 
     const dock = mountTradeDock(opts.stack, {
         closePosition: (id) => guarded(ws, () => controller.closeOne(id)),
+        closePart: (size, id) => guarded(ws, () => controller.closePart(size, id)),
+        reverse: (id) => guarded(ws, () => { guardReverse(id); controller.reverse(id); }),
+        breakEven: (id) => guarded(ws, () => {
+            controller.breakEven(id);
+            ws.toast('Stop moved to the entry.', 'info');
+        }),
+        setTrailing: (distance, id) => guarded(ws, () => controller.setTrailing(distance, id)),
         protect: (levels, id) => guarded(ws, () => controller.protect(levels, id)),
         cancelOrder: (id) => guarded(ws, () => controller.cancelOrder(id)),
         cancelAll: () => guarded(ws, () => controller.cancelAll()),
@@ -246,8 +280,10 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
                 },
                 optional: true,
             },
+            ...prop.columns,
         ],
         actions: [
+            prop.action,
             {
                 id: 'break-even',
                 label: 'Break-even',
@@ -298,10 +334,17 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
         : null;
     off.push(() => quick?.destroy());
 
-    const paint = (): void => {
-        dock.render(controller.book());
+    function paint(): void {
+        /* One reading, at the top, for everything below it: the band's figures and anything the
+         * breach does are then the same answer rather than two walks of the same history. */
+        prop.read();
+        // The account line, from the closed trades the gateway reports — see accountStats.ts.
+        dock.render(controller.book(), { stats: historyStats(controller.history(), controller.available()) });
         band?.refresh();
-    };
+        /* Last, so whatever is about to be closed was on the screen first. Does nothing unless
+         * this account is set to close out on a breach. */
+        prop.enforce();
+    }
 
     /* The keys. Every one of them is a button that is already on this screen — see hotkeys.ts
      * for why the two entry keys go through the panel rather than building an order. */

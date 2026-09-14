@@ -2,7 +2,6 @@ import { injectStyles } from '../../../src/ui';
 import { formatMoney, formatPercent, formatSignedMoney, formatSize } from '../format';
 import type { AccountFigures } from './accountFigures';
 import { makeOverlayCard } from './overlayCards';
-import { loadOverlayDisplay, onOverlayDisplayChange } from './overlayDisplay';
 
 /**
  * The account, on the chart, for as long as a session runs.
@@ -193,13 +192,10 @@ export function mountAccountStrip(cell: HTMLElement, opts: AccountStripOptions):
     cell.appendChild(el);
 
     const card = makeOverlayCard(cell, el, { id: 'account' });
-    card.setAvailable(loadOverlayDisplay().showAccount);
-    const stopWatching = onOverlayDisplayChange((display) => card.setAvailable(display.showAccount));
 
     return {
         el,
         destroy(): void {
-            stopWatching();
             card.destroy();
         },
         update(f: AccountFigures): void {

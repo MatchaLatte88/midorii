@@ -30,7 +30,7 @@ import type { RendererDisplayOptions, NativeBackend, PriceStyle, MoveTarget, The
 import type { Unsubscribe } from '../../core/util/types';
 import { isLineLikeSeries } from '../../core/model/series';
 import { InputsUI, type LegendPlotValue } from '../shared/InputsUI';
-import { PaneControls } from './chrome/PaneControls';
+import { PaneControls, PANE_CONTROLS_CORNER } from './chrome/PaneControls';
 import { AxisScaleButtons, type AxisScaleView } from './chrome/AxisScaleButtons';
 import { NATIVE_CAPABILITIES, supportsWebGL2 } from './capabilities';
 import { WebGL2Backend } from './backend/WebGL2Backend';
@@ -1744,6 +1744,7 @@ export class NativeRenderer implements IChartRenderer {
         this.mountContainer?.style.removeProperty('--vela-bottom-gutter');
         this.mountContainer?.style.removeProperty('--vela-price-pane-top');
         this.mountContainer?.style.removeProperty('--vela-price-pane-bottom');
+        this.mountContainer?.style.removeProperty('--vela-pane-controls-width');
         this.mountContainer = null;
         this.wrapper?.remove();
     }
@@ -2298,6 +2299,7 @@ export class NativeRenderer implements IChartRenderer {
         // Hover clusters need a cursor — mobile suppresses them (collapsed panes keep
         // their expand chips; the shell's own chrome covers pane/chart maximize).
         this.paneControls?.setSuspended(mode === 'mobile');
+        this.publishPricePaneBounds(); // the corner the clusters claim goes with them
         if (this.scrollButton) {
             // A finger needs a larger target than a cursor.
             const px = mode === 'mobile' ? SCROLL_BTN_SIZE_TOUCH : SCROLL_BTN_SIZE;
@@ -3874,6 +3876,12 @@ export class NativeRenderer implements IChartRenderer {
         const bottom = Math.max(0, plotH - (top + height));
         this.mountContainer.style.setProperty('--vela-price-pane-top', `${top}px`);
         this.mountContainer.style.setProperty('--vela-price-pane-bottom', `${bottom}px`);
+        // The corner the price pane's hover cluster claims, as `--vela-pane-controls-width`:
+        // its maximize exists only once there is a second pane, and mobile suppresses the
+        // clusters. Host chrome in that corner reads it to sit against the axis while the
+        // spot is free, and to step aside once it is not.
+        const controls = this.layoutMode !== 'mobile' && this.scene.orderedPanes().length > 1 ? PANE_CONTROLS_CORNER : 0;
+        this.mountContainer.style.setProperty('--vela-pane-controls-width', `${controls}px`);
     }
 
     /** The built-in mark, or the host's own when one is set. */

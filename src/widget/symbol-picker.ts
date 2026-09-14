@@ -275,11 +275,14 @@ export interface SymbolPickerOptions {
     /** The row's icon URL — routed to the descriptor's OWNING provider
      *  (`resolveSymbolIcon`). Absent or `undefined` per row ⇒ the initials badge. */
     iconFor?: (d: SymbolDescriptor) => string | undefined;
+    /** Optional on-demand catalog search, scoped to the provider filter currently in force. */
+    search?: (query: string, providers: readonly string[] | null) => Promise<readonly SymbolDescriptor[]>;
 }
 
 /** Rows rendered per page — the list GROWS by this much every time the scroll nears the
  *  bottom, so a 13k-symbol venue browses whole without ever rendering 13k rows up front. */
 const PAGE = 100;
+const SEARCH_DELAY_MS = 250;
 
 export class SymbolPicker {
     private readonly dialog: Dialog;
@@ -309,6 +312,10 @@ export class SymbolPicker {
     /** The ranked pool cache — `key` fingerprints the raw pool the ranking ran on. */
     private ranked: { key: string; result: SymbolDescriptor[] } | null = null;
     private ranking = false;
+    private remote: SymbolDescriptor[] = [];
+    private searchTimer: ReturnType<typeof setTimeout> | null = null;
+    private searchRevision = 0;
+    private searching = false;
 
     constructor(private readonly opts: SymbolPickerOptions) {
         const doc = (opts.host ?? document.body).ownerDocument;
@@ -338,6 +345,7 @@ export class SymbolPicker {
             onSelect: (id) => {
                 this.activeProvider = id === 'all' ? null : id;
                 this.renderProviderButton();
+                this.scheduleSearch();
                 this.refresh();
             },
         });
@@ -383,6 +391,7 @@ export class SymbolPicker {
                 if (open) {
                     this.input.value = this.seed.toUpperCase();
                     this.seed = '';
+                    this.scheduleSearch();
                     this.refresh();
                     // Focus after the machine settles its own focus management.
                     setTimeout(() => {
@@ -393,6 +402,7 @@ export class SymbolPicker {
                     // Every close path (pick, Escape, X, outside tap) — a field still
                     // focused when it leaves the screen keeps iOS's focus-zoom alive.
                     this.input.blur();
+                    this.cancelSearch();
                     // Still pending here means nothing was picked (`select` settles it first).
                     const dismissed = this.request;
                     this.request = null;
@@ -410,6 +420,7 @@ export class SymbolPicker {
                 this.input.value = next;
                 if (start != null && end != null) this.input.setSelectionRange(start, end);
             }
+            this.scheduleSearch();
             this.refresh();
         });
         this.input.addEventListener('keydown', (e) => {
@@ -448,6 +459,8 @@ export class SymbolPicker {
     setScope(providers: readonly string[] | null): void {
         this.scope = providers ? [...providers] : null;
         this.ranked = null;
+        this.remote = [];
+        if (this.dialog.open) this.scheduleSearch();
     }
 
     open(initialQuery = ''): void {
@@ -468,6 +481,7 @@ export class SymbolPicker {
             this.ranked = null;
             if (this.dialog.open) {
                 this.clampProvider();
+                this.scheduleSearch();
                 this.refresh();
             } else {
                 this.open(opts.query ?? '');
@@ -480,6 +494,7 @@ export class SymbolPicker {
     }
 
     destroy(): void {
+        this.cancelSearch();
         this.providerMenu.destroy();
         this.dialog.destroy();
     }
@@ -574,7 +589,7 @@ export class SymbolPicker {
      *  keystroke; an async hook resolves onto the next repaint (stale-while-revalidate
      *  in between, the raw pool before the first resolve). */
     private pool(): readonly SymbolDescriptor[] {
-        const raw = scopeSymbols(this.source(), this.effectiveScope());
+        const raw = scopeSymbols(dedupeSymbols([...this.source(), ...this.remote]), this.effectiveScope());
         const hook = symbolRanking();
         if (!hook) return raw;
         const key = `${raw.length}:${raw[0]?.ticker ?? ''}:${raw[raw.length - 1]?.ticker ?? ''}`;
@@ -638,12 +653,51 @@ export class SymbolPicker {
         if (!this.rows.length) {
             const empty = doc.createElement('div');
             empty.className = 'vela-sp-empty';
-            empty.textContent = this.input.value ? 'No symbols match.' : 'No symbols indexed (provider still loading?).';
+            empty.textContent = this.searching
+                ? 'Searching…'
+                : this.input.value ? 'No symbols match.' : 'No symbols indexed (provider still loading?).';
             this.list.appendChild(empty);
             return;
         }
         this.rows.forEach((s, i) => this.list.appendChild(this.rowEl(s, i)));
         this.renderHighlight();
+    }
+
+    /** Debounce remote catalogs and discard results from an older query or provider scope. */
+    private scheduleSearch(): void {
+        this.cancelSearch();
+        this.remote = [];
+        this.ranked = null;
+        const query = this.input.value.trim();
+        if (!this.opts.search || !query) return;
+        this.searching = true;
+        const revision = this.searchRevision;
+        const scope = this.activeProvider ? [this.activeProvider] : this.effectiveScope();
+        this.searchTimer = setTimeout(() => {
+            this.searchTimer = null;
+            void this.opts.search!(query, scope)
+                .then((symbols) => {
+                    if (revision !== this.searchRevision) return;
+                    this.remote = dedupeSymbols(symbols);
+                })
+                .catch(() => {
+                    if (revision === this.searchRevision) this.remote = [];
+                })
+                .finally(() => {
+                    if (revision !== this.searchRevision) return;
+                    this.searching = false;
+                    this.ranked = null;
+                    this.refresh();
+                });
+        }, SEARCH_DELAY_MS);
+    }
+
+    private cancelSearch(): void {
+        this.searchRevision += 1;
+        this.searching = false;
+        if (!this.searchTimer) return;
+        clearTimeout(this.searchTimer);
+        this.searchTimer = null;
     }
 
     /** Append the page the grown `visible` just uncovered — rows already on screen stay put. */

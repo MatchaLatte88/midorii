@@ -177,6 +177,21 @@ export class ReplaySession {
     let bar;
     let steps = subBars;
 
+    if (finishing && this.forming.ticked) {
+      /* Built from recorded prints: every one of them has already been matched against the
+       * book as it happened (see `advanceTicks`). Matching the finished bar again would fill
+       * an order a second time against prices that have been and gone — so the candle is
+       * swapped for the whole one and the account is left as the prints left it. */
+      bar = this.forming.full;
+      this.bars = [...this.bars];
+      this.bars[this.index] = bar;
+      this.forming = null;
+      this.clock = bar.time + this.stepMs;
+      this.steps += 1;
+      this._recordEquity(bar.time);
+      return bar;
+    }
+
     if (finishing) {
       bar = this.forming.full;
       this.bars = [...this.bars];
@@ -206,6 +221,129 @@ export class ReplaySession {
 
     this._recordEquity(bar.time);
     return bar;
+  }
+
+  /**
+   * Plays recorded prints and quotes up to `until`, inside the bars.
+   *
+   * What a bar replay cannot do: the minute is not one step but the prints that made it, in
+   * the order they happened. Every print is matched against the book the moment it prints —
+   * a limit fills when the market trades through it, a stop when it is hit — and the candle
+   * under the playhead is built from the prints as they arrive, so the chart never shows a
+   * price that has not happened yet. Quotes set the bid and ask a market order is filled at.
+   *
+   * The same account comes out however the stretch is cut: playing to 10:30 and then to 10:31
+   * is playing to 10:31. That is what lets a replay be rebuilt to any instant (see the replay
+   * journal), and it is why nothing here depends on how often it is called.
+   *
+   * A bar with no recorded prints in it — a gap in the recording, or candles from an archive
+   * the recording does not cover — is stepped whole, exactly as a bar replay would step it, so
+   * an order resting through an unrecorded stretch is still matched against it.
+   *
+   * @param {Array<Array>} events  ascending by time; `[t, 1, price, volume, side]` or
+   *   `[t, 2, bid, ask, last]`. Only those in [clock, until) are played.
+   * @param {number} until  where to leave the clock
+   * @returns {{ closed: object[], prints: Array<Array> }} the bars that finished on the way,
+   *   oldest first, and the prints that were played
+   */
+  advanceTicks(events, until) {
+    const closed = [];
+    const prints = [];
+    if (!(until > this.clock)) return { closed, prints };
+
+    /* Compared with where the clock stood when this call began, not with where it has got to:
+     * the clock moves to just after each event, and several events share a millisecond. */
+    const from = this.clock;
+    for (const event of events) {
+      const time = event[0];
+      if (time < from) continue;
+      if (time >= until) break;
+
+      this._closeBarsBy(time + 1, closed);
+
+      if (event[1] === 2) {
+        const [, , bid, ask] = event;
+        if (bid > 0 && ask > 0 && ask >= bid) {
+          this.broker.setQuote(bid, ask);
+          this.quoteTime = time;
+        }
+      } else if (event[1] === 1) {
+        const [, , price, volume] = event;
+        if (price > 0) {
+          this._dropStaleQuote(time);
+          this._foldPrint(time, price, volume > 0 ? volume : 0);
+          /* The step is the move FROM the last print TO this one, not a point at this price.
+           * As a point, a buy limit at 100 that the market went through from 100.25 to 99.75
+           * would be filled at 99.75 — better than the limit, which no book gives. As a move
+           * it is filled at 100, where it rested. A stop the move goes through fills at its
+           * level, with the slippage the costs charge a stop for taking liquidity.
+           *
+           * What this does not model is the queue: a limit fills when a print reaches its
+           * price, whether or not the orders ahead of it at that price would have been filled
+           * first. At the very top or bottom of a move that flatters a resting limit. */
+          const last = Number.isFinite(this.broker.lastPrice) ? this.broker.lastPrice : price;
+          const step = { time, open: last, high: Math.max(last, price), low: Math.min(last, price), close: price };
+          this.broker.processBar(step, null);
+          prints.push(event);
+        }
+      }
+      this.clock = time + 1;
+    }
+
+    this._closeBarsBy(until, closed);
+    this.clock = Math.max(this.clock, until);
+    this._dropStaleQuote(this.clock);
+    return { closed, prints };
+  }
+
+  /**
+   * Finishes every bar that has ended by `clock`, in order: a forming one by its prints, one
+   * with none played in it as a whole step.
+   */
+  _closeBarsBy(clock, closed) {
+    for (;;) {
+      const forming = this.forming !== null && this.forming.index === this.index;
+      const next = forming ? this.forming.full : this.bars[this.index + 1];
+      if (!next || next.time + this.stepMs > clock) return;
+      closed.push(this.step());
+    }
+  }
+
+  /** Puts a print into the bar it belongs to, starting that bar where it is the first. */
+  _foldPrint(time, price, volume) {
+    if (this.forming !== null && this.forming.index === this.index) {
+      const bar = this.bars[this.index];
+      if (time >= bar.time && time < bar.time + this.stepMs) {
+        this.bars[this.index] = {
+          ...bar,
+          high: Math.max(bar.high, price),
+          low: Math.min(bar.low, price),
+          close: price,
+          volume: (bar.volume ?? 0) + volume,
+        };
+        this.forming.ticked = true;
+        return;
+      }
+    }
+    const next = this.bars[this.index + 1];
+    /* A print the bars have no candle for — the archive is missing that minute. It still
+     * trades against the book; there is simply no candle to draw it in. */
+    if (!next || time < next.time || time >= next.time + this.stepMs) return;
+    this.bars = [...this.bars];
+    this.index += 1;
+    this.forming = { index: this.index, full: next, ticked: true };
+    this.bars[this.index] = { time: next.time, open: price, high: price, low: price, close: price, volume };
+  }
+
+  /**
+   * Forgets a quote that has not been refreshed for five seconds, so a market order fills at
+   * the last print rather than at a bid and ask the market has left behind — the same rule the
+   * paper account follows on a live feed.
+   */
+  _dropStaleQuote(time) {
+    if (this.broker.quote && time - (this.quoteTime ?? -Infinity) > 5_000) {
+      this.broker.setQuote(null, null);
+    }
   }
 
   /**

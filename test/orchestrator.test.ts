@@ -510,6 +510,55 @@ describe('EngineOrchestrator', () => {
         }
     });
 
+    it('routes a native indicator alert through both the chart and its handle', async () => {
+        class AlertNative implements NativeIndicator {
+            private ctx: NativeIndicatorContext | null = null;
+            start(ctx: NativeIndicatorContext): void { this.ctx = ctx; ctx.emit({}); }
+            onBars(): void {}
+            onViewport(): void {}
+            setInputs(): void {}
+            suspend(): void {}
+            resume(): void {}
+            stop(): void { this.ctx = null; }
+            fire(): void {
+                this.ctx?.emitAlert?.({
+                    id: 'native-break', title: 'Break', message: 'Channel broke.', time: 123, barIndex: 7,
+                });
+            }
+        }
+        let alertNative: AlertNative;
+        const descriptor: NativeIndicatorDescriptor = {
+            type: 'test-native-alert', title: 'Alert Native', paneHint: 'price', overlay: true,
+            inputsSchema: () => [], defaultInputs: () => ({}),
+            create: () => (alertNative = new AlertNative()),
+        };
+        registerNativeIndicator(descriptor);
+        try {
+            const chartEvents: unknown[] = [];
+            const handleEvents: unknown[] = [];
+            const chart = new Vela({} as unknown as HTMLElement, { live: false, volume: false }, {
+                renderer: new FakeRenderer(), engines: [], dataFeed: new MockDataFeed(),
+            });
+            chart.on('alert', (alert) => chartEvents.push(alert));
+            const handle = chart.addNativeIndicator('test-native-alert');
+            handle.on('alert', (alert) => handleEvents.push(alert));
+            await chart.ready();
+            await flush();
+
+            alertNative!.fire();
+            expect(chartEvents).toEqual([{
+                id: 'native-break', title: 'Break', message: 'Channel broke.', time: 123,
+                barIndex: 7, indicator: 'Alert Native',
+            }]);
+            expect(handleEvents).toEqual([{
+                id: 'native-break', title: 'Break', message: 'Channel broke.', time: 123,
+            }]);
+            chart.destroy();
+        } finally {
+            unregisterNativeIndicator('test-native-alert');
+        }
+    });
+
     it('addNativeIndicator: a multiInstance type creates a fresh instance per add, each mounted and removable on its own', async () => {
         const instances: TestNativeIndicator[] = [];
         const multiDescriptor: NativeIndicatorDescriptor = {

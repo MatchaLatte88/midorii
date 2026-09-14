@@ -246,7 +246,7 @@ Subscribe with `chart.on(event, handler)`; every subscription returns an unsubsc
 | `bar` | the bar (OHLCV) | A live tick — the forming bar updated or a new bar appended. |
 | `viewport:changed` | `{ from, to }` (epoch-ms) | The visible time range moved (pan/zoom/fit) — fires per applied change, not debounced. The seam viewport-sync links between charts build on. |
 | `theme:changed` | the resolved theme object | The app theme changed — `setTheme(...)` or the in-chart settings dialog (Canvas → Theme). Host chrome around the chart (toolbars, panels, page shells) re-skins from the payload. Plot-only cosmetic edits (a `layout.background` set through the config) do **not** fire it. |
-| `alert` | engine alert | A script raised an alert. |
+| `alert` | indicator alert | A script or native indicator raised an alert. |
 | `warning` | engine warning | A script raised a warning. |
 
 ---

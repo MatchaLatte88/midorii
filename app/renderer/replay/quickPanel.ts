@@ -1,6 +1,5 @@
 import { injectStyles } from '../../../src/ui';
 import { makeOverlayCard } from './overlayCards';
-import { loadOverlayDisplay, onOverlayDisplayChange } from './overlayDisplay';
 import { emptyQuick, quickOrder, quickPlan, stepSize } from './quickTrade';
 import type { QuickDraft, QuickProtection } from './quickTrade';
 import type { OrderSpec } from '../../../shared/engine/broker.js';
@@ -306,8 +305,6 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
     /* Mounted whatever the setting says and then hidden, rather than not mounted at all: the
      * switch can be thrown mid-session, and a panel that had to be rebuilt would come back
      * having forgotten both where it was dragged to and the size somebody had typed into it. */
-    card.setAvailable(loadOverlayDisplay().showQuick);
-    const stopWatching = onOverlayDisplayChange((display) => card.setAvailable(display.showQuick));
 
     function refresh(): void {
         const plan = quickPlan(draft, opts.price(), opts.pointValue?.() ?? 1);
@@ -339,7 +336,6 @@ export function mountQuickPanel(cell: HTMLElement, opts: QuickPanelOptions): Qui
         reflow: () => card.reflow(),
         destroy(): void {
             observer?.disconnect();
-            stopWatching();
             card.destroy();
             el.remove();
         },

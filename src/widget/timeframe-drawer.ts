@@ -76,6 +76,8 @@ export class TimeframeDrawer {
     private readonly drawer: Drawer;
     private readonly rangeChips = new Map<string, HTMLButtonElement>();
     private readonly tfChips = new Map<string, HTMLButtonElement>();
+    /** The timeframe chip grid — rebuilt whenever the offered set changes. */
+    private readonly grid: HTMLElement;
 
     constructor(private readonly opts: TimeframeDrawerOptions) {
         const doc = opts.host.ownerDocument;
@@ -104,21 +106,34 @@ export class TimeframeDrawer {
         tfHeading.className = 'vela-tfd-heading';
         tfHeading.textContent = 'Timeframes';
 
-        const grid = doc.createElement('div');
-        grid.className = 'vela-tfd-grid';
-        for (const tf of opts.timeframes) {
+        this.grid = doc.createElement('div');
+        this.grid.className = 'vela-tfd-grid';
+        this.renderTfChips(opts.timeframes);
+
+        this.drawer.body.append(rangeHeading, ranges, tfHeading, this.grid);
+    }
+
+    /** Narrow (or restore) the offered timeframes — what the ACTIVE market's venue can
+     *  serve. Call before {@link TimeframeDrawer.open}; the highlight is re-read there. */
+    setTimeframes(timeframes: readonly string[]): void {
+        this.renderTfChips(timeframes);
+    }
+
+    private renderTfChips(timeframes: readonly string[]): void {
+        const doc = this.grid.ownerDocument;
+        this.tfChips.clear();
+        this.grid.replaceChildren();
+        for (const tf of timeframes) {
             const chip = doc.createElement('button');
             chip.className = 'vela-tfd-chip';
             chip.textContent = timeframeLabel(tf);
             chip.addEventListener('click', () => {
-                opts.onTimeframe(tf);
+                this.opts.onTimeframe(tf);
                 this.drawer.hide();
             });
             this.tfChips.set(tf, chip);
-            grid.appendChild(chip);
+            this.grid.appendChild(chip);
         }
-
-        this.drawer.body.append(rangeHeading, ranges, tfHeading, grid);
     }
 
     open(): void {

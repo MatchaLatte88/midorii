@@ -1,6 +1,6 @@
 {
   "name": "midorii",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Midorii — local backtesting and trading-bot workbench, built on a Vela fork.",
   "license": "Apache-2.0",
   "private": true,
@@ -80,6 +80,7 @@
     "wait-on": "^9.1.0"
   },
   "dependencies": {
+    "@mathieuc/tradingview": "^3.5.2",
     "@zag-js/core": "^1.42.0",
     "@zag-js/dialog": "^1.42.0",
     "@zag-js/dom-query": "^1.42.0",

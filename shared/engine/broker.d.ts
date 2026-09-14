@@ -80,7 +80,7 @@ export interface ProtectionLevels {
 }
 
 export declare class Broker {
-    constructor(options?: { balance?: number; costs?: Costs; mode?: PositionMode });
+    constructor(options?: { balance?: number; costs?: Costs; mode?: PositionMode; pointValue?: number });
 
     readonly mode: PositionMode;
     readonly initialBalance: number;
@@ -93,6 +93,14 @@ export declare class Broker {
     positions: Position[];
     time: number | null;
     lastPrice: number | null;
+    /** Money per point per unit — 1 unless an instrument says otherwise. */
+    readonly pointValue: number;
+    /** The two sides a market order fills at, or null. */
+    readonly quote: { bid: number; ask: number } | null;
+
+    /** Throws while anything is open or waiting. */
+    setPointValue(value: number): void;
+    setQuote(bid: number | null, ask: number | null): void;
 
     get position(): Position | null;
     get equity(): number;
@@ -119,7 +127,7 @@ export declare class Broker {
     breakEven(position: Position): boolean;
     setTrailing(position: Position, distance: number, options?: { activateAt?: number }): void;
 
-    /** Fill a market order immediately at the last price — the manual-replay path only. */
+    /** Fill a market order immediately — at the quote's side where one is set, else the last price. */
     fillNow(order: Order): void;
     /** Match pending orders against a bar; `subBars` (1m) resolve intrabar, else pessimistic. */
     processBar(bar: unknown, subBars?: unknown[] | null): void;

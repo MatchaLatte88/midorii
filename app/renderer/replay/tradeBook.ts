@@ -41,6 +41,8 @@ export interface BookSource {
     pending: readonly BookOrder[];
     /** Nullable, because the engine's own signature is — a row never passes null. */
     positionPnl(position: BookPosition | null): number;
+    /** Money per point per unit. Absent means one. */
+    readonly pointValue?: number;
     exitResult(position: BookPosition, price: number): number;
     breakEvenRefusal(position: BookPosition): string | null;
 }
@@ -99,6 +101,8 @@ export interface ClosedTrade {
     entryTag: string | null;
     exitTag: string | null;
     riskPerUnit: number | null;
+    /** What a point was worth on the account that closed it. Absent on older records. */
+    pointValue?: number;
 }
 
 /** One closed round trip, as a person reads it. */
@@ -135,7 +139,7 @@ export function tradeHistory(trades: readonly ClosedTrade[]): HistoryRow[] {
         netPnl: t.netPnl,
         fees: t.fees,
         // The same R the run library reports afterwards, measured against the same unit.
-        r: rMultiple({ netPnl: t.netPnl, size: t.size, riskPerUnit: t.riskPerUnit }),
+        r: rMultiple({ netPnl: t.netPnl, size: t.size, riskPerUnit: t.riskPerUnit, pointValue: t.pointValue }),
         exitTag: t.exitTag,
     }));
     rows.reverse();
@@ -151,6 +155,8 @@ export interface VenuePosition {
     openedAt: number;
     stopLoss: number | null;
     takeProfit: number | null;
+    /** The stop follows price. Absent on a venue whose stops cannot. */
+    trailing?: boolean;
 }
 
 /** The order fields a venue row reads. */
@@ -169,8 +175,8 @@ export interface VenueOrder {
  *
  * The counterpart of {@link tradeBook} for an account no engine is behind. Three of the row's
  * figures cannot be filled in and are left null rather than invented: R and the stop's result
- * both need the risk a trade OPENED with, which a venue does not record, and a break-even
- * refusal is a thing only an engine has an opinion about. The unrealized figure comes in from
+ * both need the risk a trade OPENED with, which a venue does not record. A break-even refusal
+ * comes from the controller where it has one, and is null otherwise. The unrealized figure comes in from
  * the caller, because where it comes from differs in kind — Capital.com states its own, and
  * a spot balance has none until somebody computes one.
  *
@@ -182,6 +188,8 @@ export function venueBook<P extends VenuePosition>(
     positions: readonly P[],
     orders: readonly VenueOrder[],
     unrealized: (position: P) => number,
+    /** Why break-even is refused for a position — for a venue controller that has a view. */
+    breakEvenRefusal: (position: P) => string | null = () => null,
 ): TradeBook {
     return {
         positions: positions.map((p): PositionRow => ({
@@ -192,12 +200,12 @@ export function venueBook<P extends VenuePosition>(
             openedAt: p.openedAt,
             stopLoss: p.stopLoss,
             takeProfit: p.takeProfit,
-            trailing: false,
+            trailing: p.trailing === true,
             entryTag: null,
             unrealized: unrealized(p),
             r: null,
             stopResult: null,
-            breakEvenRefusal: null,
+            breakEvenRefusal: breakEvenRefusal(p),
         })),
         orders: orders.map((o): OrderRow => ({
             id: o.id,
@@ -226,7 +234,7 @@ export function tradeBook(broker: BookSource): TradeBook {
             entryTag: p.entryTag,
             unrealized,
             // The same R the run library reports afterwards, measured against the same unit.
-            r: rMultiple({ netPnl: unrealized, size, riskPerUnit: p.riskPerUnit }),
+            r: rMultiple({ netPnl: unrealized, size, riskPerUnit: p.riskPerUnit, pointValue: broker.pointValue }),
             stopResult: p.stopLoss == null ? null : broker.exitResult(p, p.stopLoss),
             breakEvenRefusal: broker.breakEvenRefusal(p),
         };

@@ -36,11 +36,14 @@ export interface AppPrefs {
      * from here (see shell/themes).
      */
     style: AppStyle;
+    /** Enables the private, chart-only global data bridge after the next restart. */
+    experimentalMarketFeed: boolean;
 }
 
 export const DEFAULT_PREFS: AppPrefs = {
     startupTab: 'chart',
     style: 'midorii',
+    experimentalMarketFeed: false,
 };
 
 const STORAGE_KEY = 'midorii-prefs';
@@ -52,7 +55,8 @@ export function normalizePrefs(raw: unknown): AppPrefs {
         ? source.startupTab as StartupTab
         : DEFAULT_PREFS.startupTab;
     const style = isAppStyle(source.style) ? source.style : DEFAULT_PREFS.style;
-    return { startupTab, style };
+    const experimentalMarketFeed = source.experimentalMarketFeed === true;
+    return { startupTab, style, experimentalMarketFeed };
 }
 
 /** What this machine last saved, or the defaults. Never throws. */

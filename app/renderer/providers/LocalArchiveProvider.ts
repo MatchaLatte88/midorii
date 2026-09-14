@@ -6,7 +6,7 @@ import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor } fr
  * buckets any whole multiple of them, so this is a menu rather than a limit —
  * a typed `7` or `3h` is served just as well (see barStore.js parseTimeframe).
  */
-const SUPPORTED_TIMEFRAMES = ['1', '3', '5', '15', '30', '60', '120', '240', '360', '720', 'D', 'W', 'M'] as const;
+const SUPPORTED_TIMEFRAMES = ['1', '2', '3', '5', '15', '30', '60', '120', '240', '360', '480', '720', 'D', 'W', 'M'] as const;
 
 /**
  * Bridges Vela's DataProvider port to Midori's local bar store over the

@@ -5,6 +5,7 @@ import { bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPla
 import type { BracketSettings, TicketAccount, TicketDraft, TicketSizing } from './orderTicket';
 import { loadOverlayDisplay, onOverlayDisplayChange, saveOverlayDisplay } from './overlayDisplay';
 import { mountPriceLadder, type LadderOrder, type LadderPosition, type PriceLadder } from './priceLadder';
+import { loadSidebarDisplay, onSidebarDisplayChange } from './sidebarDisplay';
 import { mountTimeAndSales, type TapePrint, type TimeAndSales } from './timeAndSales';
 import { DEFAULT_RISK } from './replayOrders';
 import type { RiskSettings } from './replayOrders';
@@ -500,6 +501,29 @@ ${overlayScrollbarCss('.midorii-side-body')}
     padding: 10px 12px 9px;
     border-bottom: 1px solid var(--vela-border-faint);
 }
+.midorii-side-seg {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--vela-radius-sm);
+    background: var(--vela-surface-sunken);
+}
+.midorii-side-seg button {
+    all: unset;
+    flex: 1 1 0;
+    padding: 5px 0;
+    border-radius: calc(var(--vela-radius-sm) - 1px);
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--vela-fg-muted);
+    cursor: pointer;
+}
+.midorii-side-seg button:hover { color: var(--vela-fg-bright); }
+.midorii-side-seg button[data-on] {
+    background: var(--vela-surface-overlay);
+    color: var(--vela-fg-bright);
+}
 .midorii-side-curve {
     display: block;
     width: 100%;
@@ -639,8 +663,11 @@ export interface TradeSidebarOptions {
      * The tab is offered on that alone — a venue whose feed is candles has no tape to show,
      * and an empty one would be a promise the data cannot keep. Prints arrive through
      * {@link TradeSidebar.pushPrints}.
+     *
+     * A function where the answer can change — an account that moves between markets has a
+     * tape on some of them — and it is then asked again on every repaint.
      */
-    tape?: boolean;
+    tape?: boolean | (() => boolean);
     /**
      * Which way of saying how big the ticket should open on — read once, at mount.
      *
@@ -680,6 +707,8 @@ export interface TradeSidebar {
     markVolume(price: number, volume: number): void;
     /** Hand the tape a burst of prints. Does nothing without one. */
     pushPrints(prints: readonly TapePrint[]): void;
+    /** Forget the ladder's volume and the tape's prints — the market under them has changed. */
+    resetMarket(): void;
     /**
      * Let go of what the panel listens to outside itself — the chart-card switches it mirrors.
      *
@@ -1036,9 +1065,12 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     const tapeTab = tab('tape', 'Tape');
     const historyTab = tab('history', 'History');
     /* Nothing to show without an account that keeps one, so nothing is offered. A tab that is
-     * always there and always empty is a worse answer than no tab. */
-    ladderTab.hidden = opts.ladder == null;
-    tapeTab.hidden = opts.tape !== true;
+     * always there and always empty is a worse answer than no tab. Settings → Trading can take
+     * it away as well — see `sidebarDisplay.ts`. */
+    const ladderOn = (showLadder: boolean): boolean => opts.ladder != null && showLadder;
+    ladderTab.hidden = !ladderOn(loadSidebarDisplay().showLadder);
+    const tapeOn = (): boolean => (typeof opts.tape === 'function' ? opts.tape() : opts.tape === true);
+    tapeTab.hidden = !tapeOn();
     historyTab.hidden = opts.history == null;
 
     const fold = doc.createElement('button');
@@ -1404,16 +1436,27 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
     const tapeHost = doc.createElement('div');
     tapeHost.className = 'midorii-side-ladder';
-    const tape: TimeAndSales | null = opts.tape === true
+    const tape: TimeAndSales | null = opts.tape != null && opts.tape !== false
         ? mountTimeAndSales(tapeHost, { priceText: (price) => formatPrice(price) })
         : null;
 
     el.append(head, rail, quote, types.el, body, ladderHost, tapeHost, hist, foot);
     host.appendChild(el);
 
+    let current: TabName = 'trade';
+
+    /* Thrown while the panel is open: the tab goes at once, and a panel that was showing it
+     * goes back to the ticket rather than keeping a face nobody can reach any more. */
+    const stopWatchingSidebar = onSidebarDisplayChange((display) => {
+        const shown = ladderOn(display.showLadder);
+        ladderTab.hidden = !shown;
+        if (!shown && current === 'ladder') setTab('trade');
+    });
+
     /** Which face is on. The others are hidden rather than unmounted — a ticket half-typed is
      *  not a thing to throw away because the record was glanced at. */
     function setTab(next: TabName): void {
+        current = next;
         for (const [b, name] of [[tradeTab, 'trade'], [ladderTab, 'ladder'], [tapeTab, 'tape'], [historyTab, 'history']] as const) {
             if (name === next) b.dataset.on = '';
             else delete b.dataset.on;
@@ -1617,6 +1660,11 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
     }
 
     function refresh(): void {
+        const hasTape = tapeOn();
+        if (tapeTab.hidden === hasTape) {
+            tapeTab.hidden = !hasTape;
+            if (!hasTape && current === 'tape') setTab('trade');
+        }
         const account = opts.account();
         // The automatic levels first: they write into the draft, and everything below reads it.
         applyAutoBrackets(account);
@@ -1747,6 +1795,10 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
              * the last two hundred prints, not the ones since they looked. */
             tape?.push(prints);
         },
+        resetMarket(): void {
+            ladder?.reset();
+            tape?.clear();
+        },
         submit(which: 'buy' | 'sell'): void {
             /* Pointed first, then sent — the same two steps a press on the quote and then on
              * the button are, in the same order, so the refusal a key runs into is the one
@@ -1757,6 +1809,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         },
         dispose(): void {
             stopWatchingDisplay();
+            stopWatchingSidebar();
             ladder?.destroy();
             tape?.destroy();
         },

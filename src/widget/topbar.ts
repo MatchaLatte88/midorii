@@ -257,6 +257,9 @@ export class Topbar {
     private readonly warnedIconless = new Set<string>();
     private readonly opts: TopbarOptions;
     private timeframe: string;
+    /** The list the dropdown offers. Mutable: the host narrows it to what the market's
+     *  own venue can serve (see {@link Topbar.setTimeframes}). */
+    private timeframes: readonly string[];
     private priceStyle: string;
     private readonly onHairlineSync = (): void => {
         if (this.hairlineRaf) return;
@@ -273,6 +276,7 @@ export class Topbar {
         this.opts = opts;
         this.host = host;
         this.timeframe = opts.timeframe;
+        this.timeframes = opts.timeframes;
         this.priceStyle = opts.priceStyle;
         this.comp = resolveTopbarComposition(opts.composition);
         const vis = (id: string): boolean => topbarHas(this.comp, id);
@@ -484,6 +488,16 @@ export class Topbar {
         this.renderTfChips();
     }
 
+    /** Narrow (or restore) the offered timeframes — what the ACTIVE market's venue can
+     *  actually serve. A starred timeframe the new list drops loses its chip too: a chip
+     *  that loads nothing is worse than no chip. The current value is left alone; the
+     *  caret still names it, unchecked, so a market change never moves the chart. */
+    setTimeframes(timeframes: readonly string[]): void {
+        this.timeframes = timeframes;
+        this.tfMenu.setItems(this.tfItems());
+        this.renderTfChips();
+    }
+
     /** Reflect the favorite-timeframe set — the quick-switch chips and the dropdown stars. */
     setTimeframeFavorites(favs: readonly string[]): void {
         this.tfFavs = [...favs];
@@ -496,7 +510,8 @@ export class Topbar {
         const doc = this.el.ownerDocument;
         this.tfChipsHost.replaceChildren();
         const stars = this.opts.onTimeframeFavorite !== undefined;
-        const chips = stars ? favoriteTimeframeChips(this.tfFavs) : [];
+        const offered = new Set(this.timeframes);
+        const chips = stars ? favoriteTimeframeChips(this.tfFavs.filter((tf) => offered.has(tf))) : [];
         const currentIsFav = chips.includes(this.timeframe);
         // Unstarred current sits next to the caret so the favorite row never jumps.
         const shown = currentIsFav || chips.length === 0 ? chips : [...chips, this.timeframe];
@@ -700,7 +715,7 @@ export class Topbar {
     private tfItems(): MenuItemDescriptor[] {
         // Stars only when the host handles the toggle — a starless dropdown otherwise.
         const stars = this.opts.onTimeframeFavorite !== undefined;
-        return this.opts.timeframes.map((tf) => ({
+        return this.timeframes.map((tf) => ({
             id: tf,
             label: timeframeLabel(tf),
             checked: tf === this.timeframe,

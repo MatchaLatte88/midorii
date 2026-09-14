@@ -113,6 +113,30 @@ export function capitalEnvironment() {
   return { configured: !!creds, env: creds?.env ?? null, live: creds?.env === 'live' };
 }
 
+/**
+ * Move the running session to the other account, on the credentials it is already holding.
+ *
+ * Demo and live are one key against two endpoints, so the switch is not something new to
+ * store: it is the single field in `creds` that decides where every later request goes. What
+ * earns it a function of its own is the ORDER. The other side is tried on a session of its
+ * own first — `capitalProbe` deliberately touches nothing — and only a login that actually
+ * worked is allowed to replace the one this app is running on. A key that turns out not to be
+ * issued for the other side leaves the current account exactly where it was, and the refusal
+ * carries Capital.com's own reason.
+ *
+ * The accounts it reached come back for the same purpose they do after a save: "connected" is
+ * not the fact worth showing, "here is whose money this now is" is.
+ */
+export async function switchCapitalEnvironment(next) {
+  if (!creds) throw new Error('Capital.com is not connected — add the account under Settings → Broker connection.');
+  const env = next === 'live' ? 'live' : 'demo';
+  const accounts = await capitalProbe({ ...creds, env });
+  /* Only an actual change goes through `configureCapital`, which drops the session and the
+   * socket with it. Asked for the account already on, this confirms it and disturbs nothing. */
+  if (creds.env !== env) configureCapital({ ...creds, env });
+  return { env, accounts };
+}
+
 function baseUrl() {
   return creds?.env === 'live' ? LIVE_BASE : DEMO_BASE;
 }

@@ -89,4 +89,20 @@ export class ReplayProvider implements DataProvider {
         this.cutoff = bar.time + timeframeToMs(this.timeframe);
         this.onBarCb?.(bar);
     }
+
+    /**
+     * Draw the candle the playhead is standing inside, as far as it has got — what a tick replay
+     * pushes after every stretch of prints.
+     *
+     * The cutoff moves to the clock rather than to the end of the candle: a reload in the middle
+     * of a candle must not hand back the rest of it. The same bar time sent again is Vela's live
+     * update of the forming candle, so it is redrawn in place.
+     */
+    revealForming(bar: OHLCV, clock: number): void {
+        if (bar.time < this.cutoff - timeframeToMs(this.timeframe)) {
+            throw new Error(`revealForming went backwards: bar ${new Date(bar.time).toISOString()} predates the replay clock`);
+        }
+        this.cutoff = clock;
+        this.onBarCb?.(bar);
+    }
 }

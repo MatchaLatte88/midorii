@@ -259,7 +259,7 @@ describe('placing an order', () => {
 
 describe('sizing for the venue', () => {
     const dealing = { minSize: 1000, sizeIncrement: 100, maxSize: 1_000_000,
-        marginFactor: 3.33, marginFactorUnit: 'PERCENTAGE', minStopDistance: null, maxStopDistance: null, lotSize: 1 };
+        marginFactor: 3.33, marginFactorUnit: 'PERCENTAGE', minStopDistance: null, maxStopDistance: null, lotSize: 1, currency: 'USD' };
 
     it('rounds a risk-derived size onto the venue\'s grid', async () => {
         const { calls } = stubVenue();
@@ -829,5 +829,150 @@ describe('which money a figure is in', () => {
         // different money, and the record has to keep the unit with the number.
         expect(closed[0]!.currency).toBe('USD');
         expect(c.accountCurrency()).toBe('EUR');
+    });
+});
+
+/**
+ * What a point is worth, on a venue that does not simply say.
+ *
+ * It decides every money figure on the ticket — what the stop costs, what the position is
+ * worth, how big the risk buys. One is right for most instruments and wrong for the rest, and
+ * being wrong here is being wrong by a multiple.
+ */
+describe('what a point is worth', () => {
+    /** The account is held in EUR — see `stubVenue`. */
+    const usdRules = { minSize: 1000, sizeIncrement: 100, maxSize: 1_000_000,
+        marginFactor: 3.33, marginFactorUnit: 'PERCENTAGE', minStopDistance: null, maxStopDistance: null,
+        lotSize: 1, currency: 'USD' };
+    const eurRules = { ...usdRules, currency: 'EUR', lotSize: 2 };
+
+    it('says nothing before the account has been read', () => {
+        stubVenue();
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, dealing: eurRules });
+        // Without knowing what the account is held in, the instrument's currency says nothing.
+        expect(c.pointValue()).toBeNull();
+    });
+
+    it('states the lot size where the instrument books in the account\'s own money', async () => {
+        /* Stubbed on the VENUE rather than handed in: a read replaces the dealing rules with
+         * what the venue says, which is the behaviour worth asserting around. */
+        stubVenue({
+            marketInfo: () => Promise.resolve({
+                instrument: { epic: 'EURUSD', name: 'EUR/USD', type: 'CURRENCIES', currency: 'EUR', lotSize: 2 },
+                snapshot: { marketStatus: 'TRADEABLE', bid: 1.0924, offer: 1.0926, decimalPlacesFactor: 5, scalingFactor: 1 },
+            }),
+        });
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, dealing: eurRules });
+        await c.start();
+        expect(c.pointValue()).toBe(2);
+        c.stop();
+    });
+
+    it('refuses to guess where the instrument books in another currency', async () => {
+        stubVenue();
+        // A EUR account on a USD instrument converts at a rate this app is never told; the
+        // lot size alone would be out by that rate, so nothing is claimed.
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, dealing: usdRules });
+        await c.start();
+        expect(c.pointValue()).toBeNull();
+        c.stop();
+    });
+
+    it('learns it exactly from a position that has moved', async () => {
+        /* 1,000 units from 1.09241 against a bid of 1.0924, with the venue calling it 1.5 —
+         * the factor follows, conversion and all, without anybody stating a rate. */
+        stubVenue({ positions: () => Promise.resolve([venuePosition({ upl: 1.5, level: 1.0919, size: 1000 })]) });
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, dealing: usdRules });
+        await c.start();
+        const learned = c.pointValue();
+        expect(learned).not.toBeNull();
+        // The venue's own figure over the distance travelled, times nothing.
+        expect(learned!).toBeCloseTo(1.5 / ((1.0924 - 1.0919) * 1000), 6);
+        c.stop();
+    });
+
+    it('keeps what it learned after the position has gone', async () => {
+        let open = [venuePosition({ upl: 1.5, level: 1.0919, size: 1000 })];
+        stubVenue({ positions: () => Promise.resolve(open) });
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, dealing: usdRules });
+        await c.start();
+        const learned = c.pointValue();
+        expect(learned).not.toBeNull();
+
+        /* The reason this is held per instrument and not per deal: it used to be forgotten the
+         * moment a position closed, so the ticket went back to measuring in points between
+         * trades — which is every moment somebody is deciding on the next one. */
+        open = [];
+        c.refreshVisuals();
+        await settle();
+        expect(c.pointValue()).toBe(learned);
+        c.stop();
+    });
+
+    it('prefers what it measured over what the lot size says', async () => {
+        stubVenue({ positions: () => Promise.resolve([venuePosition({ upl: 1.5, level: 1.0919, size: 1000 })]) });
+        // The rules claim one unit per point; the venue's own arithmetic says otherwise.
+        const c = new CapitalController({ epic: 'EURUSD', notify: noop, dealing: { ...usdRules, currency: 'EUR' } });
+        await c.start();
+        expect(c.pointValue()).not.toBe(1);
+        c.stop();
+    });
+});
+
+describe('trailing and break-even on an open position', () => {
+    async function withPosition(over: Partial<MidoriCapitalPosition['position']> = {}, market = { bid: 1.0924, offer: 1.0925 }) {
+        const n = notify();
+        const row = venuePosition(over);
+        row.market = { ...row.market, ...market };
+        const stub = stubVenue({ positions: () => Promise.resolve([row]) });
+        const c = new CapitalController({ epic: 'EURUSD', notify: n.fn });
+        c.refreshVisuals();
+        await settle();
+        return { c, n, ...stub };
+    }
+    const amends = (calls: Array<{ name: string; arg: unknown }>) => calls.filter((x) => x.name === 'amendPosition').map((x) => x.arg);
+
+    it('trails the stop with a distance, keeping the target', async () => {
+        const { c, calls } = await withPosition({ profitLevel: 1.1 });
+        c.setTrailing(0.002, c.positions()[0]!.id);
+        await settle();
+        expect(amends(calls)).toEqual([{ dealId: 'deal-1', trailingStop: true, stopDistance: 0.002, profitLevel: 1.1 }]);
+        expect(c.positions()[0]!.trailing).toBe(true);
+    });
+
+    it('re-sends the trail when only the target moves, so the amend does not fix the stop', async () => {
+        const { c, calls } = await withPosition();
+        c.setTrailing(0.002, c.positions()[0]!.id);
+        await settle();
+        c.protect({ takeProfit: 1.11 }, c.positions()[0]!.id);
+        await settle();
+        expect(amends(calls)[1]).toEqual({ dealId: 'deal-1', trailingStop: true, stopDistance: 0.002, profitLevel: 1.11 });
+    });
+
+    it('refuses to move the target of a trail whose distance it does not know', async () => {
+        const { c, calls } = await withPosition({ trailingStop: true, stopLevel: 1.09 });
+        expect(() => c.protect({ takeProfit: 1.11 }, c.positions()[0]!.id)).toThrow(/replace the trail with a fixed stop/);
+        expect(amends(calls)).toHaveLength(0);
+    });
+
+    it('fixes a trailing stop at a level set on it, and says so to the venue', async () => {
+        const { c, calls } = await withPosition({ trailingStop: true, stopLevel: 1.09 });
+        c.protect({ stopLoss: 1.091 }, c.positions()[0]!.id);
+        await settle();
+        expect(amends(calls)).toEqual([{ dealId: 'deal-1', stopLevel: 1.091, profitLevel: null, trailingStop: false }]);
+    });
+
+    it('moves the stop to the entry once the closing side of the market is past it', async () => {
+        const { c, calls } = await withPosition({ level: 1.09, profitLevel: 1.1 }, { bid: 1.0924, offer: 1.0925 });
+        expect(c.breakEvenRefusal()).toBeNull();
+        c.breakEven();
+        await settle();
+        expect(amends(calls)).toEqual([{ dealId: 'deal-1', stopLevel: 1.09, profitLevel: 1.1 }]);
+    });
+
+    it('refuses break-even while the closing side is not in profit — a short closes at the ask', async () => {
+        const { c } = await withPosition({ direction: 'SELL', level: 1.0924 }, { bid: 1.0923, offer: 1.0925 });
+        expect(c.breakEvenRefusal()).toMatch(/not in profit/);
+        expect(() => c.breakEven()).toThrow(/not in profit/);
     });
 });

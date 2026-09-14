@@ -3,6 +3,8 @@ import { DEFAULT_PAPER_SETTINGS, needsFreshAccount, type PaperSettings } from '.
 import { normalizeQuickSizes } from '../replay/orderTicket';
 import { TRADE_ACTIONS, formatHotkey, keyOf, loadHotkeys, saveHotkeys, type Hotkey } from './hotkeys';
 import { chimeOn, setChime } from './fillChime';
+import { armPromptOn, setArmPrompt } from './capitalArmDialog';
+import { SETTINGS_CSS, SETTINGS_STYLE_ID, button, note, row, section } from './settingsChrome';
 
 /**
  * What a paper account is, before it has traded anything — and what it costs.
@@ -17,61 +19,6 @@ import { chimeOn, setChime } from './fillChime';
  * Percentages are typed as percentages and stored as fractions. Nobody thinks in
  * 0.0002.
  */
-
-const STYLE_ID = 'midorii-paper-settings';
-const CSS = `
-.midorii-paper-sect {
-    margin: 18px 0 10px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--vela-fg-muted);
-    opacity: 0.85;
-}
-.midorii-paper-sect:first-child { margin-top: 0; }
-.midorii-paper-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 10px;
-    font-size: var(--vela-font-size-md);
-    color: var(--vela-fg);
-}
-.midorii-paper-row > span:first-child { white-space: nowrap; }
-.midorii-paper-pair { display: flex; align-items: center; gap: 6px; }
-.midorii-paper-note {
-    margin: -2px 0 12px;
-    font-size: 11px;
-    line-height: 1.45;
-    color: var(--vela-fg-muted);
-}
-.midorii-paper-warn {
-    margin: 4px 0 0;
-    font-size: 11px;
-    line-height: 1.45;
-    color: var(--vela-danger);
-    min-height: 1.45em;
-}
-.midorii-paper-key {
-    min-width: 10ch;
-    font-family: var(--vela-font-mono);
-    font-size: 11px;
-}
-.midorii-paper-key[data-listening='1'] {
-    border-color: var(--vela-accent);
-    color: var(--vela-accent);
-}
-/* Only the danger tone is this dialog's own — the plain and primary shapes are the kit's
-   footer buttons, which every other dialog in the app now wears. */
-.vela-dialog-btn[data-tone='danger'] { color: var(--vela-danger); }
-.vela-dialog-btn[data-tone='danger']:hover {
-    border-color: var(--vela-danger-line);
-    background: var(--vela-danger-soft);
-    color: var(--vela-danger);
-}
-`;
 
 /** What the dialog resolves with — the settings to apply, or nothing at all. */
 export interface PaperSettingsResult {
@@ -88,29 +35,6 @@ export interface PaperSettingsDialogOptions {
     /** Offered as its own button — starting over on purpose, rather than as a side
      *  effect of a changed number. Absent ⇒ no such button. */
     onResetAccount?: () => void;
-}
-
-function row(label: string, control: HTMLElement, doc: Document): HTMLElement {
-    const el = doc.createElement('label');
-    el.className = 'midorii-paper-row';
-    const text = doc.createElement('span');
-    text.textContent = label;
-    el.append(text, control);
-    return el;
-}
-
-function note(text: string, doc: Document): HTMLElement {
-    const el = doc.createElement('p');
-    el.className = 'midorii-paper-note';
-    el.textContent = text;
-    return el;
-}
-
-function section(text: string, doc: Document): HTMLElement {
-    const el = doc.createElement('div');
-    el.className = 'midorii-paper-sect';
-    el.textContent = text;
-    return el;
 }
 
 /**
@@ -172,14 +96,6 @@ function hotkeyRow(
     return row(label, capture, doc);
 }
 
-function button(text: string, doc: Document, primary = false): HTMLButtonElement {
-    const b = doc.createElement('button');
-    b.type = 'button';
-    b.className = primary ? 'vela-dialog-btn vela-dialog-btn-primary' : 'vela-dialog-btn';
-    b.textContent = text;
-    return b;
-}
-
 /** A percentage field over a fraction: typed as 0.1, stored as 0.001. */
 function percentField(value: number, step: number, onChange: (fraction: number) => void): NumberInput {
     return new NumberInput({
@@ -205,7 +121,7 @@ export async function openPaperSettings(
     opts: PaperSettingsDialogOptions,
 ): Promise<PaperSettingsResult | null> {
     const doc = host.ownerDocument;
-    injectStyles(STYLE_ID, CSS, doc);
+    injectStyles(SETTINGS_STYLE_ID, SETTINGS_CSS, doc);
 
     return new Promise<PaperSettingsResult | null>((resolve) => {
         const original = opts.settings;
@@ -309,19 +225,7 @@ export async function openPaperSettings(
         /* Stored on the flip, like the keys and for the same reason: it describes this machine,
          * and a preference lost to an Escape is a preference somebody set twice. */
         const fillSound = new Switch({ checked: chimeOn(), onChange: (on) => setChime(on) });
-
-        const dailyLoss = new NumberInput({
-            value: draft.dailyLossLimit, min: 0, max: 1e9, step: 50, size: 'sm', fill: false,
-            onChange: (v) => { draft.dailyLossLimit = v; },
-        });
-        const maxPosition = new NumberInput({
-            value: draft.maxPositionSize, min: 0, max: 1e9, step: 1, size: 'sm', fill: false,
-            onChange: (v) => { draft.maxPositionSize = v; },
-        });
-        const lossStreak = new NumberInput({
-            value: draft.lossStreakLimit, min: 0, max: 100, step: 1, size: 'sm', fill: false,
-            onChange: (v) => { draft.lossStreakLimit = v; },
-        });
+        const armPrompt = new Switch({ checked: armPromptOn(), onChange: (on) => setArmPrompt(on) });
 
         const bracketStopRow = row('Stop distance', bracketStop.el, doc);
         const bracketTargetRow = row('Target distance', bracketTarget.el, doc);
@@ -414,21 +318,12 @@ export async function openPaperSettings(
 
                     section('Session limits', doc),
                     note(
-                        'What stops a session rather than what sizes a trade. Zero is off, and all three '
-                        + 'start off. A session runs from 17:00 New York to the next — the futures day, not '
-                        + 'the calendar one — and only orders that would ADD to a position are refused: '
-                        + 'closing what is open always works.',
+                        'The limits that stop a session, and the floor under the account, belong to '
+                        + 'the account rather than to the app: a funded account and the evaluation '
+                        + 'beside it carry different numbers from the same firm. They are set from '
+                        + 'Limits on the account band, on the chart that account is armed on.',
                         doc,
                     ),
-                    note(
-                        'This is Midorii\'s own guard, not your firm\'s. It cannot see trades placed on '
-                        + 'their platform and does not know their threshold, so treat a refusal here as a '
-                        + 'warning that came early, never as proof the account is still within its rules.',
-                        doc,
-                    ),
-                    row('Loss limit per session', dailyLoss.el, doc),
-                    row('Most that may be held at once', maxPosition.el, doc),
-                    row('Stop after this many losses in a row', lossStreak.el, doc),
 
                     section('Keys', doc),
                     note(
@@ -446,6 +341,7 @@ export async function openPaperSettings(
                     )),
 
                     row('A fill makes a sound', fillSound.el, doc),
+                    row('Ask before trading a demo or live account', armPrompt.el, doc),
 
                     section('Quick sizes', doc),
                     note(

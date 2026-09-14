@@ -160,7 +160,7 @@ describe('ProjectX bars', () => {
     it('refuses a timeframe the gateway does not serve instead of sending a guess', async () => {
         const api = bridge();
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        expect(await new ProjectXProvider().getBars('NQ', '3', {})).toEqual([]);
+        expect(await new ProjectXProvider().getBars('NQ', '120', {})).toEqual([]);
         expect(api.bars).not.toHaveBeenCalled();
         expect(warn).toHaveBeenCalled();
     });

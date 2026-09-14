@@ -231,22 +231,47 @@ export interface AccountBand {
     destroy(): void;
 }
 
-/** Which columns this machine wants, or null where it has never said. */
-function loadChosen(key: string): string[] | null {
+/**
+ * What this machine wants on the band, and which columns it was ever offered.
+ *
+ * Both halves are needed to tell a column somebody TURNED OFF from one this version has that
+ * their stored answer predates. Without the second, a figure added later is invisible to
+ * everybody who had ever opened the picker — and a floor under an account is the last figure
+ * that should be quietly missing.
+ *
+ * A record written before this was recorded is a bare array of what was on. Read as having
+ * been offered exactly that, so anything since is new: a non-optional column that somebody had
+ * deliberately switched off back then comes back once. That is the one-time cost of not having
+ * written down the difference at the time, and it is the harmless direction.
+ */
+interface BandChoice {
+    on: string[];
+    known: string[];
+}
+
+function loadChosen(key: string): BandChoice | null {
     try {
         const raw = localStorage.getItem(key);
         if (raw == null) return null;
-        const list = JSON.parse(raw) as unknown;
-        return Array.isArray(list) ? list.filter((id): id is string => typeof id === 'string') : null;
+        const stored = JSON.parse(raw) as unknown;
+        const ids = (list: unknown): string[] => (Array.isArray(list)
+            ? list.filter((id): id is string => typeof id === 'string')
+            : []);
+        if (Array.isArray(stored)) return { on: ids(stored), known: ids(stored) };
+        if (stored && typeof stored === 'object') {
+            const record = stored as { on?: unknown; known?: unknown };
+            return { on: ids(record.on), known: ids(record.known) };
+        }
+        return null;
     } catch (err) {
         console.error('[midorii] could not read the account band columns', err);
         return null;
     }
 }
 
-function saveChosen(key: string, ids: readonly string[]): void {
+function saveChosen(key: string, on: readonly string[], known: readonly string[]): void {
     try {
-        localStorage.setItem(key, JSON.stringify(ids));
+        localStorage.setItem(key, JSON.stringify({ on: [...on], known: [...known] }));
     } catch (err) {
         console.error('[midorii] could not persist the account band columns', err);
     }
@@ -277,10 +302,14 @@ export function mountAccountBand(opts: AccountBandOptions): AccountBand {
     }
 
     /* What is shown, and what has merely never been asked about. A column added in a later
-     * version is shown or not by its own default rather than by an old stored list, which is
-     * why the stored set is a list of what is ON rather than a list of what is off. */
+     * version comes on by its own default rather than being left off by a stored list written
+     * before it existed — see {@link BandChoice}. */
+    const offered = opts.columns.map((c) => c.id);
+    const byDefault = opts.columns.filter((c) => !c.optional).map((c) => c.id);
     const stored = loadChosen(opts.storageKey);
-    const chosen = new Set(stored ?? opts.columns.filter((c) => !c.optional).map((c) => c.id));
+    const chosen = new Set(stored
+        ? [...stored.on, ...byDefault.filter((id) => !stored.known.includes(id))]
+        : byDefault);
 
     const cols = doc.createElement('div');
     cols.className = 'midorii-band-cols';
@@ -353,7 +382,7 @@ export function mountAccountBand(opts: AccountBandOptions): AccountBand {
         box.onchange = () => {
             if (box.checked) chosen.add(column.id);
             else chosen.delete(column.id);
-            saveChosen(opts.storageKey, [...chosen]);
+            saveChosen(opts.storageKey, [...chosen], offered);
             refresh();
         };
         const text = doc.createElement('span');

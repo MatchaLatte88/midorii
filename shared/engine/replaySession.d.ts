@@ -49,7 +49,11 @@ export declare class ReplaySession {
     startTime: number;
     /** The playhead as an instant: the end of the last revealed bar. */
     clock: number;
+    /** The bar in progress where the playhead sits inside one, and the complete bar it becomes. */
+    forming: { index: number; full: ReplayBar; ticked?: boolean } | null;
     steps: number;
+    /** One point per closed bar: what the account was worth when it closed. */
+    equityCurve: Array<{ time: number; equity: number; balance: number; drawdown: number }>;
 
     get bar(): ReplayBar;
     get atEnd(): boolean;
@@ -58,7 +62,13 @@ export declare class ReplaySession {
     get elapsedMs(): number;
 
     /** Reveal the next bar and match orders against it. Throws once `atEnd`. */
-    step(subBars?: ReplayBar[] | null): void;
+    step(subBars?: ReplayBar[] | null): ReplayBar;
+
+    /**
+     * Play recorded events up to `until`, inside the bars — see replaySession.js.
+     * Events are `[time, 1, price, volume, side]` prints and `[time, 2, bid, ask, last]` quotes.
+     */
+    advanceTicks(events: ReadonlyArray<ReadonlyArray<number | null>>, until: number): { closed: ReplayBar[]; prints: Array<[number, 1, number, number, 0 | 1 | null]> };
 
     /** Market entry, filled immediately at the last price (the human's path). */
     buy(spec?: Partial<OrderSpec>): Order;

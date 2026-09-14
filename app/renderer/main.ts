@@ -7,7 +7,7 @@
 import { BinanceProvider } from '../../src/data/providers/binance';
 import { CoinbaseProvider } from '../../src/data/providers/coinbase';
 import { HyperliquidProvider } from '../../src/data/providers/hyperliquid';
-import { registerIcon, registerWidgetAction } from '../../src/plugin';
+import { registerIcon, registerWidgetAction, type WidgetContext } from '../../src/plugin';
 import { ensureUIHost } from '../../src/ui';
 import type { VelaTheme } from '../../src/core/options';
 import { VelaWorkspace } from '../../src/workspace';
@@ -21,6 +21,7 @@ import { mountStrategiesView, type StrategiesViewHandle } from './strategies/str
 import { openDownloadDialog } from './data/downloadDialog';
 import { BybitProvider } from './providers/BybitProvider';
 import { CapitalProvider } from './providers/CapitalProvider';
+import { ExperimentalFeedProvider } from './providers/ExperimentalFeedProvider';
 import { ProjectXProvider } from './providers/ProjectXProvider';
 import { LocalArchiveProvider } from './providers/LocalArchiveProvider';
 import { isReplayContext } from './replay/replayActions';
@@ -37,9 +38,9 @@ import { installAlerts } from './alerts/installAlerts';
 import { installQuotes } from './quotes/installQuotes';
 import { wireOverlaySettings } from './replay/overlaySettings';
 
-/** Every market source the app can chart: the local archive, then the venues. */
-function providers() {
-    return {
+/** Stable sources shared by charts, alerts, and bots, plus an optional chart-only source. */
+function providers(opts: { experimental?: boolean } = {}) {
+    const stable = {
         local: () => new LocalArchiveProvider(),
         binance: () => new BinanceProvider(),
         coinbase: () => new CoinbaseProvider(),
@@ -56,6 +57,9 @@ function providers() {
         // product root (NQ) resolving to whichever expiry is active.
         projectx: () => new ProjectXProvider(),
     };
+    return opts.experimental
+        ? { ...stable, experimental: () => new ExperimentalFeedProvider() }
+        : stable;
 }
 
 const THEME_STORAGE_KEY = 'midorii-theme';
@@ -135,7 +139,7 @@ const workspace = new VelaWorkspace(chartHost, {
     symbol: CHART_MARKET.symbol,
     timeframe: CHART_MARKET.timeframe,
     brand: BRAND,
-    providers: providers(),
+    providers: providers({ experimental: prefs.experimentalMarketFeed }),
     persist: chartDoc.key,
     storage: chartDoc.storage,
 });
@@ -295,13 +299,30 @@ registerIcon('midorii-replay', '<svg viewBox="0 0 16 16" width="1em" height="1em
  * Trading Bot tab's, which is already being traded by a strategy. A second account wired to
  * that one would put a hand-placed trade in the same ledger as an automated one, where
  * neither could be told from the other afterwards. */
+/**
+ * Whether the chart behind `ctx` is on the experimental feed.
+ *
+ * Asks for the active cell before it touches `ctx.chart`: a workspace projects its topbar
+ * while it is still being built, before it has a cell, and reading `ctx.chart` then throws.
+ * From a `when()` that throw escapes the workspace's constructor — which is how every chart
+ * built after the main one (the replay's, the Trading Bot's) failed to open at all. No cell
+ * yet means no chart to be on any feed; the topbar is projected again once there is one.
+ */
+function onExperimentalFeed(ctx: WidgetContext & { readonly activeCellId?: string }): boolean {
+    if (ctx.activeCellId === '') return false;
+    return ctx.chart.data.resolve(ctx.symbol)?.provider === 'experimental';
+}
+
 const trading = installTradeMenu({
     workspace,
     stack: chartStack,
     main: chartMain,
     theme: palette,
-    when: (ctx) => !isReplayContext(ctx) && !isBotContext(ctx),
+    when: (ctx) => !isReplayContext(ctx)
+        && !isBotContext(ctx)
+        && !onExperimentalFeed(ctx),
 });
+workspace.chart.on('market:changed', () => workspace.refreshActions());
 (window as unknown as { __trading: typeof trading }).__trading = trading;
 
 /* Price alerts: right-click the chart → "Add Alert" at the clicked level, watched

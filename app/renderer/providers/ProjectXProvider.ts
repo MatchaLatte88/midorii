@@ -4,11 +4,11 @@ import type { MidoriProjectXContract, MidoriProjectXQuote } from '../midori';
 
 /** Canonical Vela timeframe → nothing of its own: the gateway's unit pair is worked out in
  *  the main process (see app/electron/data/projectx.js). This is only what it will accept. */
-const SUPPORTED_TIMEFRAMES = ['15S', '30S', '1', '5', '15', '30', '60', '240', 'D', 'W'];
+const SUPPORTED_TIMEFRAMES = ['15S', '30S', '1', '2', '3', '5', '15', '30', '60', '240', '480', 'D', 'W'];
 /** User-facing aliases → canonical keys (matches the other providers). */
 const TF_NORMALIZE: Record<string, string> = {
-    '1m': '1', '5m': '5', '15m': '15', '30m': '30',
-    '1h': '60', '4h': '240', '1d': 'D', '1D': 'D', '1w': 'W', '1W': 'W',
+    '1m': '1', '2m': '2', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
+    '1h': '60', '4h': '240', '8h': '480', '1d': 'D', '1D': 'D', '1w': 'W', '1W': 'W',
 };
 
 /**
@@ -146,7 +146,7 @@ export class ProjectXProvider implements DataProvider {
     async getBars(ticker: string, timeframe: string, range: BarRange): Promise<OHLCV[]> {
         const tf = normalizeTf(timeframe);
         if (!SUPPORTED_TIMEFRAMES.includes(tf)) {
-            console.warn(`[midorii] ProjectX: timeframe "${timeframe}" is not one it serves (1m/5m/15m/30m/1h/4h/1D/1W).`);
+            console.warn(`[midorii] ProjectX: timeframe "${timeframe}" is not one it serves (30s/1m/2m/3m/5m/15m/30m/1h/4h/8h/1D/1W).`);
             return [];
         }
         const contract = await this.resolve(ticker);

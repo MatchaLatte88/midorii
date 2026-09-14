@@ -213,6 +213,8 @@ export interface PriceLadder {
     refresh(): void;
     /** Fold the session's volume in from a bar. Called as the chart receives them. */
     mark(price: number, volume: number): void;
+    /** Forget the volume — the instrument under it has changed. */
+    reset(): void;
     destroy(): void;
 }
 
@@ -645,6 +647,13 @@ export function mountPriceLadder(host: HTMLElement, opts: PriceLadderOptions): P
         el,
         refresh,
         mark,
+        reset(): void {
+            volumeAt.clear();
+            peakVolume = 0;
+            lastBarVolume = 0;
+            lastBarPrice = 0;
+            refresh();
+        },
         destroy(): void {
             rowsEl.removeEventListener('wheel', onWheel);
             el.remove();

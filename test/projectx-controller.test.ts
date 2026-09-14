@@ -877,3 +877,118 @@ describe('ProjectX fill notices', () => {
         c.stop();
     });
 });
+
+describe('ProjectX taking part off', () => {
+    it('closes whole contracts through the gateway partial close, rounded down', async () => {
+        const api = bridge({ positions: vi.fn(async () => [position({ id: 6124, size: 3 })]) });
+        const { c } = await controllerWith(api);
+        c.closePart(1.5, 6124);
+        await vi.waitFor(() => expect(api.closePosition).toHaveBeenCalledWith(CONTRACT, 1));
+        c.stop();
+    });
+
+    it('refuses to halve a single contract rather than closing it all', async () => {
+        const api = bridge({ positions: vi.fn(async () => [position({ id: 6124, size: 1 })]) });
+        const { c } = await controllerWith(api);
+        expect(() => c.closePart(0.5, 6124)).toThrow(/cannot be split/);
+        expect(() => c.closePart(1, 6124)).toThrow(/whole position/);
+        expect(api.closePosition).not.toHaveBeenCalled();
+        c.stop();
+    });
+});
+
+describe('ProjectX reverse', () => {
+    it('cancels the protection first, then sends one market order for twice the size', async () => {
+        const calls: string[] = [];
+        const api = bridge({
+            positions: vi.fn(async () => [position({ id: 6124, type: 1, size: 2 })]),
+            openOrders: vi.fn(async () => [
+                order({ id: 10, type: 4, side: 1, stopPrice: 28_900 }),
+                order({ id: 11, type: 1, side: 1, limitPrice: 29_200, stopPrice: null }),
+            ]),
+            cancelOrder: vi.fn(async (id: number) => { calls.push(`cancel ${id}`); }),
+            placeOrder: vi.fn(async (spec: { side: string; size: number; type: string }) => {
+                calls.push(`${spec.type} ${spec.side} ${spec.size}`);
+                return { orderId: 1 };
+            }),
+        });
+        const { c } = await controllerWith(api);
+        c.reverse(6124);
+        await vi.waitFor(() => expect(calls).toContain('market sell 4'));
+        expect(calls.indexOf('market sell 4')).toBeGreaterThan(Math.max(calls.indexOf('cancel 10'), calls.indexOf('cancel 11')));
+        c.stop();
+    });
+
+    it('sends nothing when the protection cannot be cancelled', async () => {
+        const api = bridge({
+            positions: vi.fn(async () => [position({ id: 6124 })]),
+            openOrders: vi.fn(async () => [order({ id: 10, type: 4, side: 1, stopPrice: 28_900 })]),
+            cancelOrder: vi.fn(async () => { throw new Error('rejected'); }),
+        });
+        const { c, notes } = await controllerWith(api);
+        c.reverse(6124);
+        await vi.waitFor(() => expect(notes.some(([k, m]) => k === 'error' && /Not reversed/.test(m))).toBe(true));
+        expect(api.placeOrder).not.toHaveBeenCalled();
+        c.stop();
+    });
+});
+
+describe('ProjectX trailing stop', () => {
+    it('places a trailing stop at the last price less the distance, then cancels the fixed stop', async () => {
+        const calls: string[] = [];
+        const api = bridge({
+            positions: vi.fn(async () => [position({ id: 6124, type: 1, size: 2 })]),
+            openOrders: vi.fn(async () => [order({ id: 10, type: 4, side: 1, stopPrice: 28_900 })]),
+            cancelOrder: vi.fn(async (id: number) => { calls.push(`cancel ${id}`); }),
+            placeOrder: vi.fn(async (spec: { type: string }) => { calls.push(spec.type); return { orderId: 12 }; }),
+        });
+        const { c } = await controllerWith(api);
+        c.mark(29_010);
+        c.setTrailing(20.1, 6124);
+        await vi.waitFor(() => expect(calls).toEqual(['trailingStop', 'cancel 10']));
+        expect(api.placeOrder).toHaveBeenCalledWith(expect.objectContaining({
+            contractId: CONTRACT, side: 'sell', type: 'trailingStop', size: 2, trailPrice: 28_990,
+        }));
+        c.stop();
+    });
+
+    it('reads a trailing stop order as the position stop, and sweeps one left behind', async () => {
+        const api = bridge({
+            positions: vi.fn(async () => [position({ id: 6124 })]),
+            openOrders: vi.fn(async () => [order({ id: 10, type: 5, side: 1, stopPrice: 28_950 })]),
+        });
+        const { c } = await controllerWith(api);
+        expect(c.positions()[0]).toMatchObject({ stopOrderId: 10, stopLoss: 28_950, trailing: true });
+        expect(c.book().positions[0]!.trailing).toBe(true);
+        c.stop();
+
+        const gone = bridge({
+            positions: vi.fn(async () => []),
+            openOrders: vi.fn(async () => [order({ id: 10, type: 5, side: 1, stopPrice: 28_950 })]),
+        });
+        const { c: after } = await controllerWith(gone);
+        await vi.waitFor(() => expect(gone.cancelOrder).toHaveBeenCalledWith(10));
+        after.stop();
+    });
+
+    it('replaces a trailing stop with a fixed one when a level is set on it', async () => {
+        const api = bridge({
+            positions: vi.fn(async () => [position({ id: 6124 })]),
+            openOrders: vi.fn(async () => [order({ id: 10, type: 5, side: 1, stopPrice: 28_950 })]),
+        });
+        const { c } = await controllerWith(api);
+        c.protect({ stopLoss: 28_975 }, 6124);
+        await vi.waitFor(() => expect(api.cancelOrder).toHaveBeenCalledWith(10));
+        expect(api.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ type: 'stop', stopPrice: 28_975, side: 'sell' }));
+        expect(api.modifyOrder).not.toHaveBeenCalledWith(10, expect.anything());
+        c.stop();
+    });
+
+    it('refuses a trail shorter than a tick', async () => {
+        const api = bridge({ positions: vi.fn(async () => [position({ id: 6124 })]) });
+        const { c } = await controllerWith(api);
+        c.mark(29_010);
+        expect(() => c.setTrailing(0.1, 6124)).toThrow(/at least one tick/);
+        c.stop();
+    });
+});

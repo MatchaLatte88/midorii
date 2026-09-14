@@ -20,7 +20,7 @@ import { PROJECTX_ACCENT, mountProjectXTrading, type ProjectXMount } from './pro
 import type { ProjectXDealing } from '../providers/ProjectXProvider';
 import type { MidoriProjectXAccount } from '../midori';
 import { formatMoney } from '../format';
-import { loadAccountMarket, marketForAccount, saveAccountMarket } from './accountMarkets';
+import { leftArmedMarket, leftBehindNotice, loadAccountMarket, marketForAccount, saveAccountMarket } from './accountMarkets';
 
 /**
  * The Trade menu — which broker, if any, the chart is wired to.
@@ -98,6 +98,10 @@ const REOPEN_GUARD_MS = 200;
 export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     const ws = opts.workspace;
 
+    const chartOnlyMarket = (symbol: string): boolean => (
+        ws.chart.data.resolve(symbol)?.provider === 'experimental'
+    );
+
     let settings: PaperSettings = loadPaperSettings();
     let broker: TradeBroker = 'off';
     let controller: PaperController | null = null;
@@ -168,6 +172,17 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 checked: broker === 'capital',
                 separatorBefore: true,
                 trailing: gear,
+            });
+            /* The venue's OTHER account, on the same key.
+             *
+             * One row rather than a second selectable account: the row above says which of the
+             * two is on, and this one says where else it can go. Two checkable rows would read
+             * as two accounts that are both ready to trade, which is the confusion this venue
+             * can least afford. Nothing here reaches real money on its own — arming still goes
+             * through the door that asks. */
+            list.push({
+                id: 'capital:swap',
+                label: capital.live ? 'Switch to the demo account' : 'Switch to the live money account',
             });
         }
         if (binanceSpot?.configured) {
@@ -241,18 +256,51 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
      * Put the chart on the market an account was just armed on, and keep the search to that
      * venue while it is: a symbol from anywhere else is one the account has no way to trade.
      * Called after the confirmation, so a "no" leaves the chart exactly where it was.
+     *
+     * `rearm` is how this account is armed again — what a move to another instrument calls.
      */
-    function showAccountMarket(account: string, provider: string, market: { symbol: string; timeframe: string | null }): void {
+    function showAccountMarket(
+        account: string,
+        provider: string,
+        market: { symbol: string; timeframe: string | null },
+        rearm: () => Promise<void>,
+    ): void {
         ws.active.setSymbol(market.symbol);
         if (market.timeframe) ws.active.setTimeframe(market.timeframe);
         ws.setSymbolScope([provider]);
+        const armedOn = ws.chart.data.resolve(market.symbol);
         const remember = (): void => {
             const { symbol, timeframe } = ws.chart.market;
             if (!symbol || !timeframe || ws.chart.data.resolve(symbol)?.provider !== provider) return;
             saveAccountMarket(account, { symbol, timeframe });
         };
         remember();
-        forgetMarket = ws.chart.on('market:changed', remember);
+        /* Compared with the instrument the account was ARMED on, not with the event's previous
+         * symbol: the switch this function just asked for lands as an event of its own, after
+         * the listener is already here, and must not read as the chart moving away. */
+        forgetMarket = ws.chart.on('market:changed', ({ symbol }) => {
+            remember();
+            if (!leftArmedMarket(armedOn, ws.chart.data.resolve(symbol))) return;
+            leaveAccountMarket(armedOn?.ticker ?? symbol, rearm);
+        });
+    }
+
+    /**
+     * The chart moved to another instrument under an armed account.
+     *
+     * The account is taken off at once — a ticket bound to gold under a chart of silver sends
+     * orders for a market nobody is looking at, and its levels are drawn at the wrong prices.
+     * It is then offered again for the instrument now on screen, through the same dialog every
+     * arming goes through; a "no" leaves the chart on Just Watching. What stays open on the old
+     * instrument is said out loud, because the venue still holds it.
+     */
+    function leaveAccountMarket(ticker: string, rearm: () => Promise<void>): void {
+        const venue = live ?? projectx ?? bybit ?? spot;
+        const left = venue ? { positions: venue.positions().length, orders: venue.orders().length } : { positions: 0, orders: 0 };
+        stop();
+        const notice = leftBehindNotice(ticker, left);
+        if (notice) ws.toast(notice, 'error');
+        void rearm().catch(report);
     }
 
     /** Wire the chart to Binance's demo Spot account. Production has no path into this mode. */
@@ -288,7 +336,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             if (!go) return;
 
             stop();
-            showAccountMarket('binance-spot', 'binance', market);
+            showAccountMarket('binance-spot', 'binance', market, () => startBinanceSpot());
             spot = new BinanceSpotController({
                 symbol: info.symbol,
                 info,
@@ -357,7 +405,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             if (!go) return;
 
             stop(); // whatever was on comes off first — one account at a time
-            showAccountMarket(accountKey, 'bybit', market);
+            showAccountMarket(accountKey, 'bybit', market, () => startBybit());
             bybit = new BybitController({
                 ticker,
                 info,
@@ -435,7 +483,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             projectxChosen = accountId;
 
             stop(); // whatever was on comes off first — one account at a time
-            showAccountMarket(accountKey, 'projectx', market);
+            showAccountMarket(accountKey, 'projectx', market, () => startProjectX(accountId));
             projectx = new ProjectXController({
                 ticker: contractName,
                 dealing,
@@ -448,6 +496,9 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 stack: opts.stack,
                 main: opts.main,
                 controller: projectx,
+                /* The same key the market and the limits are both remembered under, so one
+                 * account's floor can never end up over another's chart. */
+                accountKey,
                 settings: () => settings,
                 onSettings: (next) => void applySettings(next).catch(report),
                 theme: opts.theme(),
@@ -489,7 +540,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             if (!go) return;
 
             stop(); // whatever was on comes off first — one account at a time
-            showAccountMarket(accountKey, 'capital', market);
+            showAccountMarket(accountKey, 'capital', market, () => startCapital());
             live = new CapitalController({
                 epic: resolved.ticker,
                 notify: (message, kind) => ws.toast(message, kind === 'success' ? 'success' : kind),
@@ -509,6 +560,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 stack: opts.stack,
                 main: opts.main,
                 controller: live,
+                accountKey,
                 settings: () => settings,
                 onSettings: (next) => void applySettings(next).catch(report),
                 live: env.live,
@@ -523,6 +575,34 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         } finally {
             starting = false;
         }
+    }
+
+    /**
+     * Move Capital.com to its other account, and put the chart back on it.
+     *
+     * The same key reaches both, so this stores nothing new — see `switchCapitalEnvironment`
+     * in the main process, which tries the other side before it lets go of this one.
+     *
+     * Two things have to happen in this order and nothing else does. The chart comes OFF
+     * first: it is wired to the account being left, and a ticket left standing while the
+     * ground moves under it is a ticket aimed at the other account. Then, only if it was
+     * being traded, it goes back on through `startCapital` — which is the door that names
+     * the account and asks before real money is reachable. Switching alone sends nothing,
+     * and this deliberately does not arm a chart that was not armed to begin with.
+     */
+    async function swapCapital(): Promise<void> {
+        const next = capital?.live ? 'demo' : 'live';
+        const wasArmed = broker === 'capital';
+        if (wasArmed) stop();
+        const result = await window.midori.capital.setEnvironment(next);
+        // The menu's own label for this venue is read from here.
+        await refreshVenues();
+        ws.toast(
+            `Capital.com is now on ${result.env === 'live' ? 'LIVE MONEY' : 'the demo account'}.`
+            + (result.persisted ? '' : ' Credentials come from .env.local, so this holds for this sitting only.'),
+            'info',
+        );
+        if (wasArmed) await startCapital();
     }
 
     /** Wire the chart to the paper account — restoring the stored one where there is one. */
@@ -541,6 +621,11 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     }
 
     async function openPaper(): Promise<void> {
+        if (chartOnlyMarket(ws.chart.market.symbol ?? '')) {
+            stop();
+            ws.toast('This experimental feed is chart-only. Paper trading stays off.', 'error');
+            return;
+        }
         let stored: Awaited<ReturnType<typeof loadPaperAccount>>;
         try {
             stored = await loadPaperAccount();
@@ -569,6 +654,8 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
             settings,
             restore: stored?.session,
             onPersist: persist,
+            // The account on screen; one a bot trades in the background stays quiet.
+            chime: true,
         });
 
         /* A stored account that was left on another market moves to this one if it is
@@ -744,6 +831,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
                 if (id === 'off') stop();
                 else if (id === 'paper') void startPaper().catch(report);
                 else if (id === 'capital') void startCapital().catch(report);
+                else if (id === 'capital:swap') void swapCapital().catch(report);
                 else if (id === 'binance-spot') void startBinanceSpot().catch(report);
                 else if (id === 'bybit') void startBybit().catch(report);
                 else if (id.startsWith('projectx:')) void startProjectX(Number(id.slice('projectx:'.length))).catch(report);
@@ -819,6 +907,15 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     };
     const venuesRead = refreshVenues();
 
+    /* A running paper account must not follow the chart onto a display-only feed. This
+     * listener is installed before any paper mount, so stopping it also removes that
+     * mount's later market-change listener before it can consume the new series. */
+    const offChartOnlyMarket = ws.chart.on('market:changed', ({ symbol }) => {
+        if (broker === 'off' || !chartOnlyMarket(symbol)) return;
+        stop();
+        ws.toast('Trading was turned off because this experimental feed is chart-only.', 'info');
+    });
+
     /*
      * Back into the mode this machine was left in, once the chart has a market and a price
      * to hand — which is also when a paper account can be caught up over whatever happened
@@ -861,6 +958,7 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         persist();
         writer.flush();
     });
+    void offChartOnlyMarket;
 
     return {
         get broker(): TradeBroker {

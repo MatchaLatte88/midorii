@@ -3,7 +3,7 @@
 // A wrong answer here puts the chart on a market the account cannot trade, or on the other
 // account's market — so the choice itself is asserted, not only the storage round trip.
 import { describe, it, expect } from 'vitest';
-import { marketForAccount, normalizeAccountMarkets } from '../app/renderer/trading/accountMarkets';
+import { leftArmedMarket, leftBehindNotice, marketForAccount, normalizeAccountMarkets } from '../app/renderer/trading/accountMarkets';
 
 const PROVIDERS: Record<string, string> = {
     'projectx:GC': 'projectx',
@@ -53,5 +53,26 @@ describe('what is read back from storage', () => {
         expect(normalizeAccountMarkets(null)).toEqual({});
         expect(normalizeAccountMarkets('x')).toEqual({});
         expect(normalizeAccountMarkets([{ symbol: 'a', timeframe: '1' }])).toEqual({});
+    });
+});
+
+describe('the chart moving away from an armed account', () => {
+    const gold = { provider: 'projectx', ticker: 'GC' };
+
+    it('reads another instrument as leaving, and the same one in another spelling or timeframe as staying', () => {
+        expect(leftArmedMarket(gold, { provider: 'projectx', ticker: 'SI' })).toBe(true);
+        expect(leftArmedMarket(gold, { provider: 'capital', ticker: 'GC' })).toBe(true);
+        expect(leftArmedMarket(gold, { provider: 'projectx', ticker: 'gc' })).toBe(false);
+    });
+
+    it('reads a symbol nothing resolves as leaving, and nothing armed as never leaving', () => {
+        expect(leftArmedMarket(gold, null)).toBe(true);
+        expect(leftArmedMarket(null, { provider: 'projectx', ticker: 'SI' })).toBe(false);
+    });
+
+    it('names what stays open at the venue, and says nothing when nothing does', () => {
+        expect(leftBehindNotice('GC', { positions: 1, orders: 2 })).toMatch(/^1 open position and 2 working orders on GC stay at the venue/);
+        expect(leftBehindNotice('GC', { positions: 0, orders: 1 })).toMatch(/^1 working order on GC/);
+        expect(leftBehindNotice('GC', { positions: 0, orders: 0 })).toBeNull();
     });
 });

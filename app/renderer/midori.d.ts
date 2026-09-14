@@ -220,7 +220,47 @@ export interface MidoriBar {
     buyVolume: number;
 }
 
+export interface MidoriExperimentalSymbol {
+    ticker: string;
+    description?: string;
+    type?: string;
+}
+
+export interface MidoriExperimentalBar {
+    time: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume?: number;
+}
+
+export interface MidoriExperimentalSymbolInfo extends Record<string, unknown> {
+    ticker: string;
+    tickerid: string;
+    prefix?: string;
+    description?: string;
+    type?: string;
+    currency?: string;
+    timezone?: string;
+    pricescale?: number;
+    mintick?: number;
+}
+
 /** A paused, unfinished replay — the account and the clock, never the bars. */
+/** What the feed recorder is doing, and what it has kept. */
+export interface MidoriRecorderStatus {
+    enabled: boolean;
+    recordings: Array<{ name: string; days: string[]; bytes: number }>;
+}
+
+/**
+ * One recorded event.
+ * `[time, 1, price, volume, side]` is a print — side 0 means the buyer crossed the spread, 1 the
+ * seller, null where the feed did not say. `[time, 2, bid, ask, last]` is a complete quote.
+ */
+export type MidoriTick = [number, 1, number, number, 0 | 1 | null] | [number, 2, number | null, number | null, number | null];
+
 interface MidoriSessionRecord {
     id: string;
     name: string;
@@ -230,6 +270,10 @@ interface MidoriSessionRecord {
     clock: number;
     stats: Record<string, unknown>;
     session: unknown;
+    /** Absent on a session parked before journals were kept. */
+    journal?: unknown;
+    /** The recording it plays on ticks, where it has one. */
+    ticks?: string | null;
 }
 
 /** The figures every finished run reports, whoever traded it. `null` where the account
@@ -608,6 +652,9 @@ export interface MidoriCapitalPosition {
         createdDateUTC: string;
         stopLevel: number | null;
         profitLevel: number | null;
+        /** Not in the venue's documented response — read where it is present, never relied on. */
+        trailingStop?: boolean;
+        stopDistance?: number | null;
         /** Unrealized profit and loss, as the venue computes it. */
         upl?: number;
     };
@@ -1021,6 +1068,17 @@ declare global {
                 /** Returns its own unsubscribe. */
                 onDownloadProgress(handler: (p: MidoriDownloadProgress) => void): () => void;
             };
+            /** The ProjectX feed recorder — see app/electron/data/tickRecorder.js. */
+            recorder: {
+                status(): Promise<MidoriRecorderStatus>;
+                setEnabled(enabled: boolean): Promise<MidoriRecorderStatus>;
+            };
+            /** What the recorder kept, for a replay to play. Oldest first. */
+            ticks: {
+                read(request: { name: string; from: number; to: number }): Promise<MidoriTick[]>;
+                /** The contract a recording is of, where the gateway had listed it. */
+                meta(name: string): Promise<{ contractId: string; tickSize: number | null; tickValue: number | null } | null>;
+            };
             replay: {
                 save(request: Record<string, unknown>): Promise<{ id: string }>;
                 saveSession(request: {
@@ -1029,6 +1087,11 @@ declare global {
                     symbol: string;
                     timeframe: string;
                     session: unknown;
+                    /** What the session has done since it began, so it can go back to a candle
+                     *  after being picked up again — see replay/replayJournal.ts. */
+                    journal?: unknown;
+                    /** The recording the session plays on ticks, where it has one. */
+                    ticks?: string | null;
                     stats?: Record<string, unknown>;
                 }): Promise<{ id: string }>;
                 sessions(): Promise<MidoriSessionRecord[]>;
@@ -1101,6 +1164,23 @@ declare global {
                 /** Replaces the run's note and answers with what was stored. */
                 annotate(id: string, note: string): Promise<string>;
             };
+            /** Optional, anonymous chart data. This surface deliberately exposes no
+             *  automation, backtest, alert, or order operation. */
+            experimentalFeed: {
+                search(query: string): Promise<MidoriExperimentalSymbol[]>;
+                symbolInfo(symbol: string): Promise<MidoriExperimentalSymbolInfo>;
+                bars(query: {
+                    symbol: string;
+                    timeframe: string;
+                    from?: number;
+                    to?: number;
+                    limit?: number;
+                    session?: string;
+                }): Promise<MidoriExperimentalBar[]>;
+                subscribe(query: { symbol: string; timeframe: string; session?: string }): Promise<string>;
+                unsubscribe(subscriptionId: string): Promise<void>;
+                onBar(handler: (payload: { subscriptionId: string; bar: MidoriExperimentalBar }) => void): () => void;
+            };
             /** Forex/CFD data — the login and the WebSocket live in the main process
              *  (see app/electron/data/capital.js); this only ever sees bars. */
             /**
@@ -1150,6 +1230,22 @@ declare global {
                  * able to SAY which of the two it is wired to rather than assume.
                  */
                 environment(): Promise<{ configured: boolean; env: 'demo' | 'live' | null; live: boolean }>;
+                /**
+                 * Move to the other account on the credentials already held.
+                 *
+                 * The key never moves — only which endpoint it is used against. Tried before it
+                 * takes effect, so a key Capital.com has not issued for the other side is
+                 * refused here and the account in use is left untouched.
+                 *
+                 * `persisted` false means the credentials came from .env.local and there was
+                 * nowhere to record the choice: it holds for this sitting, and CAPITAL_ENV
+                 * decides the next one.
+                 */
+                setEnvironment(env: 'demo' | 'live'): Promise<{
+                    env: 'demo' | 'live';
+                    accounts: MidoriCapitalAccountSummary[];
+                    persisted: boolean;
+                }>;
                 markets(searchTerm?: string): Promise<MidoriCapitalMarket[]>;
                 marketInfo(epic: string): Promise<MidoriCapitalMarketInfo | null>;
                 prices(query: { epic: string; resolution: string; from?: number; to?: number; limit?: number }): Promise<MidoriCapitalBar[]>;
@@ -1169,11 +1265,15 @@ declare global {
                  * so the position list is the thing to check before sending it again.
                  */
                 openPosition(spec: MidoriCapitalOrderSpec): Promise<MidoriCapitalConfirmation>;
-                /** Move (or, with an explicit null, remove) the stop and target on a position. */
+                /** Move (or, with an explicit null, remove) the stop and target on a position.
+                 *  `trailingStop` true needs `stopDistance`, the trail in price. The call
+                 *  REPLACES the protection set, so every side that should stay is re-sent. */
                 amendPosition(spec: {
                     dealId: string;
                     stopLevel?: number | null;
                     profitLevel?: number | null;
+                    trailingStop?: boolean;
+                    stopDistance?: number;
                 }): Promise<MidoriCapitalConfirmation>;
                 closePosition(dealId: string): Promise<MidoriCapitalConfirmation>;
                 /** Every resting order the account holds, on any instrument. */

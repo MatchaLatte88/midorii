@@ -7,7 +7,7 @@
 // layout change — its state then round-trips through the workspace pool, so shrinking
 // 4 → 2 → 4 restores the third and fourth exactly, indicators and drawings included).
 import { Vela } from '../Vela';
-import { normalizeSession, type MarketSession, type NativeBackend, type VelaOptions, type VelaTheme } from '../core/options';
+import { DEFAULT_BARS, normalizeSession, type MarketSession, type NativeBackend, type VelaOptions, type VelaTheme } from '../core/options';
 import type { OHLCV } from '../core/model/ohlcv';
 import type { VisibleRangePreset } from '../core/visible-range';
 import type { VisibleRange } from '../core/ports/IChartRenderer';
@@ -15,6 +15,7 @@ import type { DrawingsOption } from '../core/drawings';
 import type { MarketDataFeed } from '../core/ports/MarketDataFeed';
 import type { ScriptingEngine } from '../core/ports/ScriptingEngine';
 import type { IndicatorHandle } from '../core/IndicatorHandle';
+import { getNativeIndicator } from '../core/native-indicators';
 import { Statusline, statuslineInkOf, type StatuslinePart } from '../widget/statusline';
 import { MarketStatusTracker } from '../widget/market-status';
 import { SessionShadingTracker, parseSessionSpec } from '../widget/session-shading';
@@ -121,6 +122,8 @@ export interface CellNativeInfo {
     supported: boolean;
     present: boolean;
     beta?: boolean;
+    vendor?: string;
+    internal?: boolean;
 }
 
 /** What every cell shares from the workspace. */
@@ -599,7 +602,7 @@ export class ChartCell {
         const symbol = this.state.symbol;
         if (!chart || !symbol) return;
         const now = Date.now();
-        const requestedSpan = Math.max(this.state.bars ?? 1000, this.rangeBars) * timeframeMs(this.state.timeframe ?? '60');
+        const requestedSpan = Math.max(this.state.bars ?? DEFAULT_BARS, this.rangeBars) * timeframeMs(this.state.timeframe ?? '60');
         const fallbackSpan = Number.isFinite(requestedSpan) ? Math.max(3 * 86_400_000, requestedSpan) : 3 * 86_400_000;
         const range = chart.getVisibleRange() ?? { from: now - fallbackSpan, to: now };
         this.sessionShading.track(chart.data, symbol, { session: this.session, timeframe: this.timeframe, range });
@@ -686,7 +689,7 @@ export class ChartCell {
                     label: 'Bars to fetch',
                     id: 'bars',
                     options: ['500', '1000', '2000', '5000', '10000', '20000', '50000', '60000', '80000', '100000'],
-                    get: () => String(this.state.bars ?? 1000),
+                    get: () => String(this.state.bars ?? DEFAULT_BARS),
                     set: (v: string) => {
                         this.state.bars = Number(v);
                         this.deps.onStateDirty();
@@ -912,12 +915,12 @@ export class ChartCell {
         if (!this.inner || this.destroyed) return;
         this.activeRangeId = preset.id;
         const tfChanged = preset.tf !== this.timeframe;
-        const deeper = preset.bars > Math.max(this.state.bars ?? 500, this.rangeBars);
+        const deeper = preset.bars > Math.max(this.state.bars ?? DEFAULT_BARS, this.rangeBars);
         this.rangeBars = preset.bars;
         if (tfChanged || deeper) {
             this.pendingRange = preset;
             void this.inner
-                .setMarket({ timeframe: preset.tf, bars: Math.max(this.state.bars ?? 500, this.rangeBars), visibleRange: preset.preset })
+                .setMarket({ timeframe: preset.tf, bars: Math.max(this.state.bars ?? DEFAULT_BARS, this.rangeBars), visibleRange: preset.preset })
                 .then(() => {
                     if (!this.destroyed && this.pendingRange === preset) {
                         this.inner?.setVisibleRangePreset(preset.preset);
@@ -1037,22 +1040,23 @@ export class ChartCell {
      *  index space the picker hands back, so `libraryRows` and `addFromLibrary` MUST both
      *  read it — indexing the unsorted catalog on add would land on a different study. */
     private supportedNatives(): CellNativeInfo[] {
-        return this.nativeCatalog.filter((n) => n.supported).sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base' }));
+        return this.nativeCatalog.filter((n) => n.supported && !n.internal).sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base' }));
     }
 
     /** The picker's library rows: supported natives first (see {@link supportedNatives}),
-     *  then the manifest in the host's own order. */
-    libraryRows(): Array<{ name: string; language?: string; category?: string; native?: boolean; nativeType?: string; beta?: boolean }> {
+     *  then the manifest in the host's own order. A native groups under its vendor —
+     *  the ones without one are Midorii's own. */
+    libraryRows(): Array<{ name: string; language?: string; category?: string; native?: boolean; nativeType?: string; beta?: boolean; vendor?: string }> {
         return [
-            ...this.supportedNatives().map((n) => ({ name: n.title, category: 'Vela', native: true, nativeType: n.type, beta: n.beta })),
+            ...this.supportedNatives().map((n) => ({ name: n.title, category: n.vendor ?? 'Midorii', native: true, nativeType: n.type, beta: n.beta, vendor: n.vendor })),
             ...this.manifest.map((e) => ({ name: e.name, language: e.language, category: e.category })),
         ];
     }
 
     /** The picker's on-chart rows: native instances first, then live script instances. */
-    onChartRows(): Array<{ name: string; language?: string; native?: boolean; nativeType?: string }> {
+    onChartRows(): Array<{ name: string; language?: string; native?: boolean; nativeType?: string; vendor?: string }> {
         return [
-            ...this.nativeHandles().map((h) => ({ name: h.title, native: true, nativeType: h.nativeType })),
+            ...this.pickerNativeHandles().map((h) => ({ name: h.title, native: true, nativeType: h.nativeType, vendor: getNativeIndicator(h.nativeType!)?.vendor })),
             ...this.instances.map((it) => ({ name: it.entry.name, language: it.entry.language })),
         ];
     }
@@ -1069,7 +1073,7 @@ export class ChartCell {
 
     /** Remove by picker ON-CHART index (native instances precede script instances — mirrors onChartRows). */
     removeFromChart(index: number): void {
-        const natives = this.nativeHandles();
+        const natives = this.pickerNativeHandles();
         if (index < natives.length) this.removeNative(natives[index]!);
         else this.removeInstance(index - natives.length);
     }
@@ -1179,6 +1183,13 @@ export class ChartCell {
         return this.inner?.indicators().filter((h) => h.nativeType !== undefined) ?? [];
     }
 
+    /** The native instances the picker lists — {@link nativeHandles} minus host machinery
+     *  (`internal` types). The picker's on-chart index space: `onChartRows` and
+     *  `removeFromChart` MUST both read it. */
+    private pickerNativeHandles(): IndicatorHandle[] {
+        return this.nativeHandles().filter((h) => !getNativeIndicator(h.nativeType!)?.internal);
+    }
+
     /** Sync mirror of the chart's native instances — the removal handler looks the
      *  removed id up here (the registry has already forgotten it) to record its type. */
     private syncPresentNatives(): void {
@@ -1191,7 +1202,7 @@ export class ChartCell {
         if (!chart) return;
         void chart.availableNativeIndicators().then((list) => {
             if (this.destroyed || this.inner !== chart) return;
-            this.nativeCatalog = list.map((n) => ({ type: n.type, title: n.title, supported: n.supported, present: n.present, beta: n.beta }));
+            this.nativeCatalog = list.map((n) => ({ type: n.type, title: n.title, supported: n.supported, present: n.present, beta: n.beta, vendor: n.vendor, internal: n.internal }));
             this.deps.onIndicatorsChanged(this.id);
         });
     }

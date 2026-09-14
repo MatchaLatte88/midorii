@@ -52,6 +52,9 @@ const CLUSTER_SIZE = 24;
 const CLUSTER_RIGHT = 6;
 /** Down from the top of the pane — the line the host's corner chrome sits on too. */
 const CLUSTER_TOP = 10;
+/** How far in from the axis a pane's cluster reaches, gap included — what a host sharing the
+ *  corner steps past while the price pane has one. */
+export const PANE_CONTROLS_CORNER = CLUSTER_RIGHT + CLUSTER_SIZE;
 
 /** Hover/active states as CSS, so they can never lag behind a pointer or drift from the
  *  tokens (the buttons only carry their per-instance color/opacity inline). */

@@ -330,6 +330,29 @@ export class ProviderRegistry {
         return [...this.entries.entries()].flatMap(([name, e]) => e.descriptors.map((d) => ({ ...d, provider: name })));
     }
 
+    /** Search providers with on-demand catalogs. A failed provider contributes no rows. */
+    async searchSymbols(query: string, rawNames?: readonly string[] | null): Promise<SymbolDescriptor[]> {
+        const names = rawNames == null
+            ? this.names()
+            : [...new Set(rawNames.map(normName))].filter((name) => this.entries.has(name));
+        const lists = await Promise.all(names.map(async (name) => {
+            const search = this.entries.get(name)?.provider.searchSymbols;
+            if (!search) return [];
+            try {
+                return (await search.call(this.entries.get(name)!.provider, query)).map((d) => ({ ...d, provider: name }));
+            } catch {
+                return [];
+            }
+        }));
+        const seen = new Set<string>();
+        return lists.flat().filter((symbol) => {
+            const key = `${symbol.provider}:${normTicker(symbol.ticker)}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+
     /** Provider metadata: the provider's own `info()` if present, else synthesized from its methods. */
     infoOf(rawName: string): ProviderInfo {
         const name = normName(rawName);

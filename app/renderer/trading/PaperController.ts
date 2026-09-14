@@ -10,6 +10,29 @@ import { STATE_INPUT } from '../replay/replayIndicator';
 import { costsOf, positionModeOf, type PaperSettings } from './paperSettings';
 import type { ControlledPosition, TradingController } from './TradingController';
 import { visualState } from './visualState';
+import { chime } from './fillChime';
+
+/**
+ * What the market the account stands on deals in, where its provider says.
+ *
+ * All optional: a coin pair states none of it and trades as it always did — a point worth one,
+ * any size. A futures contract states all of it.
+ */
+export interface PaperInstrument {
+    /** Money per point per contract. */
+    pointValue?: number | null;
+    sizeStep?: number | null;
+    minSize?: number | null;
+}
+
+/**
+ * How old a quote may be and still be filled at.
+ *
+ * A feed that has gone quiet leaves its last two prices behind, and a market order taking an
+ * ask from a minute ago is a fill at a price that is no longer there. Past this the account
+ * goes back to the last trade plus its simulated spread, which is what it does with no feed.
+ */
+const QUOTE_MAX_AGE_MS = 5_000;
 
 /**
  * Drives one paper account against the live chart.
@@ -40,6 +63,8 @@ export interface PaperControllerOptions {
     onAccountChange?: () => void;
     /** Told whenever the account changed in a way that is worth writing down. */
     onPersist?: () => void;
+    /** Play the fill sound on a fill and a close. Off for an account nobody is watching. */
+    chime?: boolean;
 }
 
 export class PaperController implements TradingController {
@@ -55,6 +80,13 @@ export class PaperController implements TradingController {
     private historyAt = -1;
     /** How many fills a restored account arrived with — see {@link markFills}. */
     private readonly inheritedFills: number;
+    private readonly chimes: boolean;
+    /** The fill and trade counts the sound was last decided at. */
+    private heardFills: number;
+    private heardTrades: number;
+    private sizeStep: number | null = null;
+    private minSize: number | null = null;
+    private lastQuote: { bid: number; ask: number; at: number } | null = null;
 
     /** See {@link PaperControllerOptions.onAccountChange}. Settable after construction,
      *  for a readout that can only be built once the chart it sits on exists. */
@@ -77,6 +109,63 @@ export class PaperController implements TradingController {
          * account's traceable history begins. */
         const stamped = this.session.broker.fills.findIndex((f) => (f as { symbol?: string }).symbol != null);
         this.inheritedFills = stamped === -1 ? this.session.broker.fills.length : stamped;
+        this.chimes = opts.chime === true;
+        this.heardFills = this.session.broker.fills.length;
+        this.heardTrades = this.session.broker.trades.length;
+    }
+
+    /**
+     * Take on what the market on screen deals in.
+     *
+     * The point value goes into the engine, which refuses a change while anything is open or
+     * waiting — that refusal comes straight back as a thrown error. The size grid stays here:
+     * it is what the ticket rounds to before sending, not a rule the engine enforces.
+     */
+    setInstrument(instrument: PaperInstrument | null): void {
+        const pointValue = instrument?.pointValue;
+        this.session.broker.setPointValue(pointValue != null && pointValue > 0 ? pointValue : 1);
+        this.sizeStep = instrument?.sizeStep != null && instrument.sizeStep > 0 ? instrument.sizeStep : null;
+        this.minSize = instrument?.minSize != null && instrument.minSize > 0 ? instrument.minSize : null;
+        this.pushState();
+    }
+
+    /** Money per point per unit — see `Broker.pointValue`. */
+    pointValue(): number {
+        return this.session.broker.pointValue;
+    }
+
+    /** The size grid, for a ticket that has to show a size before sending it. */
+    dealingRules(): { sizeStep?: number; minSize?: number } {
+        return {
+            ...(this.sizeStep != null ? { sizeStep: this.sizeStep } : {}),
+            ...(this.minSize != null ? { minSize: this.minSize } : {}),
+        };
+    }
+
+    /** The largest size at or below `size` the instrument deals in, or 0 where none is. */
+    sizeOnGrid(size: number): number {
+        const step = this.sizeStep;
+        const out = step != null ? Number((Math.floor((size + step * 1e-9) / step) * step).toFixed(8)) : size;
+        if (!(out > 0)) return 0;
+        return this.minSize != null && out < this.minSize ? 0 : out;
+    }
+
+    /** The market's two sides from a feed. Market orders fill at them while they are fresh. */
+    markQuote(bid: number | null, ask: number | null): void {
+        const prev = this.lastQuote;
+        const nextBid = bid != null && bid > 0 ? bid : prev?.bid;
+        const nextAsk = ask != null && ask > 0 ? ask : prev?.ask;
+        // A feed sends deltas: a message with only one side keeps the other.
+        if (nextBid == null || nextAsk == null || nextAsk < nextBid) return;
+        this.lastQuote = { bid: nextBid, ask: nextAsk, at: Date.now() };
+        this.onAccountChange?.();
+    }
+
+    /** The two sides, or null when there is no feed or it has gone quiet. */
+    quote(): { bid: number; ask: number } | null {
+        const q = this.lastQuote;
+        if (!q || Date.now() - q.at > QUOTE_MAX_AGE_MS) return null;
+        return { bid: q.bid, ask: q.ask };
     }
 
     /** The market this account trades. */
@@ -210,6 +299,8 @@ export class PaperController implements TradingController {
         }
         this.boundSymbol = symbol;
         this.away = null;
+        // One market's quote says nothing about another's.
+        this.lastQuote = null;
         /* A market the account has never seen: the next update marks it rather than
          * filling on it, exactly as the first update of all does. The price goes too —
          * one instrument's last price says nothing about another's. */
@@ -259,6 +350,9 @@ export class PaperController implements TradingController {
      */
     catchUp(bars: readonly LiveBar[]): number {
         const played = this.session.catchUp(bars);
+        // What happened while the app was shut is reported in words, not replayed as sounds.
+        this.heardFills = this.session.broker.fills.length;
+        this.heardTrades = this.session.broker.trades.length;
         this.pushState();
         if (played > 0) this.persist();
         return played;
@@ -268,6 +362,7 @@ export class PaperController implements TradingController {
 
     order(spec: OrderSpec): Order {
         this.guard();
+        this.applyQuote();
         const order = this.session.order(spec);
         this.settled();
         return order;
@@ -275,6 +370,7 @@ export class PaperController implements TradingController {
 
     flatten(): void {
         this.guard();
+        this.applyQuote();
         this.session.flatten();
         this.settled();
     }
@@ -283,24 +379,28 @@ export class PaperController implements TradingController {
      *  `ctx.close()` reaches when this account is being traded by a bot. */
     close(tag?: string): void {
         this.guard();
+        this.applyQuote();
         this.session.close(tag);
         this.settled();
     }
 
     closeOne(positionId: number): void {
         this.guard();
+        this.applyQuote();
         this.session.closeOne(positionId);
         this.settled();
     }
 
     closePart(size: number, positionId?: number | null): void {
         this.guard();
+        this.applyQuote();
         this.session.closePart(size, positionId ?? null);
         this.settled();
     }
 
     reverse(positionId?: number | null): void {
         this.guard();
+        this.applyQuote();
         this.session.reverse(positionId ?? null);
         this.settled();
     }
@@ -366,6 +466,23 @@ export class PaperController implements TradingController {
         this.persist();
     }
 
+    /** Hand the engine the quote a market order should fill at — or none, when it is stale. */
+    private applyQuote(): void {
+        const q = this.quote();
+        this.session.broker.setQuote(q?.bid ?? null, q?.ask ?? null);
+    }
+
+    /** A close is the louder news; a fill that closed nothing is an entry. */
+    private listen(): void {
+        const { fills, trades } = this.session.broker;
+        if (this.chimes) {
+            if (trades.length > this.heardTrades) chime('close');
+            else if (fills.length > this.heardFills) chime('fill');
+        }
+        this.heardFills = fills.length;
+        this.heardTrades = trades.length;
+    }
+
     private persist(): void {
         this.onPersist?.();
     }
@@ -377,9 +494,14 @@ export class PaperController implements TradingController {
      */
     private pushState(): void {
         this.markFills();
+        this.listen();
         this.onAccountChange?.();
         if (!this.indicator) return;
-        this.indicator.setInput(STATE_INPUT, JSON.stringify(visualState(this.session.broker, this.price(), this.boundSymbol)));
+        /* `ordersMovable` is added here rather than inside `visualState`, which a REPLAY shares:
+         * a paper account answers `moveOrder` and a replay does not, and the flag is about what
+         * the account can be asked to do rather than about how it is drawn. */
+        const state = { ...visualState(this.session.broker, this.price(), this.boundSymbol), ordersMovable: true };
+        this.indicator.setInput(STATE_INPUT, JSON.stringify(state));
     }
 
     /**

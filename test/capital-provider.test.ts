@@ -79,6 +79,8 @@ describe('getSymbolInfo', () => {
             minStopDistance: { unit: 'POINTS', value: 0.5 },
             maxStopDistance: { unit: 'PERCENTAGE', value: 90 },
             lotSize: 1,
+            // What the INSTRUMENT books in, which is not always what the account is held in.
+            currency: 'USD',
         });
     });
 

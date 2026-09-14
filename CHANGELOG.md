@@ -3,6 +3,205 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
+## [v0.7.0]
+
+### Added
+
+- **Pressure Channels reveal the balance inside a quiet market.** Compressed, two-sided price
+  ranges now carry volume-weighted pressure pulses around their equilibrium, a compact live
+  pressure meter and a directional mark when a candle closes beyond an edge. Live charts ignore
+  the still-forming candle by default, and feeds without volume keep the channels and breakouts
+  without inventing a pressure reading.
+
+- **Volume Sentiment Breakout Channels pair volatility regimes with a price profile.** A channel
+  forms when normalized-price volatility expands after a sustained quiet stretch, then shows
+  directional volume by price on its left edge and a live volume profile at the right. Highlighted
+  edge zones, strong-close breakouts, post-break trend fills and three native alerts carry the
+  setup from formation through resolution.
+
+- **A replay can go back to any candle and carry on from there.** Right-click a candle and
+  **Jump back here**: the playhead lands where that candle had just appeared, with the account
+  exactly as it stood at that moment. Every trade, order and change made from then on is gone —
+  not hidden, gone, with the fills and the drawdown they caused — so a mistake can be taken back
+  and the stretch traded again, and only the second attempt counts. Going back to the candle the
+  session is standing on undoes what was done on it.
+
+  It is exact rather than approximate because the account is rebuilt, not trimmed. The session
+  keeps where it began and every call that changed the account, with the instant it was made
+  at — which timeframe each stretch was played on included — and going back replays those up to
+  the candle and no further. A hundred trades snapshot to most of a megabyte; five thousand
+  candles replay in under a millisecond. Where the bars on disk no longer line up with what was
+  played, it stops with the reason and leaves the session where it was, rather than landing on an
+  account nobody traded. The history goes with a parked session, so one picked up tomorrow can
+  still go back to today.
+
+- **Skip to the next setup.** A button in the replay's topbar steps forward to the next candle on
+  which a chosen strategy would send an order, on the settings the Strategies tab holds for it.
+  It is found by running the strategy itself through the backtest loop, so the replay stops where
+  a run would have traded rather than on a second, simplified reading of its conditions. Stepped,
+  not jumped: every order you have open is matched on every candle on the way. The strategy starts
+  flat at the playhead, so a trade it would have been holding cannot hide the next setup — which
+  also means one that waits several candles between signal and entry is found at its next signal.
+  The strategy is chosen once and changed from the chart's context menu.
+
+- **The ProjectX feed is recorded, and a recorded day can be replayed tick by tick.**
+
+  - **Recording.** Every print and every bid and ask on a contract that is open in Midorii — a
+    chart, a ticket, a ladder — is written down as it arrives, one compressed file per contract
+    per day. Nothing extra is subscribed. The same prints are built into one-minute candles and
+    kept as their own dataset, named after the contract with `.REC` on the end, so a recorded day
+    can be charted, backtested and replayed without anything downloaded, and its candles cannot
+    disagree with its tape. It starts switched on — a day that was not recorded cannot be recorded
+    later — and Settings → Broker connection switches it off and shows what it takes on disk. A
+    crash costs the last few seconds, and a file a crash cut short is repaired before anything is
+    added to it.
+
+  - **Playing on ticks.** A replay started with a recording plays it in time, at one to sixty
+    times real speed, and the candle under the playhead grows print by print. Every print is
+    matched against the book as it happens: a limit fills where it rests when the market goes
+    through it, never at a better print than its limit; a stop fills at its level with the slippage
+    a stop pays. A market order fills at the recorded bid or ask while the quote is under five
+    seconds old. The Ladder and the Tape follow the recording. Stretches with nothing recorded — a
+    night, a weekend — are jumped rather than played in real time, and playback stops and says so
+    where the recording ends. The switch between candles and ticks is in the topbar; leaving ticks
+    finishes the candle in progress on its prints first. Going back to a candle works on ticks too,
+    and on the candle still in progress goes back to where it began.
+
+  - **Candles from the prints, or from the archive.** Which one is a choice made when the session
+    starts: pick the recording's own `.REC` dataset and the candles are made from the prints the
+    tape plays; pick a downloaded dataset and play the recorded ticks inside its candles. The
+    setup dialog now also takes a start time.
+
+  What playing on ticks does not do, said rather than discovered: it does not model the queue. A
+  limit fills when a print reaches its price, whether or not the orders ahead of it at that price
+  would have been filled first, which flatters a resting limit at the very top or bottom of a move.
+  And a replay's account still counts a point as one unit of money — on a future it states results
+  in points, as every replay here has so far.
+
+- **A private experimental global market feed can be enabled from Developer settings.**
+  It adds on-demand symbol search, historical candles, and live chart updates without an
+  account. The feed is off by default, takes effect after a restart, and remains isolated
+  from bots, alerts, backtests, risk checks, paper trading, and order routing.
+
+- **Every account carries its own limits, including the two a prop firm enforces.** The floor
+  under an account and what it may lose in a day are the firm's numbers, and they belong to the
+  ACCOUNT: a funded account and the evaluation beside it come from one firm with two sets of
+  thresholds, and a demo login has none at all. So the rule set moved off the app and onto each
+  account, under the same key the chart each was last watched on is kept under — `projectx:1234`,
+  `capital:live`, `paper`. Reached from **Limits** on that account's own band, because the
+  numbers are copied off a dashboard and the account on screen is the only one they are true of.
+
+  - **A maximum loss limit, with the three shapes firms actually give it.** The MLL is the
+    level that ends the account rather than the day. Its floor either stays under the starting
+    balance, follows the highest END-OF-DAY balance (what Topstep measures), or follows the
+    highest equity the account ever showed with the open trade counted (the Apex mould) — and
+    it can be frozen once it is level with the starting balance, which is what a funded account
+    in the Topstep mould does. Which one it is is asked rather than assumed: a floor trailing
+    the wrong thing sits too low and warns too late.
+
+    The mark it trails is worked back out of the closed trades the venue serves — balance now,
+    less the history, walked forward to read off what each day closed at — and then kept, so a
+    rolling history window can never lower a floor that has already risen. What that cannot see
+    is a day that closed higher than the venue still reports; then the mark is too low, and the
+    field says so and takes the figure your firm shows.
+
+  - **A daily loss limit that counts the open trade**, the way a firm counts it. The limit that
+    was there before was measured on closed trades alone, so it was met only once the loss had
+    already been booked. Still measured from 17:00 New York to the next — the futures day.
+
+  - **A profit goal**, measured from the starting balance with the open trade counted, shown on
+    the band as progress. It refuses nothing: a goal is a destination, and an account that
+    reaches it and goes on trading has broken no rule.
+
+  - **Three figures on the band** — to the MLL, to the DLL, and how far along the goal — each a
+    dash where that limit is not set, and each counting what is open. They are the numbers you
+    look at to decide whether to take one more trade, so they are read once per repaint and the
+    figure that refuses an order is the figure on the screen.
+
+  - **What a breach does is the account's own choice.** Refusing anything that would add to a
+    position is what it has always done, and closing what is open always works — a limit that
+    trapped somebody inside the trade that breached it would be the opposite of a limit. An
+    account can also be set to **close out at market and cancel its working orders** the moment
+    the floor or the daily limit is past. That is a market order this app sends by itself, so it
+    is never the default, it says so in red where it is switched on, and it fires once per
+    breach rather than on every tick.
+
+  Nothing is on until it is entered, the starting balance included — it is the one figure no
+  venue can be asked for, since a gateway states today's balance and nothing about how it got
+  there. The limits an older version kept once for the whole app are the starting point for an
+  account that has none of its own, so nothing that was set is lost. And what these are has not
+  changed: Midorii's own guard, not your firm's, and a refusal here is a warning that arrived
+  early rather than proof the account is still within its rules.
+
+- **Paper trading, Capital.com and ProjectX offer the same tools wherever the venue can.**
+  - **Paper on a futures contract trades at the contract's terms.** On a ProjectX market the
+    account takes the contract's point value, tick and whole-contract grid, so one gold contract
+    moving a point is a hundred dollars on paper as it is on the account — results, fees, R, the
+    session limits and the ticket's sizing all included. The engine carries the multiplier as
+    `pointValue`, one by default, so backtests and replays are unchanged.
+  - **Paper market orders fill at the real bid and ask** where the market quotes two sides
+    (Capital.com and ProjectX), with no simulated spread on top. A quote older than five seconds
+    is not filled at; the account falls back to the last price and its simulated spread.
+  - **Paper gets the Ladder, the account band and the fill sound**, and the Tape on a ProjectX
+    market. The band replaces the account card, in the same corner, with Break-even and a
+    two-press Close all.
+  - **ProjectX positions can be taken off in part, reversed and trailed.** Part is the gateway's
+    own partial close, in whole contracts. Reverse is one market order for twice the size, after
+    the stop and target are cancelled — if they cannot be, nothing is sent. The trail is the
+    gateway's own trailing stop order, placed before the fixed stop it replaces is cancelled.
+  - **Capital.com positions can be moved to break-even and trailed** — from the dock, the band
+    and the break-even key. The trail is the venue's own, and it has to be enabled for the account
+    on the platform. Because an amend replaces the whole protection set, moving the target on a
+    trailing position re-sends the trail; where its distance is not known (a trail set before a
+    restart, or on the platform), the amend is refused rather than quietly fixing the stop.
+    Capital.com has no partial close in its API, and a reverse there would be two separate orders,
+    so neither is offered.
+  - **Capital.com and ProjectX show the dock's account line** — net, return, trades, win rate,
+    drawdown over closed trades, fees — **and the position-style settings**, and Capital.com
+    plays the fill sound.
+  - **A reverse counts against the session limits** on every account: it ends one trade and opens
+    another, so a session that may not open trades may not reverse either.
+
+- **Capital.com's demo and live accounts can be switched between without entering the key again.**
+  The Trade menu names the other account and moves to it, and the Broker connection page carries
+  the same switch beside the connection it belongs to. One key reaches both sides, so nothing new
+  is stored — but the key and its password are cleared out of the form the moment they are saved,
+  which made changing accounts a matter of filling the whole form in again. That cost is how the
+  account on screen and the account somebody meant came apart, on the one venue here where the
+  difference is real money. The other side is tried before this one is let go of: a key
+  Capital.com has not issued for it is refused with the venue's own reason, and the account in use
+  is left exactly where it was. A chart armed on the account being left is taken off first and
+  then offered again through the dialog that names the account and asks, so switching on its own
+  sends nothing and never arms a chart that was not armed. Credentials coming from `.env.local`
+  have nowhere to record the choice: it holds for that sitting, `CAPITAL_ENV` decides the next
+  one, and the app says so rather than letting it be discovered after a restart.
+
+- **Indicators can be starred.** A green star beside each name in the indicator list marks it
+  a favorite, and favorites list first, right under what is already on the chart. The set is kept with the chart's workspace.
+
+### Changed
+
+- **The indicator list only lists indicators.** Price alerts, bid / ask and the position lines
+  draw through the same machinery but are not studies anyone adds, so they are no longer offered
+  there or listed under "On chart". Only the studies inherited from Vela still carry its badge;
+  Midorii's own (FVG, range, Silver Bullet, stop hunt, and whatever comes next) have none and
+  group under "Midorii".
+
+- **Arming a live account no longer asks for `LIVE` to be typed.** The dialog still names the
+  account and says the money is real, and its button commits directly. The dialog itself can be
+  switched off in Trading settings ("Ask before trading a demo or live account"); it is on by
+  default and applies to every venue account.
+
+### Fixed
+
+- **An armed venue account no longer stays on the old instrument when the chart moves.** Picking
+  another symbol under a Capital.com, ProjectX, Bybit or Binance Spot account left the ticket
+  sending orders for the market the account was armed on, and the account was marked with the
+  new chart's prices. The account is now taken off the moment the chart moves to another
+  instrument and offered again for the new one through the arm dialog; answering no leaves the
+  chart on Just Watching. Anything still open on the old instrument is named in a notice — it
+  stays at the venue, and is no longer drawn. A timeframe change keeps the account as it is.
+
 ## [v0.6.0]
 
 ### Added
@@ -69,6 +268,11 @@ Vela's — the charting library Midorii is built on and forked from.
   the same two gestures a position's levels already answered to, on the same kind of thing. The
   tag also says which way it goes and how big, because a chart with three orders on it is read
   by their sizes and "limit" is true of all three.
+
+  Dragging is offered only where the account can actually move an order: on paper, Capital.com
+  and ProjectX. A spot balance and a replay have no such call, and their order lines stay put
+  rather than offering a handle that would spring back. Cancelling is not gated — every account
+  here can do that, so the ✕ is always real.
 
 - **One account band, with the figures you choose.** Every traded chart used to build its own
   band from scratch — the same row of numbers written four times, drifting apart. It is now one
@@ -183,6 +387,16 @@ Vela's — the charting library Midorii is built on and forked from.
   Capital.com is unchanged and still measures in points. What a point is worth there can only
   be learned from a position that has already moved, and a figure invented for an instrument
   nobody has asked about would be worse than the honest one that is there now.
+
+- **Capital.com risk figures are counted in the account's own money.** What a point of an
+  instrument is worth was only ever worked out from a position that had already moved — and then
+  forgotten the moment it closed, which is exactly when the next trade is being sized. It is now
+  kept per instrument rather than per position, learned when positions are read rather than when
+  they are drawn, and stated outright from the venue's own lot size wherever the instrument books
+  its results in the currency the account is held in. On an instrument that books in another
+  currency and has not been traded yet the ticket still measures in points, as it always has: the
+  conversion rate is something the venue never tells this app, and a guessed one would be wrong by
+  exactly that rate.
 
 - **The size on the ticket is the size that goes out.** Venues deal in whole contracts, or in
   hundredths, or on whatever grid they publish, and the panel used to show the unrounded figure
