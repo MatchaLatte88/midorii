@@ -245,6 +245,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
             /* The line stays neutral and so does its price: the entry is where it is. Only the
              * tag moves with the money, because the money is the only part of it that does. */
             titleColor: pnlColor(p.openPnl, style),
+            tagStyle: 'bracket',
             axisTag: true,
             /* The entry never moves — a position opened where it opened — but it is the handle
              * for everything done to the position as a whole: the button closes it, and a drag
@@ -259,6 +260,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
                 id: stopLineId(p.id), paneId: 'price', price: p.stopPrice, color: style.stopColor,
                 lineStyle: style.levelStyle, width: style.lineWidth,
                 title: `SL  ${money(p.stopPnl, mark)}  ${rMultiple(p.stopR)}`, axisTag: true, draggable: true,
+                tagStyle: 'bracket',
             });
         }
         if (p.targetPrice != null) {
@@ -266,6 +268,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
                 id: targetLineId(p.id), paneId: 'price', price: p.targetPrice, color: style.targetColor,
                 lineStyle: style.levelStyle, width: style.lineWidth,
                 title: `TP  ${money(p.targetPnl, mark)}  ${rMultiple(p.targetR)}`, axisTag: true, draggable: true,
+                tagStyle: 'bracket',
             });
         }
     }
@@ -286,7 +289,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
             /* Which way it goes and how big, not just what kind it is: a chart with three
              * resting orders on it is read by their sizes, and "limit" is true of all three. */
             title: [o.tag ?? o.side, o.size != null ? formatSize(o.size) : null].filter(Boolean).join('  '),
-            axisTag: true, draggable: state.ordersMovable === true, action: 'close',
+            tagStyle: 'bracket', axisTag: true, draggable: state.ordersMovable === true, action: 'close',
         });
     }
 

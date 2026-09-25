@@ -64,6 +64,13 @@ export interface PriceLine {
     /** Drawn as a tag riding the line at the right edge of the plot. Empty ⇒ no tag. */
     title?: string;
     /**
+     * Visual treatment for the plot-side tag.
+     *
+     * `bracket` is the outlined, segmented trading treatment. The default stays the compact
+     * filled badge used by ordinary indicator and alert price lines.
+     */
+    tagStyle?: 'bracket';
+    /**
      * The tag's own colour, where it should differ from the line's.
      *
      * A level and what that level is currently WORTH are two different facts, and they do not

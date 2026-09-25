@@ -3,6 +3,14 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
+## [Unreleased]
+
+### Changed
+
+- **Read trade levels as compact chart brackets.** Position, stop, target, and resting-order
+  labels now use a thin outlined shape with a pointed cap, dotted grab handle, segmented values,
+  and a level-coloured close control. Other chart price labels keep their existing style.
+
 ## [v0.7.0]
 
 ### Added

@@ -5,8 +5,9 @@
 // holds them to it.
 import { describe, it, expect } from 'vitest';
 import {
-    ACTION_SIZE, GRAB_TOLERANCE, TAG_HEIGHT, TAG_INSET, TAG_PAD,
-    inRect, priceLineActionRect, priceLineHitAt, priceLineTagRect, declutterAxisTags,
+    ACTION_GAP, ACTION_SIZE, GRAB_TOLERANCE, TAG_HEIGHT, TAG_INSET, TAG_PAD,
+    inRect, priceLineActionRect, priceLineHitAt, priceLineTagRect, priceLineTagSegments,
+    bracketTagWidth, declutterAxisTags,
 } from '../src/renderers/native/chrome/priceLineTags';
 import { levelAllowed, levelFromDrop } from '../app/renderer/replay/replayLevels';
 import type { PriceLine } from '../src/core/model/scene';
@@ -39,6 +40,16 @@ describe('price line tag geometry', () => {
         expect(long.x).toBeLessThan(short.x); // the tag grows leftwards
         expect(priceLineActionRect(DATA_W, 300).x).toBe(DATA_W - TAG_INSET - ACTION_SIZE); // button unmoved
     });
+
+    it('lays an outlined trading bracket against the edge with its action on the left', () => {
+        const title = 'TP  +$293.50  +2.00R';
+        const tag = priceLineTagRect(measure, title, true, DATA_W, 300, 'bracket');
+        const action = priceLineActionRect(DATA_W, 300, tag);
+        expect(tag.x + tag.width).toBe(DATA_W - TAG_INSET);
+        expect(action.x + action.width + ACTION_GAP).toBe(tag.x);
+        expect(tag.width).toBe(bracketTagWidth(measure, title));
+        expect(priceLineTagSegments(title)).toEqual(['TP', '+$293.50', '+2.00R']);
+    });
 });
 
 describe('price line hit testing', () => {
@@ -48,6 +59,14 @@ describe('price line hit testing', () => {
         const l = line({ title: 'SL −$820', draggable: true, action: 'close' });
         const b = priceLineActionRect(DATA_W, 300);
         expect(hit(b.x + b.width / 2, 300, l)).toBe('action');
+    });
+
+    it('hits the bracket action where it is drawn to the tag\'s left', () => {
+        const l = line({ title: 'SL  −$46.50', tagStyle: 'bracket', action: 'close' });
+        const tag = priceLineTagRect(measure, l.title!, true, DATA_W, 300, 'bracket');
+        const b = priceLineActionRect(DATA_W, 300, tag);
+        expect(hit(b.x + b.width / 2, 300, l)).toBe('action');
+        expect(hit(tag.x + 3, 300, l)).toBe('tag');
     });
 
     it('treats the tag as a handle for the line', () => {

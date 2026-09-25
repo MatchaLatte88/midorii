@@ -13,7 +13,11 @@ import { renderTradeMarkers } from '../../shared/trade-markers';
 import type { TradeExecution } from '../../../core/model/trades';
 import { paneAxisTicks, formatAxisValue, timeTicks } from './ticks';
 import { axisColumnX, PANE_SEPARATOR_PX } from './axisLayout';
-import { priceLineActionRect, priceLineHitAt, priceLineTagRect, declutterAxisTags, AXIS_TAG_HEIGHT, TAG_PAD, TAG_RADIUS, type PriceLineHit } from './priceLineTags';
+import {
+    priceLineActionRect, priceLineHitAt, priceLineTagRect, priceLineTagSegments,
+    declutterAxisTags, AXIS_TAG_HEIGHT, TAG_PAD, TAG_RADIUS, BRACKET_GRIP_WIDTH,
+    BRACKET_SEGMENT_GAP, BRACKET_TIP_WIDTH, type PriceLineHit, type Rect,
+} from './priceLineTags';
 import { parseColor } from '../backend/gl/color';
 import { DARK_THEME } from '../../../core/theme';
 import { tzOffsetMs } from './tz';
@@ -367,34 +371,37 @@ export class ChromeRenderer {
                 if (y < pane.bounds.top || y > pane.bounds.top + pane.bounds.height) continue;
                 const color = pl.color ?? theme.textColor;
                 const ink = tagTextColor(color, theme.background);
+                let tagRect: Rect | undefined;
                 if (pl.title) {
                     const tag = pl.titleColor ?? color;
-                    const r = priceLineTagRect(ctx, pl.title, !!pl.action, dataW, y);
-                    ctx.fillStyle = tag;
-                    roundRect(ctx, r.x, r.y, r.width, r.height, TAG_RADIUS);
-                    ctx.fill();
-                    ctx.fillStyle = tagTextColor(tag, theme.background);
-                    ctx.textAlign = 'left';
-                    ctx.fillText(pl.title, r.x + TAG_PAD, y);
-                    ctx.textAlign = 'start';
+                    tagRect = priceLineTagRect(ctx, pl.title, !!pl.action, dataW, y, pl.tagStyle);
+                    if (pl.tagStyle === 'bracket') this.drawBracketTag(ctx, tagRect, pl.title, tag, theme.background, y);
+                    else {
+                        ctx.fillStyle = tag;
+                        roundRect(ctx, tagRect.x, tagRect.y, tagRect.width, tagRect.height, TAG_RADIUS);
+                        ctx.fill();
+                        ctx.fillStyle = tagTextColor(tag, theme.background);
+                        ctx.textAlign = 'left';
+                        ctx.fillText(pl.title, tagRect.x + TAG_PAD, y);
+                        ctx.textAlign = 'start';
+                    }
                 }
                 if (pl.action === 'close') {
-                    const b = priceLineActionRect(dataW, y);
+                    const actionColor = pl.tagStyle === 'bracket' ? (pl.titleColor ?? color) : theme.downColor;
+                    const b = priceLineActionRect(dataW, y, pl.tagStyle === 'bracket' ? tagRect : undefined);
                     const cx = b.x + b.width / 2;
-                    /* An outlined ring in the down colour, whatever the line is: this button
-                     * flattens a position, and the one control that ends a trade should not
-                     * change appearance with the trade's mood — a green "close" on a winner is
-                     * the same irreversible press as a red one on a loser. */
+                    /* Filled badges keep the universal down-colour warning. A trading bracket
+                     * treats the ring as part of its level, so its outline follows the bracket. */
                     ctx.fillStyle = theme.background;
                     ctx.beginPath();
                     ctx.arc(cx, y, b.width / 2 - 1, 0, Math.PI * 2);
                     ctx.fill();
-                    ctx.strokeStyle = theme.downColor;
+                    ctx.strokeStyle = actionColor;
                     ctx.lineWidth = 1.5;
                     ctx.stroke();
                     // The glyph is drawn, not typed: an ✕ from the font sits differently in
                     // every family, and this one has to look centred in a 9px circle.
-                    ctx.strokeStyle = theme.downColor;
+                    ctx.strokeStyle = actionColor;
                     ctx.lineWidth = 1.5;
                     const arm = b.width / 2 - 6;
                     ctx.beginPath();
@@ -422,6 +429,67 @@ export class ChromeRenderer {
         this.drawAxisChips(ctx, chips, dataW);
         this.drawPriceLineDrag(ctx, scene, coords, theme, dataW, panes);
         ctx.textBaseline = 'alphabetic';
+    }
+
+    /** The chart-side treatment used by trade brackets: outlined, segmented, and handle-like. */
+    private drawBracketTag(
+        ctx: CanvasRenderingContext2D,
+        r: Rect,
+        title: string,
+        color: string,
+        background: string,
+        y: number,
+    ): void {
+        const right = r.x + r.width;
+        const bottom = r.y + r.height;
+        ctx.fillStyle = background;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(r.x + 4, r.y);
+        ctx.lineTo(right - BRACKET_TIP_WIDTH, r.y);
+        ctx.lineTo(right, y);
+        ctx.lineTo(right - BRACKET_TIP_WIDTH, bottom);
+        ctx.lineTo(r.x + 4, bottom);
+        ctx.quadraticCurveTo(r.x, bottom, r.x, bottom - 4);
+        ctx.lineTo(r.x, r.y + 4);
+        ctx.quadraticCurveTo(r.x, r.y, r.x + 4, r.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        /* Six small dots make the tag read as a handle without adding another icon. */
+        ctx.fillStyle = color;
+        const gripX = r.x + TAG_PAD - 2;
+        for (const dx of [0, 4]) {
+            for (const dy of [-4, 0, 4]) {
+                ctx.beginPath();
+                ctx.arc(gripX + dx, y + dy, 1, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        const segments = priceLineTagSegments(title);
+        let x = r.x + TAG_PAD + BRACKET_GRIP_WIDTH;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.textAlign = 'left';
+        for (let i = 0; i < segments.length; i++) {
+            const segment = segments[i]!;
+            ctx.fillText(segment, x, y);
+            x += ctx.measureText(segment).width;
+            if (i === segments.length - 1) continue;
+            x += BRACKET_SEGMENT_GAP;
+            ctx.save();
+            ctx.globalAlpha = 0.55;
+            ctx.beginPath();
+            ctx.moveTo(Math.round(x) + 0.5, r.y + 5);
+            ctx.lineTo(Math.round(x) + 0.5, bottom - 5);
+            ctx.stroke();
+            ctx.restore();
+            x += BRACKET_SEGMENT_GAP + 1;
+        }
+        ctx.textAlign = 'start';
     }
 
     /**

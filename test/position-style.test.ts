@@ -119,6 +119,15 @@ describe('the position as chart geometry', () => {
         expect(sl.width).toBe(3);
         expect(sl.color).toBe('#abcdef');
     });
+
+    it('marks position, stop, and target readings as outlined trading brackets', () => {
+        const out = buildReplayOutput(longState(), NOW);
+        expect(out.priceLines?.map((line) => [line.id, line.tagStyle])).toEqual([
+            ['pos_1_entry_lvl', 'bracket'],
+            ['pos_1_sl', 'bracket'],
+            ['pos_1_tp', 'bracket'],
+        ]);
+    });
 });
 
 describe('the mark an execution leaves', () => {

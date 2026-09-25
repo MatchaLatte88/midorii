@@ -13,6 +13,12 @@ export const TAG_HEIGHT = 20;
 export const TAG_PAD = 8;
 /** Half the height — a stadium, so the tag reads as a badge rather than as a button. */
 export const TAG_RADIUS = TAG_HEIGHT / 2;
+/** The trading bracket's dotted grip and pointed right cap. */
+export const BRACKET_TAG_HEIGHT = 22;
+export const BRACKET_GRIP_WIDTH = 11;
+export const BRACKET_TIP_WIDTH = 6;
+/** Space on either side of a divider between bracket readings. */
+export const BRACKET_SEGMENT_GAP = 7;
 /** How far the tags are held off the plot's right edge. */
 export const TAG_INSET = 6;
 /** The round action button, and the gap between it and the tag. */
@@ -49,26 +55,50 @@ export function inRect(x: number, y: number, r: Rect): boolean {
 }
 
 /**
- * The action button's box: against the plot's right edge, centred on the line.
+ * The action button's box, centred on the line: against the plot's right edge for a filled
+ * badge, or immediately left of an outlined trading bracket.
  *
  * It comes first because the tag is laid out against it — the button keeps its place whatever
  * the tag says, so a number that grows by a digit never moves the button out from under a
  * finger that was already reaching for it.
  */
-export function priceLineActionRect(dataW: number, y: number): Rect {
+export function priceLineActionRect(dataW: number, y: number, bracketTag?: Rect): Rect {
     return {
-        x: dataW - TAG_INSET - ACTION_SIZE,
+        x: bracketTag ? bracketTag.x - ACTION_GAP - ACTION_SIZE : dataW - TAG_INSET - ACTION_SIZE,
         y: y - ACTION_SIZE / 2,
         width: ACTION_SIZE,
         height: ACTION_SIZE,
     };
 }
 
+/** A double-space separates the readings authored into a trading tag. */
+export function priceLineTagSegments(title: string): string[] {
+    return title.split(/\s{2,}/).filter(Boolean);
+}
+
+/** Width of the outlined trading treatment, including its grip, dividers, and pointed cap. */
+export function bracketTagWidth(measure: { measureText(s: string): { width: number } }, title: string): number {
+    const segments = priceLineTagSegments(title);
+    const text = segments.reduce((sum, segment) => sum + measure.measureText(segment).width, 0);
+    const dividers = Math.max(0, segments.length - 1) * (BRACKET_SEGMENT_GAP * 2 + 1);
+    return TAG_PAD + BRACKET_GRIP_WIDTH + text + dividers + TAG_PAD + BRACKET_TIP_WIDTH;
+}
+
 /** The tag's box: right-aligned, before the button when there is one. */
-export function priceLineTagRect(measure: { measureText(s: string): { width: number } }, title: string, hasAction: boolean, dataW: number, y: number): Rect {
-    const width = measure.measureText(title).width + TAG_PAD * 2;
-    const right = hasAction ? priceLineActionRect(dataW, y).x - ACTION_GAP : dataW - TAG_INSET;
-    return { x: right - width, y: y - TAG_HEIGHT / 2, width, height: TAG_HEIGHT };
+export function priceLineTagRect(
+    measure: { measureText(s: string): { width: number } },
+    title: string,
+    hasAction: boolean,
+    dataW: number,
+    y: number,
+    style: PriceLine['tagStyle'] = undefined,
+): Rect {
+    const width = style === 'bracket' ? bracketTagWidth(measure, title) : measure.measureText(title).width + TAG_PAD * 2;
+    /* The reference trading bracket points into the scale and keeps the destructive action on
+     * its left. Filled badges keep their long-standing action-at-the-edge arrangement. */
+    const right = style === 'bracket' ? dataW - TAG_INSET : hasAction ? priceLineActionRect(dataW, y).x - ACTION_GAP : dataW - TAG_INSET;
+    const height = style === 'bracket' ? BRACKET_TAG_HEIGHT : TAG_HEIGHT;
+    return { x: right - width, y: y - height / 2, width, height };
 }
 
 /** What a pointer is over: the line's body, its tag (also a handle), or its button. */
@@ -92,8 +122,10 @@ export function priceLineHitAt(
     dataW: number,
     measure: { measureText(s: string): { width: number } },
 ): PriceLineHit | null {
-    if (line.action && inRect(x, y, priceLineActionRect(dataW, lineY))) return 'action';
-    if (line.title && inRect(x, y, priceLineTagRect(measure, line.title, !!line.action, dataW, lineY))) return 'tag';
+    const tag = line.title ? priceLineTagRect(measure, line.title, !!line.action, dataW, lineY, line.tagStyle) : undefined;
+    const action = line.action ? priceLineActionRect(dataW, lineY, line.tagStyle === 'bracket' ? tag : undefined) : undefined;
+    if (action && inRect(x, y, action)) return 'action';
+    if (tag && inRect(x, y, tag)) return 'tag';
     if ((line.draggable || line.dragSpawns) && x <= dataW && Math.abs(y - lineY) <= GRAB_TOLERANCE) return 'line';
     return null;
 }
