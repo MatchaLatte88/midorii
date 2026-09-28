@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectXProvider, projectXDealing, rootOf } from '../app/renderer/providers/ProjectXProvider';
 import type { MidoriProjectXContract } from '../app/renderer/midori';
+import type { OHLCV } from '../src';
 
 const contract = (
     id: string, name: string, description: string,
@@ -11,6 +12,18 @@ const NQU6 = contract('CON.F.US.ENQ.U26', 'NQU6', 'E-mini NASDAQ-100: September 
 const NQZ6 = contract('CON.F.US.ENQ.Z26', 'NQZ6', 'E-mini NASDAQ-100: December 2026', { activeContract: false });
 const MNQU6 = contract('CON.F.US.MNQ.U26', 'MNQU6', 'Micro E-mini Nasdaq-100: September 2026', { tickValue: 0.5, symbolId: 'F.US.MNQ' });
 const QGV6 = contract('CON.F.US.NQG.V26', 'QGV6', 'E-Mini Natural Gas: October 2026', { tickSize: 0.005, tickValue: 12.5, symbolId: 'F.US.NQG' });
+
+/** A history page, ascending as the provider hands it to the chart. */
+function chartBars(from: number, count: number): OHLCV[] {
+    return Array.from({ length: count }, (_, i) => ({
+        time: from + i,
+        open: from + i,
+        high: from + i,
+        low: from + i,
+        close: from + i,
+        volume: 1,
+    }));
+}
 
 /** The bridge, with only the calls the provider makes. */
 function bridge(overrides: Record<string, unknown> = {}) {
@@ -171,6 +184,58 @@ describe('ProjectX bars', () => {
         expect(await new ProjectXProvider().getBars('NOPE', '1', {})).toEqual([]);
         expect(api.bars).not.toHaveBeenCalled();
         expect(warn).toHaveBeenCalled();
+    });
+
+    it('paints the newest 500 bars before fetching older segments', async () => {
+        const recent = chartBars(1_501, 500);
+        let releaseSecond: (page: OHLCV[]) => void = () => {};
+        const second = new Promise<OHLCV[]>((resolve) => { releaseSecond = resolve; });
+        const pages = [second, Promise.resolve(chartBars(501, 500)), Promise.resolve(chartBars(1, 500))];
+        const requests: Array<{ from?: number; to?: number }> = [];
+        const api = bridge({
+            bars: vi.fn((request: { from?: number; to?: number }) => {
+                requests.push(request);
+                return request.to == null ? Promise.resolve(recent) : (pages.shift() ?? Promise.resolve([]));
+            }),
+        });
+        const provider = new ProjectXProvider();
+        const snapshots: OHLCV[][] = [];
+
+        const loading = provider.getBarsProgressive('NQ', '5', { limit: 2_000 }, (batch) => snapshots.push(batch));
+        await vi.waitFor(() => expect(snapshots.map((batch) => batch.length)).toEqual([500]));
+
+        expect(api.bars).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            contractId: 'CON.F.US.ENQ.U26', timeframe: '5', to: undefined, limit: 500,
+        }));
+        expect(requests[0]!.from!).toBeLessThan(Date.now() - 3 * 24 * 60 * 60_000);
+        expect(api.bars).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            contractId: 'CON.F.US.ENQ.U26', timeframe: '5', to: 1_500, limit: 500,
+        }));
+
+        releaseSecond(chartBars(1_001, 500));
+        const full = await loading;
+        expect(snapshots.map((batch) => batch.length)).toEqual([500, 1_000, 1_500]);
+        expect(full).toHaveLength(2_000);
+        expect(full[0]?.time).toBe(1);
+        expect(full[full.length - 1]?.time).toBe(2_000);
+        expect(api.bars).toHaveBeenCalledTimes(4);
+    });
+
+    it('stops before the next older segment after the chart switches away', async () => {
+        const api = bridge({ bars: vi.fn(async () => chartBars(1_501, 500)) });
+        const provider = new ProjectXProvider();
+        const abort = new AbortController();
+
+        const full = await provider.getBarsProgressive(
+            'NQ',
+            '5',
+            { limit: 2_000 },
+            () => abort.abort(),
+            { signal: abort.signal },
+        );
+
+        expect(full).toHaveLength(500);
+        expect(api.bars).toHaveBeenCalledTimes(1);
     });
 });
 

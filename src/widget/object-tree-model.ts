@@ -60,6 +60,8 @@ export interface TreePane {
 /** Everything the layout needs, pulled from the chart by the panel before it renders. */
 export interface TreeSnapshot {
     panes: readonly PaneInfo[];
+    /** Whether an indicator belongs in the user-facing tree. Host machinery returns false. */
+    indicatorIncluded: (id: string) => boolean;
     /** Live visibility per indicator id — the pane model doesn't carry it. */
     indicatorVisible: (id: string) => boolean;
     /** A handle's title, used only as a FALLBACK: the pane model carries the resolved display
@@ -354,15 +356,18 @@ function paneItems(snap: TreeSnapshot, pane: PaneInfo, units: DrawUnit[]): TreeI
 /** The whole tree, top pane first. */
 export function buildTree(snap: TreeSnapshot): TreePane[] {
     const paneIds = new Set(snap.panes.map((p) => p.id));
-    return snap.panes.map((pane) => ({
-        id: pane.id,
-        kind: pane.kind,
-        label: paneLabel(pane, snap.handleTitle),
-        order: pane.order,
-        collapsed: pane.collapsed,
-        maximized: pane.maximized,
-        items: paneItems(snap, pane, drawingUnits(paneDrawings(snap.drawings, pane.id, paneIds), snap.groups)),
-    }));
+    return snap.panes.map((pane) => {
+        const listedPane = { ...pane, indicators: pane.indicators.filter((indicator) => snap.indicatorIncluded(indicator.id)) };
+        return {
+            id: pane.id,
+            kind: pane.kind,
+            label: paneLabel(listedPane, snap.handleTitle),
+            order: pane.order,
+            collapsed: pane.collapsed,
+            maximized: pane.maximized,
+            items: paneItems(snap, listedPane, drawingUnits(paneDrawings(snap.drawings, pane.id, paneIds), snap.groups)),
+        };
+    });
 }
 
 /** True when the tree has nothing to show — no indicators beyond the candles, no drawings. */

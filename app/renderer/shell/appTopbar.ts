@@ -2,6 +2,7 @@ import { injectStyles } from '../../../src/ui';
 import { iconAt } from '../../../src/core/icons';
 import logoUrl from '../assets/midorii-logo.png';
 import type { AppThemeName } from './themes';
+import { mountAccountTopbar, type AccountTopbarHandle } from './accountTopbar';
 
 /**
  * The app's own top bar — above Vela's own chart topbar, not instead of it: the brand mark
@@ -16,12 +17,13 @@ import type { AppThemeName } from './themes';
  * the row, and the tab strip stays a list of the things there are to do.
  */
 
-export type AppTab = 'chart' | 'replay' | 'backtest' | 'analysis' | 'strategies' | 'bot' | 'settings';
+export type AppTab = 'chart' | 'replay' | 'backtest' | 'patterns' | 'analysis' | 'strategies' | 'bot' | 'settings';
 
 const TABS: ReadonlyArray<{ id: AppTab; label: string }> = [
     { id: 'chart', label: 'Chart' },
     { id: 'replay', label: 'Replay' },
     { id: 'backtest', label: 'Backtest' },
+    { id: 'patterns', label: 'Patterns' },
     { id: 'analysis', label: 'Analysis' },
     { id: 'strategies', label: 'Strategies' },
     { id: 'bot', label: 'Trading Bot' },
@@ -119,6 +121,17 @@ const CSS = `
 .midorii-topbar-winbtn:active { background: var(--vela-active); color: var(--vela-fg-bright); }
 .midorii-topbar-winbtn[data-close='1']:hover { background: #e81123; color: #ffffff; }
 .midorii-topbar-winbtn[data-close='1']:active { background: #f1707a; color: #ffffff; }
+
+@media (max-width: 1430px) {
+    .midorii-topbar-brand { padding-right: 9px; }
+    .midorii-topbar-tab { padding-inline: 10px; }
+}
+@media (max-width: 1160px) {
+    .midorii-topbar-name { display: none; }
+    .midorii-topbar-brand { padding-inline: 8px; }
+    .midorii-topbar-logo { height: 26px; }
+    .midorii-topbar-tab { padding-inline: 8px; }
+}
 `;
 
 export interface AppTopbarOptions {
@@ -132,6 +145,7 @@ export interface AppTopbarOptions {
 
 export interface AppTopbarHandle {
     readonly el: HTMLElement;
+    readonly account: AccountTopbarHandle;
     setActiveTab(tab: AppTab): void;
     setTheme(theme: AppThemeName): void;
 }
@@ -191,6 +205,7 @@ export function mountAppTopbar(host: HTMLElement, opts: AppTopbarOptions): AppTo
     const themeBtn = doc.createElement('button');
     themeBtn.className = 'midorii-topbar-icon midorii-topbar-theme';
     themeBtn.addEventListener('click', () => opts.onToggleTheme());
+    const account = mountAccountTopbar(right);
     right.append(settingsBtn, themeBtn);
 
     // Native traffic lights already cover this on macOS — a second, custom set beside
@@ -219,7 +234,7 @@ export function mountAppTopbar(host: HTMLElement, opts: AppTopbarOptions): AppTo
     setTheme(opts.theme);
     setActiveTab(opts.active);
 
-    return { el, setActiveTab, setTheme };
+    return { el, account, setActiveTab, setTheme };
 }
 
 /** The custom minimize/maximize/close row — what a frameless window on Windows/Linux

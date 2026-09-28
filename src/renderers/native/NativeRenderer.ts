@@ -30,7 +30,7 @@ import type { RendererDisplayOptions, NativeBackend, PriceStyle, MoveTarget, The
 import type { Unsubscribe } from '../../core/util/types';
 import { isLineLikeSeries } from '../../core/model/series';
 import { InputsUI, type LegendPlotValue } from '../shared/InputsUI';
-import { PaneControls, PANE_CONTROLS_CORNER } from './chrome/PaneControls';
+import { PaneControls, paneControlsCorner } from './chrome/PaneControls';
 import { AxisScaleButtons, type AxisScaleView } from './chrome/AxisScaleButtons';
 import { NATIVE_CAPABILITIES, supportsWebGL2 } from './capabilities';
 import { WebGL2Backend } from './backend/WebGL2Backend';
@@ -1414,6 +1414,11 @@ export class NativeRenderer implements IChartRenderer {
             drawingsCursor: (x, y) => this.userDrawings?.cursorAt(x, y) ?? null,
             drawingsDblClick: (x, y) => this.userDrawings?.dblClick(x, y) ?? false,
             drawingsClearTransient: () => this.userDrawings?.clearTransient(),
+            rightHoldAvailable: () => this.userDrawings?.radialHoldAvailable() ?? false,
+            rightHoldStart: (clientX, clientY) => this.userDrawings?.beginRadialHold(clientX, clientY) ?? false,
+            rightHoldMove: (clientX, clientY) => this.userDrawings?.moveRadialHold(clientX, clientY),
+            rightHoldEnd: (clientX, clientY) => this.userDrawings?.endRadialHold(clientX, clientY),
+            rightHoldCancel: () => this.userDrawings?.cancelRadialHold(),
         });
         this.input.rightEdgeZoom = this.zoomAnchorMode === 'right'; // honor a pre-mount feature set
         this.input.axisDrag = this.axisDragEnabled;
@@ -2142,12 +2147,14 @@ export class NativeRenderer implements IChartRenderer {
         // say so or the recorded order (object tree, seriesOrder reads) starts out a lie.
         if (model.native && this.extLayers.some((l) => l.def.id === model.native!.type)) this.scene.assignIndicatorZTop(model.id);
         else this.scene.assignIndicatorZ(model.id);
-        // The legend chip and the settings dialog both show the compact shorttitle when
-        // declared; the full title stays on the picker, object tree and inspect().
-        this.inputsUI.upsert(model.id, model.shorttitle ?? model.title, model.inputs, model.inputValues, model.paneId, {
-            native: !!model.native,
-            ...(model.props ? { props: model.props, propValues: model.propValues ?? {} } : {}),
-        });
+        // The legend chip and its indicator dialog both show the compact shorttitle when
+        // declared. Internal host machinery has app-level settings and gets no study row.
+        if (model.legend !== false) {
+            this.inputsUI.upsert(model.id, model.shorttitle ?? model.title, model.inputs, model.inputValues, model.paneId, {
+                native: !!model.native,
+                ...(model.props ? { props: model.props, propValues: model.propValues ?? {} } : {}),
+            });
+        }
         if (model.native?.type === 'volume') {
             this.volumeActive = true; // the volume layer follows the indicator's presence
             this.volumeHidden = false;
@@ -3876,11 +3883,14 @@ export class NativeRenderer implements IChartRenderer {
         const bottom = Math.max(0, plotH - (top + height));
         this.mountContainer.style.setProperty('--vela-price-pane-top', `${top}px`);
         this.mountContainer.style.setProperty('--vela-price-pane-bottom', `${bottom}px`);
-        // The corner the price pane's hover cluster claims, as `--vela-pane-controls-width`:
-        // its maximize exists only once there is a second pane, and mobile suppresses the
-        // clusters. Host chrome in that corner reads it to sit against the axis while the
-        // spot is free, and to step aside once it is not.
-        const controls = this.layoutMode !== 'mobile' && this.scene.orderedPanes().length > 1 ? PANE_CONTROLS_CORNER : 0;
+        // The top-right corner the hover cluster of the TOP pane claims, as
+        // `--vela-pane-controls-width`: the price pane's (a maximize, once there is a second
+        // pane), or a maximized study's whole move/collapse/maximize row. Mobile suppresses
+        // the clusters. Host chrome in that corner reads it to sit against the axis while the
+        // spot is free, and to step aside by as much as the cluster needs once it is not.
+        const ordered = this.scene.orderedPanes();
+        const lead = ordered.find((p) => p.id === this.maximizedPaneId) ?? ordered[0];
+        const controls = this.layoutMode !== 'mobile' && lead ? paneControlsCorner(lead.kind, ordered.length) : 0;
         this.mountContainer.style.setProperty('--vela-pane-controls-width', `${controls}px`);
     }
 

@@ -6,6 +6,8 @@ import { formatMoney } from '../format';
 import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIndicator';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { wireOrderEntry } from '../replay/replayOrders';
+import { wirePendingMenu } from '../replay/chartPending';
+import { wireTradePreview } from '../replay/chartPreview';
 import { mountTradeDock } from '../replay/tradeDock';
 import { mountTradeSidebar } from '../replay/tradeSidebar';
 import { mountQuickPanel } from '../replay/quickPanel';
@@ -58,7 +60,11 @@ export interface ProjectXMountOptions {
     theme: ThemeName | VelaTheme;
 }
 
-export interface ProjectXMount { unmount(): void }
+export interface ProjectXMount {
+    /** The latest room before this account's configured maximum-loss floor. */
+    mllRoom(): number | null;
+    unmount(): void;
+}
 
 function guarded(ws: VelaWorkspace, run: () => void): void {
     try {
@@ -201,6 +207,20 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
         host: ws.root,
         risk: () => riskOf(opts.settings()),
         beforeOrder: guardLimits,
+        notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
+    }));
+    // A level right-clicked on the plot, onto the ticket as a resting order — not sent.
+    off.push(wirePendingMenu({
+        chart,
+        sidebar,
+        price: () => controller.price(),
+        tick: () => controller.dealing.tickSize,
+    }));
+    // The ticket drawn where it would trade, before it is sent — see chartPreview.ts.
+    off.push(wireTradePreview({
+        chart,
+        indicator,
+        sidebar,
         notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
     }));
     /* The drag gestures on the plot — where a stop and a target are set on an open position.
@@ -417,6 +437,7 @@ export function mountProjectXTrading(opts: ProjectXMountOptions): ProjectXMount 
     controller.start();
 
     return {
+        mllRoom: () => prop.last().room,
         unmount(): void {
             controller.stop();
             controller.onChange = null;

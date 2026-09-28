@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { RISK_PARAM_KEYS, STRATEGIES, describeParams, strategyCatalog } from '../app/renderer/strategies';
+import {
+    RISK_PARAM_KEYS, STRATEGIES, buildStrategy, describeParams, strategyCatalog,
+} from '../app/renderer/strategies';
+import type { BacktestBar } from '../shared/engine/backtest';
 
 /**
  * What the strategy library promises about everything in it.
@@ -92,7 +95,7 @@ describe('settings, as a person reads them back', () => {
         });
         const byLabel = new Map(rows.map((r) => [r.label, r.value]));
 
-        expect(byLabel.get('Risk per trade')).toBe('Percent of equity');
+        expect(byLabel.get('Risk per trade')).toBe('% of equity');
         expect(byLabel.get('Hours')).toBe('London, NY AM');
         expect(byLabel.get('Measured in')).toBe('Points');
         expect(byLabel.get('Risk')).toBe('1');
@@ -110,5 +113,22 @@ describe('settings, as a person reads them back', () => {
 
     it('reads a hand-traded session as having no settings, because it has none', () => {
         expect(describeParams('replay', {})).toEqual([]);
+    });
+});
+
+describe('what a built strategy hands to the account', () => {
+    /* Enough bars for a detector to run over without finding anything — the management is
+     * read off the parameters, not off what was detected. */
+    const bars: BacktestBar[] = Array.from({ length: 60 }, (_, i) => ({
+        time: i * 300_000, open: 100, high: 101, low: 99, close: 100, volume: 1,
+    }));
+
+    it('carries break-even and trailing across, because the Broker applies them', () => {
+        const built = buildStrategy('silverbullet', { breakEvenAtR: 1, trailAtR: 2, trailR: 0.5 }, bars);
+        expect(built.management).toEqual({ breakEvenAtR: 1, trailAtR: 2, trailR: 0.5 });
+    });
+
+    it('hands over nothing when the trade is simply left to run to its levels', () => {
+        expect(buildStrategy('silverbullet', {}, bars).management).toBeNull();
     });
 });

@@ -6,7 +6,7 @@ import {
     type OpeningRangeSessionId,
 } from '../../../src/core/analysis/openingRange';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
-import { RISK_PARAMS, positionSize } from '../../../shared/strategies/risk.js';
+import { RISK_PARAMS, leverageCap, positionSize } from '../../../shared/strategies/risk.js';
 import type { RiskMode } from '../../../shared/strategies/risk.js';
 import { cached, detectionCacheKey, type DetectionCache } from './detection';
 import type { StrategyParam, StrategyParams, StrategySpec } from './types';
@@ -243,7 +243,9 @@ export const OPENING_RANGE_STRATEGY: StrategySpec = {
         const rrr = numberOf(params, 'rrr');
         const riskMode = stringOf(params, 'riskMode') as RiskMode;
         const riskValue = numberOf(params, 'riskValue');
-        const maxLeverage = numberOf(params, 'maxLeverage');
+        /* Null when the notional ceiling is switched off: the size is then whatever the
+         * risk asks for, and being stopped out costs exactly what was typed in. */
+        const cap = leverageCap(params);
 
         const atrStopPct = numberOf(params, 'atrStopPct');
         const minRelVolume = numberOf(params, 'minRelVolume');
@@ -323,7 +325,7 @@ export const OPENING_RANGE_STRATEGY: StrategySpec = {
                     long ? trigger - stopDistance : trigger + stopDistance,
                     riskMode,
                     riskValue,
-                    maxLeverage,
+                    cap,
                 );
                 if (size == null) return;
 

@@ -8,7 +8,7 @@ import {
 } from '../../../src/core/analysis/silverBullet';
 import type { FvgSizeUnit } from '../../../src/core/analysis/fvg';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
-import { RISK_PARAMS, positionSize } from '../../../shared/strategies/risk.js';
+import { RISK_PARAMS, leverageCap, positionSize } from '../../../shared/strategies/risk.js';
 import type { RiskMode } from '../../../shared/strategies/risk.js';
 import { SILVER_BULLET_INDICATOR_TYPE } from '../../../src/core/native-indicators/silverbullet';
 import { cached, detectionCacheKey, type DetectionCache } from './detection';
@@ -247,7 +247,9 @@ export const SILVER_BULLET_STRATEGY: StrategySpec = {
         const rrr = numberOf(params, 'rrr');
         const riskMode = stringOf(params, 'riskMode') as RiskMode;
         const riskValue = numberOf(params, 'riskValue');
-        const maxLeverage = numberOf(params, 'maxLeverage');
+        /* Null when the notional ceiling is switched off: the size is then whatever the
+         * risk asks for, and being stopped out costs exactly what was typed in. */
+        const cap = leverageCap(params);
 
         /* `show: 'all'` is what makes the run honest: the setups price never came back to are
          * exactly the ones a strategy pays for by having its order sit there, and a list
@@ -298,7 +300,7 @@ export const SILVER_BULLET_STRATEGY: StrategySpec = {
                 if (arriving.length === 0) return;
                 const setup = arriving[0]!;
 
-                const size = positionSize(ctx.equity, setup.entryPrice, setup.stop, riskMode, riskValue, maxLeverage);
+                const size = positionSize(ctx.equity, setup.entryPrice, setup.stop, riskMode, riskValue, cap);
                 if (size == null) return;
 
                 const long = setup.direction === 'bull';

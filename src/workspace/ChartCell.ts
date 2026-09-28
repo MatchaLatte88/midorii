@@ -25,7 +25,15 @@ import { CellControls } from '../widget/cell-controls';
 import { ChartContextMenu } from '../widget/context-menu';
 import { WidgetHistory } from '../widget/history';
 import type { RangePreset } from '../widget/bottombar';
-import { indicatorLedger, ledgerEntryName, type LedgerManifestEntry, type ResolvedIndicator } from '../widget/indicators';
+import {
+    indicatorLedger,
+    ledgerEntryName,
+    ledgerEntryVisible,
+    ledgerNativeType,
+    type LedgerManifestEntry,
+    type LedgerNativeEntry,
+    type ResolvedIndicator,
+} from '../widget/indicators';
 import { inputDeltas, type InputValue } from '../core/model/inputs';
 import {
     legendActionsProviderFor,
@@ -199,15 +207,18 @@ interface CellInstance {
     entry: ResolvedIndicator;
     handle: IndicatorHandle | null;
     external?: boolean;
-    values?: { inputs?: Record<string, InputValue>; props?: Record<string, InputValue> };
+    values?: { inputs?: Record<string, InputValue>; props?: Record<string, InputValue>; visible?: boolean };
 }
 
-/** The handle's current input/prop DELTAS against declaration defaults (see `inputDeltas`). */
-function instanceDeltas(handle: IndicatorHandle | null): { inputs?: Record<string, InputValue>; props?: Record<string, InputValue> } | undefined {
+/** The handle's current input/prop DELTAS and non-default visibility. */
+function instanceDeltas(handle: IndicatorHandle | null): { inputs?: Record<string, InputValue>; props?: Record<string, InputValue>; visible?: boolean } | undefined {
     if (!handle) return undefined;
     const inputs = inputDeltas(handle.inputs, handle.inputValues());
     const props = inputDeltas(handle.props, handle.propValues());
-    return inputs || props ? { ...(inputs ? { inputs } : {}), ...(props ? { props } : {}) } : undefined;
+    const visible = handle.visible === false ? false : undefined;
+    return inputs || props || visible === false
+        ? { ...(inputs ? { inputs } : {}), ...(props ? { props } : {}), ...(visible === false ? { visible } : {}) }
+        : undefined;
 }
 
 export class ChartCell {
@@ -326,7 +337,7 @@ export class ChartCell {
                 // A RESTORED ledger is authoritative for the auto-added volume too: a
                 // slot persisted without it must come back without it (fresh slots
                 // keep the workspace default).
-                volume: seed.indicators ? seed.indicators.natives.includes('volume') : deps.volume,
+                volume: seed.indicators ? seed.indicators.natives.some((entry) => ledgerNativeType(entry) === 'volume') : deps.volume,
                 nativeBackend: deps.nativeBackend,
                 // The user's drawings option minus its toolbar: one SHARED bar serves
                 // the whole workspace (per-cell bars would cost a 44px gutter each).
@@ -379,10 +390,13 @@ export class ChartCell {
         // resolving) and stay reported by `dehydrate` until then, so an early snapshot
         // (persist flush racing the resolution) never wipes them.
         if (seed.indicators) {
-            for (const type of seed.indicators.natives) this.inner.addNativeIndicator(type);
+            for (const entry of seed.indicators.natives) {
+                const handle = this.inner.addNativeIndicator(ledgerNativeType(entry));
+                this.restoreIndicatorVisibility(handle, ledgerEntryVisible(entry));
+            }
             this.pendingManifestNames = [...seed.indicators.manifest] as LedgerManifestEntry[];
         }
-        this.volumeIntent = seed.indicators ? seed.indicators.natives.includes('volume') : deps.volume;
+        this.volumeIntent = seed.indicators ? seed.indicators.natives.some((entry) => ledgerNativeType(entry) === 'volume') : deps.volume;
         // Third-party state rides in verbatim; the workspace triggers the handlers'
         // `restore` AFTER wiring the cell (restorePersistedExt) — a restore that adds
         // indicators must not call back into a workspace that doesn't know the cell yet.
@@ -469,6 +483,7 @@ export class ChartCell {
             this.refreshNativeCatalog();
         });
         this.inner.on('indicator:inputs', () => this.deps.onStateDirty());
+        this.inner.on('indicator:visibility', () => this.deps.onStateDirty());
         this.inner.on('indicator:removed', ({ id }) => {
             if (this.destroyed) return;
             // Out-of-band removals (legend ✕, object tree, middle-click, handle.remove())
@@ -983,7 +998,10 @@ export class ChartCell {
             if (list.length === 0) return; // the manifest hasn't resolved yet — keep waiting
             for (const led of this.pendingManifestNames) {
                 const entry = list.find((e) => e.name === ledgerEntryName(led));
-                if (entry) this.addManifestInstance(entry, { record: false, ...(typeof led === 'object' ? { inputs: led.inputs, props: led.props } : {}) });
+                if (entry) this.addManifestInstance(entry, {
+                    record: false,
+                    ...(typeof led === 'object' ? { inputs: led.inputs, props: led.props, visible: led.visible } : {}),
+                });
             }
             this.pendingManifestNames = null;
             return;
@@ -1000,29 +1018,38 @@ export class ChartCell {
      * resolves. Convergence is state application, not user edits — nothing enters the
      * undo timeline.
      */
-    private applyIndicatorLedger(led: { manifest: LedgerManifestEntry[]; natives: string[] }): void {
+    private applyIndicatorLedger(led: { manifest: LedgerManifestEntry[]; natives: LedgerNativeEntry[] }): void {
         const chart = this.inner;
         if (!chart) return;
-        this.volumeIntent = led.natives.includes('volume');
+        this.volumeIntent = led.natives.some((entry) => ledgerNativeType(entry) === 'volume');
         this.history.silently(() => {
             // Converge as a MULTISET: a multi-instance type is listed once per instance.
-            // Existing instances are kept while the ledger still owes their type; the
-            // surplus goes, the shortfall is added.
-            const owed = new Map<string, number>();
-            for (const type of led.natives) owed.set(type, (owed.get(type) ?? 0) + 1);
+            // Existing instances take the matching entry's visibility; surplus goes,
+            // and remaining entries are added in document order.
+            const remaining = [...led.natives];
             for (const h of this.nativeHandles()) {
                 const type = h.nativeType!;
-                const n = owed.get(type) ?? 0;
-                if (n > 0) owed.set(type, n - 1);
-                else h.remove();
+                const index = remaining.findIndex((entry) => ledgerNativeType(entry) === type);
+                if (index < 0) {
+                    h.remove();
+                    continue;
+                }
+                const [entry] = remaining.splice(index, 1);
+                h.setVisible(ledgerEntryVisible(entry!));
             }
-            for (const [type, n] of owed) for (let i = 0; i < n; i++) chart.addNativeIndicator(type);
+            for (const entry of remaining) {
+                const handle = chart.addNativeIndicator(ledgerNativeType(entry));
+                this.restoreIndicatorVisibility(handle, ledgerEntryVisible(entry));
+            }
             for (const it of [...this.instances]) this.dropInstance(it);
             if (this.manifest.length > 0) {
                 for (const item of led.manifest) {
                     const entry = this.manifest.find((e) => e.name === ledgerEntryName(item));
                     if (entry)
-                        this.addManifestInstance(entry, { record: false, ...(typeof item === 'object' ? { inputs: item.inputs, props: item.props } : {}) });
+                        this.addManifestInstance(entry, {
+                            record: false,
+                            ...(typeof item === 'object' ? { inputs: item.inputs, props: item.props, visible: item.visible } : {}),
+                        });
                 }
                 this.pendingManifestNames = null;
             } else if (!this.deps.manifestSettled()) {
@@ -1095,10 +1122,12 @@ export class ChartCell {
     /** Add ONE instance of a manifest entry (repeatable — duplicates are legitimate). */
     addManifestInstance(
         entry: ResolvedIndicator,
-        opts: { record?: boolean; external?: boolean; inputs?: Record<string, InputValue>; props?: Record<string, InputValue> } = {},
+        opts: { record?: boolean; external?: boolean; inputs?: Record<string, InputValue>; props?: Record<string, InputValue>; visible?: boolean } = {},
     ): void {
         if (this.destroyed) return;
-        const values = opts.inputs || opts.props ? { inputs: opts.inputs, props: opts.props } : undefined;
+        const values = opts.inputs || opts.props || opts.visible === false
+            ? { inputs: opts.inputs, props: opts.props, ...(opts.visible === false ? { visible: false } : {}) }
+            : undefined;
         const it: CellInstance = { entry, handle: this.addToChart(entry, values), ...(opts.external ? { external: true } : {}), ...(values ? { values } : {}) };
         this.instances.push(it);
         this.deps.onIndicatorsChanged(this.id);
@@ -1207,19 +1236,33 @@ export class ChartCell {
         });
     }
 
-    private addToChart(entry: ResolvedIndicator, values?: { inputs?: Record<string, InputValue>; props?: Record<string, InputValue> }): IndicatorHandle | null {
+    private addToChart(
+        entry: ResolvedIndicator,
+        values?: { inputs?: Record<string, InputValue>; props?: Record<string, InputValue>; visible?: boolean },
+    ): IndicatorHandle | null {
         try {
-            return (
-                this.inner?.addIndicator(entry.script, {
-                    ...(entry.language !== undefined ? { language: entry.language } : {}),
-                    ...(values?.inputs ? { inputs: values.inputs } : {}),
-                    ...(values?.props ? { props: values.props } : {}),
-                }) ?? null
-            );
+            const handle = this.inner?.addIndicator(entry.script, {
+                ...(entry.language !== undefined ? { language: entry.language } : {}),
+                ...(values?.inputs ? { inputs: values.inputs } : {}),
+                ...(values?.props ? { props: values.props } : {}),
+            }) ?? null;
+            if (handle) this.restoreIndicatorVisibility(handle, values?.visible !== false);
+            return handle;
         } catch (err) {
             console.warn(`[vela] indicator "${entry.name}" failed to add:`, err);
             return null;
         }
+    }
+
+    /** Restore hidden state after the first model mounts its durable pane/legend row.
+     *  The ready event is synchronous with that mount, so the visuals are removed before
+     *  the browser paints while the user's eye control remains reachable. */
+    private restoreIndicatorVisibility(handle: IndicatorHandle, visible: boolean): void {
+        if (visible) return;
+        const off = handle.on('ready', () => {
+            off();
+            if (!this.destroyed) handle.setVisible(false);
+        });
     }
 
     // ── third-party state (the `ext` seam) ──
@@ -1292,7 +1335,7 @@ export class ChartCell {
         // Cosmetics + drawings round-trip (both validate untrusted input).
         if (cs.rendererConfig != null) this.inner.renderer.applyConfig(cs.rendererConfig);
         if (cs.drawings != null) this.inner.drawings.fromJSON(cs.drawings);
-        if (cs.indicators) this.applyIndicatorLedger(cs.indicators as { manifest: LedgerManifestEntry[]; natives: string[] });
+        if (cs.indicators) this.applyIndicatorLedger(cs.indicators as { manifest: LedgerManifestEntry[]; natives: LedgerNativeEntry[] });
         // Third-party state converges to the document too: the restored bag REPLACES
         // the baseline (absent in the document = the document carries none), then the
         // registered handlers re-apply. After the ledger — a handler re-adding external
@@ -1342,7 +1385,16 @@ export class ChartCell {
             // (`ctx.addIndicator`) stay out: their names would never resolve against the
             // manifest — their plugin persists them via the `ext` seam instead.
             indicators: indicatorLedger({
-                present: this.inner ? this.inner.presentNativeIndicators() : [],
+                present: this.inner
+                    ? this.nativeHandles().map((handle): LedgerNativeEntry => {
+                          const type = handle.nativeType!;
+                          // Internal chart machinery is controlled by its own settings,
+                          // not by an accidental object-tree eye state.
+                          return handle.visible === false && !getNativeIndicator(type)?.internal
+                              ? { type, visible: false }
+                              : type;
+                      })
+                    : [],
                 instanceEntries: this.instances
                     .filter((it) => !it.external)
                     .map((it) => {

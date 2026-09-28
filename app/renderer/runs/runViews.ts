@@ -314,14 +314,39 @@ export function runsTable(
     return table;
 }
 
+export interface TradesTableOptions {
+    /** The row the surrounding view currently projects onto a chart. */
+    selectedIndex?: number;
+    /** Makes rows actionable. Omit it for the read-only run library. */
+    onSelect?: (index: number) => void;
+    /** Keeps row identity stable when the caller supplies one page of a longer list. */
+    indexOffset?: number;
+    /** The full list size used by accessible row labels. */
+    totalCount?: number;
+}
+
 /** Every closed round trip, in the order the account took them. */
-export function tradesTable(trades: readonly MidoriTrade[]): HTMLElement {
+export function tradesTable(trades: readonly MidoriTrade[], options: TradesTableOptions = {}): HTMLElement {
     const table = document.createElement('table');
     table.appendChild(headerRow(['Side', 'Size', 'Entry', 'Exit', 'Held', 'R', 'Net']));
 
     const body = document.createElement('tbody');
-    for (const t of trades) {
+    for (const [index, t] of trades.entries()) {
         const tr = document.createElement('tr');
+        const tradeIndex = (options.indexOffset ?? 0) + index;
+
+        if (options.onSelect) {
+            tr.tabIndex = 0;
+            tr.dataset.tradeIndex = String(tradeIndex);
+            tr.setAttribute('aria-label', `Review trade ${tradeIndex + 1} of ${options.totalCount ?? trades.length}`);
+            if (tradeIndex === options.selectedIndex) tr.setAttribute('aria-current', 'true');
+            tr.addEventListener('click', () => options.onSelect!(tradeIndex));
+            tr.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                options.onSelect!(tradeIndex);
+            });
+        }
 
         const side = document.createElement('td');
         side.textContent = t.side === 'long' ? 'Long' : 'Short';

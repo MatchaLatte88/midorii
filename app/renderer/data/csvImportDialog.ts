@@ -24,7 +24,14 @@ import type { MidoriCsvDateStyle, MidoriCsvInspection, MidoriCsvMapping } from '
 
 const STYLE_ID = 'midorii-csv-import';
 const CSS = `
-.midorii-csv { width: min(760px, 88vw); font-size: 12.5px; color: var(--vela-fg); }
+.vela-dialog.vela-dialog--csv-import {
+    width: min(1080px, calc(100vw - 64px));
+    min-width: 0;
+    max-width: min(1080px, calc(100vw - 64px));
+    max-height: min(88vh, 920px);
+}
+.vela-dialog--csv-import .vela-dialog-body { overflow-x: hidden; }
+.midorii-csv { width: 100%; min-width: 0; font-size: 12.5px; color: var(--vela-fg); }
 .midorii-csv-file {
     display: flex; align-items: baseline; gap: 8px;
     margin-bottom: 12px; color: var(--vela-fg-muted);
@@ -33,14 +40,17 @@ const CSS = `
 
 .midorii-csv-grid {
     display: grid; gap: 8px 18px;
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     margin-bottom: 14px;
 }
 .midorii-csv-row {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 10px;
+    min-width: 0;
     min-height: 26px;
 }
 .midorii-csv-row > span:first-child { color: var(--vela-fg-muted); white-space: nowrap; }
+.midorii-csv-row > :is(.vela-select, .vela-text) { width: 100%; min-width: 0; }
+.midorii-csv-row > .vela-switch { justify-self: end; }
 
 .midorii-csv-label {
     margin: 14px 0 6px;
@@ -69,6 +79,14 @@ const CSS = `
 .midorii-csv-status { min-height: 2.6em; margin-top: 10px; line-height: 1.45; color: var(--vela-fg-muted); }
 .midorii-csv-status[data-tone='error'] { color: var(--vela-danger); }
 .midorii-csv-status[data-tone='ok'] { color: var(--vela-fg-bright); }
+
+@media (max-width: 720px) {
+    .vela-dialog.vela-dialog--csv-import {
+        width: calc(100vw - 32px);
+        max-width: calc(100vw - 32px);
+    }
+    .midorii-csv-grid { grid-template-columns: minmax(0, 1fr); }
+}
 `;
 
 /** The fields the mapping controls, and what to call each. `time` doubles as the split
@@ -159,7 +177,6 @@ function suggestSymbol(fileName: string): string {
 export async function openCsvImportDialog(host: HTMLElement): Promise<string | null> {
     const picked = await window.midori.data.pickCsv();
     if (!picked) return null;
-
     injectStyles(STYLE_ID, CSS, host.ownerDocument);
 
     return new Promise<string | null>((resolve) => {
@@ -470,6 +487,7 @@ export async function openCsvImportDialog(host: HTMLElement): Promise<string | n
         const dialog = new Dialog({
             title: 'Import market data',
             eyebrow: 'Market data',
+            className: 'vela-dialog--csv-import',
             host,
             draggable: true,
             align: 'center',

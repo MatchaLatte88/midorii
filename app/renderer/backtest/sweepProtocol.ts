@@ -1,4 +1,5 @@
 import type { BacktestBar } from '../../../shared/engine/backtest';
+import type { Costs } from '../../../shared/engine/broker';
 import type { RankMetricId, SweepRanges } from '../../../shared/analysis/sweep';
 import type { SweepProgress, SweepRun } from './sweepRunner';
 
@@ -65,6 +66,11 @@ export interface SweepRequest {
     from: number;
     to: number;
     balance: number;
+    /** What every combination is charged, or null for the Broker's defaults. */
+    costs: Costs | null;
+    pointValue: number;
+    sizeStep: number | null;
+    minSize: number | null;
     stepMs: number | null;
     trainFraction: number;
     metric: RankMetricId;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { InputController, type InputControllerDeps } from '../src/renderers/native/core/InputController';
+import { InputController, RIGHT_HOLD_MS, type InputControllerDeps } from '../src/renderers/native/core/InputController';
 import { CoordinateSystem } from '../src/renderers/native/core/CoordinateSystem';
 
 // ── right-click cancel: a right press aborts an in-progress drawing placement and
@@ -95,6 +95,105 @@ describe('right-click drawing cancel', () => {
         placing = false; // the placement is gone — a second right-click is a normal one
         h.rightPress();
         expect(h.contextmenu().stopped).toBe(false);
+    });
+});
+
+describe('right-button hold menu', () => {
+    function holdHarness(cancelPlacement: () => boolean = () => false) {
+        const cs = new CoordinateSystem();
+        cs.setSize(800, 200, 1);
+        cs.setBars([1000, 2000, 3000, 4000, 5000]);
+        cs.setViewport({ barSpacing: 50, rightOffset: 2 });
+        const deps = {
+            getCoords: () => cs,
+            apply: vi.fn(),
+            zoomTo: vi.fn(),
+            fling: vi.fn(),
+            onPointerMove: vi.fn(),
+            onClick: vi.fn(),
+            beginPriceScale: vi.fn(),
+            priceScaleBy: vi.fn(),
+            beginPricePan: () => false,
+            pricePanBy: vi.fn(),
+            resetPriceScale: vi.fn(),
+            dataDblClick: vi.fn(),
+            paneSeparatorAt: () => false,
+            beginPaneResize: vi.fn(),
+            paneResizeBy: vi.fn(),
+            resetPaneSize: vi.fn(),
+            resetView: vi.fn(),
+            drawingsCancelPlacement: vi.fn(cancelPlacement),
+            rightHoldAvailable: () => true,
+            rightHoldStart: vi.fn(() => true),
+            rightHoldMove: vi.fn(),
+            rightHoldEnd: vi.fn(),
+            rightHoldCancel: vi.fn(),
+        } satisfies InputControllerDeps;
+        const ctl = new InputController(deps);
+        const el = fakeElement();
+        ctl.attach(el as unknown as HTMLElement);
+        const down = (): void => el.fire('pointerdown', {
+            button: 2,
+            pointerId: 7,
+            pointerType: 'mouse',
+            clientX: 300,
+            clientY: 200,
+            timeStamp: 0,
+            preventDefault() {},
+        });
+        const up = (clientX = 300, clientY = 200): void => el.fire('pointerup', {
+            button: 2,
+            pointerId: 7,
+            pointerType: 'mouse',
+            clientX,
+            clientY,
+            timeStamp: RIGHT_HOLD_MS,
+            ctrlKey: false,
+            metaKey: false,
+        });
+        return { deps, el, down, up };
+    }
+
+    it('opens only after the threshold, tracks the pointer, and owns the release', () => {
+        vi.useFakeTimers();
+        const h = holdHarness();
+        h.down();
+        expect(h.deps.drawingsCancelPlacement).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(RIGHT_HOLD_MS - 1);
+        expect(h.deps.rightHoldStart).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(1);
+        expect(h.deps.rightHoldStart).toHaveBeenCalledWith(300, 200);
+
+        h.el.fire('pointermove', { pointerId: 7, pointerType: 'mouse', clientX: 430, clientY: 200 });
+        expect(h.deps.rightHoldMove).toHaveBeenLastCalledWith(430, 200);
+        h.up(430, 200);
+        expect(h.deps.rightHoldEnd).toHaveBeenCalledWith(430, 200);
+        expect(h.deps.drawingsCancelPlacement).not.toHaveBeenCalled();
+        vi.useRealTimers();
+    });
+
+    it('keeps a short press on the established right-click path', () => {
+        vi.useFakeTimers();
+        const h = holdHarness(() => true);
+        h.down();
+        vi.advanceTimersByTime(RIGHT_HOLD_MS - 1);
+        h.up();
+        expect(h.deps.rightHoldStart).not.toHaveBeenCalled();
+        expect(h.deps.drawingsCancelPlacement).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(1);
+        expect(h.deps.rightHoldStart).not.toHaveBeenCalled();
+        vi.useRealTimers();
+    });
+
+    it('cancels an open wheel if the browser takes the pointer back', () => {
+        vi.useFakeTimers();
+        const h = holdHarness();
+        h.down();
+        vi.advanceTimersByTime(RIGHT_HOLD_MS);
+        h.el.fire('pointercancel', { pointerId: 7, pointerType: 'mouse', ctrlKey: false, metaKey: false });
+        expect(h.deps.rightHoldCancel).toHaveBeenCalledTimes(1);
+        expect(h.deps.rightHoldEnd).not.toHaveBeenCalled();
+        vi.useRealTimers();
     });
 });
 

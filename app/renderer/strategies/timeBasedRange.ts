@@ -6,7 +6,7 @@ import {
 } from '../../../src/core/analysis/timeBasedRange';
 import type { BarClock } from '../../../src/core/analysis/barClock';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
-import { RISK_PARAMS, positionSize } from '../../../shared/strategies/risk.js';
+import { RISK_PARAMS, leverageCap, positionSize } from '../../../shared/strategies/risk.js';
 import type { RiskMode } from '../../../shared/strategies/risk.js';
 import { cached, detectionCacheKey, type DetectionCache } from './detection';
 import type { StrategyParam, StrategyParams, StrategySpec } from './types';
@@ -210,7 +210,9 @@ export const TIME_BASED_RANGE_STRATEGY: StrategySpec = {
     build(params: StrategyParams, bars: readonly OHLCV[], cache?: DetectionCache): RunnableStrategy<StrategyParams> {
         const riskMode = stringOf(params, 'riskMode') as RiskMode;
         const riskValue = numberOf(params, 'riskValue');
-        const maxLeverage = numberOf(params, 'maxLeverage');
+        /* Null when the notional ceiling is switched off: the size is then whatever the
+         * risk asks for, and being stopped out costs exactly what was typed in. */
+        const cap = leverageCap(params);
         const entryFromMin = numberOf(params, 'entryFromMin');
         const exitMin = numberOf(params, 'exitMin');
 
@@ -247,7 +249,7 @@ export const TIME_BASED_RANGE_STRATEGY: StrategySpec = {
             /* Sized off this bar close, the last price known before the order goes in — the
              * same information a person placing it would have. */
             const size = positionSize(
-                ctx.equity, price, signal.cellOpen, riskMode, riskValue, maxLeverage,
+                ctx.equity, price, signal.cellOpen, riskMode, riskValue, cap,
             );
             if (size == null) return false;
 

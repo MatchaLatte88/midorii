@@ -353,6 +353,7 @@ can't paint drawings — `chart.drawings.supported` reports this), while the **m
 | `showToolbar(visible?)` | yes | Show/hide the on-chart toolbar. |
 | `setToolbar(option)` | yes | Reconfigure the toolbar groups/tools live. |
 | `setToolShortcuts(map)` | yes | Show per-tool shortcut hints in the toolbar flyouts — `{ trendline: 'Alt+T', … }`. Values are pre-formatted display strings: the host owns the keymap and the platform formatting. The widget/workspace push their own bindings automatically. |
+| `setRadialMenu(slots)` | yes | Configure the native renderer's right-button hold menu, clockwise from 12 o'clock. Each slot is a drawing type; `null` maps to pointer/select and `[]` disables the menu. |
 | `add(type, init?)` | yes | Create a drawing from code; returns the `Drawing` (or `null` if unsupported). |
 | `remove(id)` | no | Delete a drawing. |
 | `update(id, patch)` | no | Apply a partial serialized record (for a custom settings UI). |

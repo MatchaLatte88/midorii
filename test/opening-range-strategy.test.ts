@@ -32,7 +32,19 @@ function session(day: number, rows: readonly Row[], volume: number): OHLCV[] {
  *  daily range is 2 whatever the day before did. */
 const FLAT: Row[] = Array.from({ length: 10 }, () => [100, 101, 99, 100] as Row);
 
-/** Opening range 100 → 102 (high 102.50), no break on bar 5, break and run from bar 6. */
+/**
+ * Opening range 100 → 102 (high 102.50), no break on bar 5, break and run from bar 6.
+ *
+ * Bar 6 opens at 102.40 rather than at bar 5's own close of 102.20 — a small gap up,
+ * deliberately clear of the 0.20 stop the breakout is about to be given. The entry fires
+ * mid-bar, on the stop resting at 102.50, so the bracket it carries is not live until
+ * AFTER that: a bar whose own OPEN sits below where that bracket's stop will land would
+ * make a same-bar stop-out unavoidable however the bar's low were drawn — the low can
+ * never sit above the open, so a stop between the two is always "reached" by construction,
+ * which is a fact about OHLC arithmetic and not a fact about this breakout. Opening above
+ * the coming stop keeps that arithmetic out of a fixture whose point is what happens AFTER
+ * the entry, not during the bar it happens on.
+ */
 const TREND_UP: Row[] = [
     [100, 101, 99.5, 100.5],
     [100.5, 101.5, 100, 101],
@@ -40,7 +52,7 @@ const TREND_UP: Row[] = [
     [101.5, 102.5, 101, 102],
     [102, 102.5, 101.5, 102],
     [102, 102.4, 101.8, 102.2],
-    [102.2, 103.5, 102, 103.4],
+    [102.4, 103.5, 102.35, 103.4],
     [103.4, 104, 103.2, 103.8],
     [103.8, 104.2, 103.5, 104],
     [104, 104.5, 103.8, 104.2],

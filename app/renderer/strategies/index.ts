@@ -1,6 +1,12 @@
 import type { OHLCV } from '../../../src/core/model/ohlcv';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
+import { riskManagement } from '../../../shared/strategies/risk.js';
 import type { DetectionCache } from './detection';
+import { RANGE_FAKEOUT_STRATEGY } from './rangeFakeout';
+import { AMD_CYCLES_STRATEGY } from './amdCycles';
+import { AMD_FVG_STRATEGY } from './amdFvg';
+import { AW_REVERSAL_STRATEGY } from './awReversal';
+import { CRT_STRATEGY } from './crt';
 import { INTRADAY_MOMENTUM_STRATEGY } from './intradayMomentum';
 import { MORNING_BOOK_STRATEGY } from './morningBook';
 import { OPENING_RANGE_STRATEGY } from './openingRange';
@@ -27,6 +33,11 @@ import type { StrategyInfo, StrategyParam, StrategyParams, StrategyParamValue, S
  */
 
 export const STRATEGIES: Record<string, StrategySpec> = {
+    rangefakeout: RANGE_FAKEOUT_STRATEGY,
+    amdcycles: AMD_CYCLES_STRATEGY,
+    amdfvg: AMD_FVG_STRATEGY,
+    awreversal: AW_REVERSAL_STRATEGY,
+    crt: CRT_STRATEGY,
     silverbullet: SILVER_BULLET_STRATEGY,
     openingrange: OPENING_RANGE_STRATEGY,
     intradaymomentum: INTRADAY_MOMENTUM_STRATEGY,
@@ -132,7 +143,12 @@ export function buildStrategy(
     bars: readonly OHLCV[],
     cache?: DetectionCache,
 ): RunnableStrategy<StrategyParams> {
-    return specFor(id).build(resolveStrategyParams(id, params), bars, cache);
+    const resolved = resolveStrategyParams(id, params);
+    /* Break-even and trailing are attached here rather than inside each strategy, for the
+     * same reason risk is asked once: eight copies of "move the stop at 1R" would be eight
+     * places for it to come to mean something slightly different. The account applies them
+     * — see `management` in shared/engine/broker.js — so a strategy never has to notice. */
+    return { ...specFor(id).build(resolved, bars, cache), management: riskManagement(resolved) };
 }
 
 /** One stored setting, ready to print: what it is called and what it was. */

@@ -1,6 +1,8 @@
+import { timeframeToMs } from '../../../src';
 import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor, SymbolInfo } from '../../../src';
 import type { Unsubscribe } from '../../../src/core/util/types';
 import type { MidoriCapitalMarketInfo, MidoriCapitalQuote, MidoriCapitalRule } from '../midori';
+import { loadHistoryProgressively } from './progressiveHistory';
 
 /** Canonical Vela timeframe → Capital.com resolution — their 8 native bar sizes
  *  (no 2h/3h/6h/8h/12h/month; unlisted timeframes are simply not offered). */
@@ -141,6 +143,30 @@ export class CapitalProvider implements DataProvider {
         return bars.map(({ time, open, high, low, close, volume }) => ({ time, open, high, low, close, volume }));
     }
 
+    /**
+     * Paint recent history first, then extend it backward in 500-bar segments.
+     *
+     * Capital's bridge accepts a count-bounded `to`, so every request after the first
+     * ends immediately before the oldest confirmed candle. The snapshots therefore only
+     * grow at the left edge; nothing already painted moves or disappears. Checking the
+     * abort signal between pages also means a newer symbol/timeframe switch leaves at most
+     * the one request already on the wire, rather than finishing an obsolete 2000-bar load.
+     */
+    async getBarsProgressive(
+        ticker: string,
+        timeframe: string,
+        range: BarRange,
+        onBatch: (bars: OHLCV[]) => void,
+        opts?: { signal?: AbortSignal },
+    ): Promise<OHLCV[]> {
+        return loadHistoryProgressively({
+            range,
+            onBatch,
+            signal: opts?.signal,
+            fetch: (segment) => this.getBars(ticker, timeframe, segment),
+        });
+    }
+
     listSymbols(): Promise<SymbolDescriptor[]> {
         if (!this.marketsPromise) {
             /* Only a list that ARRIVED is worth keeping. The first call often lands before
@@ -202,10 +228,11 @@ export class CapitalProvider implements DataProvider {
      * Subscribe to live bid/ask ticks for `ticker`.
      *
      * Outside `DataProvider` on purpose — that port is about candles, and nothing in the
-     * chart engine has a concept of a two-sided price. This is here for what trades on top
-     * of the chart: the bars are drawn from the BID (see `rowToBar` in
-     * app/electron/data/capital.js), so the ask is the only thing that says what a buy
-     * actually costs, and no amount of history contains it.
+     * chart engine has a concept of a two-sided price. This is public for what trades on top
+     * of the chart, while {@link subscribe} also consumes it internally to keep the forming
+     * candle on the current mid. Historical bars still come from the venue's bid-based OHLC
+     * feed (see `rowToBar` in app/electron/data/capital.js), and no amount of that history
+     * contains the ask.
      */
     subscribeQuotes(ticker: string, onQuote: (quote: MidoriCapitalQuote) => void): Unsubscribe {
         const epic = ticker.toUpperCase();
@@ -234,9 +261,18 @@ export class CapitalProvider implements DataProvider {
 
     subscribe(ticker: string, timeframe: string, onBar: (bar: OHLCV) => void): Unsubscribe {
         const resolution = TF_TO_RESOLUTION[normalizeTf(timeframe)];
-        // No native resolution (an aggregated timeframe Capital.com doesn't serve) ⇒ poll.
-        if (!resolution) return this.pollBars(ticker, timeframe, onBar);
-        return this.streamOhlc(ticker.toUpperCase(), timeframe, resolution, onBar);
+        const epic = ticker.toUpperCase();
+        /* The quote stream is Capital's freshest price: the bid/ask lines already move on
+         * every one of its ticks, while the separate OHLC feed can trail for seconds. Fold
+         * the same ticks into the forming candle at their midpoint. The OHLC feed remains
+         * the baseline (and polling its fallback), so opens, volume, and any movement seen
+         * before this subscription began are not invented from one late quote. */
+        return this.streamMidpointBars(epic, timeframe, onBar, (emit) => (
+            // No native resolution (an aggregated timeframe Capital.com doesn't serve) ⇒ poll.
+            resolution
+                ? this.streamOhlc(epic, timeframe, resolution, emit)
+                : this.pollBars(epic, timeframe, emit)
+        ));
     }
 
     // ── internals ────────────────────────────────────────────────────────
@@ -246,6 +282,71 @@ export class CapitalProvider implements DataProvider {
         return markets
             .filter((m) => m.streamingPricesAvailable)
             .map((m) => ({ ticker: m.epic, description: m.instrumentName, type: typeOf(m.instrumentType) }));
+    }
+
+    /**
+     * Keep one forming bar on the latest bid/ask midpoint.
+     *
+     * The venue's OHLC and quote subscriptions share a socket but are independent feeds. A
+     * quote can therefore arrive before the first candle, or a slower candle can arrive after
+     * a newer quote. `midBar` remembers the quote-side facts for one bucket; merging it over
+     * every later baseline update prevents that later bid close from pulling the chart back.
+     */
+    private streamMidpointBars(
+        epic: string,
+        timeframe: string,
+        onBar: (bar: OHLCV) => void,
+        subscribeBase: (onBase: (bar: OHLCV) => void) => Unsubscribe,
+    ): Unsubscribe {
+        const intervalMs = timeframeToMs(normalizeTf(timeframe));
+        let baseBar: OHLCV | null = null;
+        let midBar: OHLCV | null = null;
+
+        const merged = (base: OHLCV): OHLCV => {
+            if (!midBar || midBar.time !== base.time) return base;
+            return {
+                ...base,
+                high: Math.max(base.high, midBar.high),
+                low: Math.min(base.low, midBar.low),
+                close: midBar.close,
+            };
+        };
+
+        const stopBase = subscribeBase((bar) => {
+            baseBar = bar;
+            onBar(merged(bar));
+        });
+        const stopQuotes = this.subscribeQuotes(epic, (quote) => {
+            if (!(quote.bid > 0) || !(quote.ask > 0)) return;
+            const mid = (quote.bid + quote.ask) / 2;
+            if (!Number.isFinite(mid)) return;
+
+            const at = Number.isFinite(quote.time) && quote.time > 0 ? quote.time : Date.now();
+            /* Anchor buckets on the venue's latest candle where possible. This matters for
+             * weekly bars: an epoch-based floor starts weeks on Thursday, while the venue's
+             * candle tells us its real boundary. */
+            const origin = baseBar?.time ?? 0;
+            const time = origin + Math.floor((at - origin) / intervalMs) * intervalMs;
+            if (midBar && time < midBar.time) return; // a late network packet cannot rewind the chart
+
+            if (!midBar || midBar.time !== time) {
+                midBar = { time, open: mid, high: mid, low: mid, close: mid };
+            } else {
+                midBar = {
+                    ...midBar,
+                    high: Math.max(midBar.high, mid),
+                    low: Math.min(midBar.low, mid),
+                    close: mid,
+                };
+            }
+
+            onBar(baseBar?.time === time ? merged(baseBar) : midBar);
+        });
+
+        return () => {
+            stopBase();
+            stopQuotes();
+        };
     }
 
     /**

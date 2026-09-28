@@ -21,6 +21,7 @@ import { isAppStyle, type AppStyle } from '../shell/themes';
 export const STARTUP_TABS = [
     { value: 'chart', label: 'Chart' },
     { value: 'backtest', label: 'Backtest' },
+    { value: 'patterns', label: 'Patterns' },
     { value: 'analysis', label: 'Analysis' },
     { value: 'strategies', label: 'Strategies' },
 ] as const;

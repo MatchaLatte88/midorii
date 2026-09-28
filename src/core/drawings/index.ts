@@ -157,5 +157,6 @@ export {
     type ToolbarDefinition,
     type ToolbarGroupConfig,
     type DrawingsOption,
+    type RadialToolSlot,
 } from './toolbar';
 export { DrawingController, type AddInit } from './DrawingController';

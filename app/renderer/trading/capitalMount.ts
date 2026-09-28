@@ -6,6 +6,8 @@ import type { VelaWorkspace } from '../../../src/workspace';
 import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIndicator';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { wireOrderEntry } from '../replay/replayOrders';
+import { wirePendingMenu } from '../replay/chartPending';
+import { wireTradePreview } from '../replay/chartPreview';
 import { makeOverlayCard } from '../replay/overlayCards';
 import { mountQuickPanel, type QuickPanel } from '../replay/quickPanel';
 import { formatMoney } from '../format';
@@ -103,6 +105,8 @@ export interface CapitalMountOptions {
 }
 
 export interface CapitalMount {
+    /** Figures already reconciled by this mount's rule and journal wiring. */
+    summary(): { mllRoom: number | null; realised: number };
     /** Take the live trading UI off the chart. The account itself is untouched. */
     unmount(): void;
 }
@@ -316,6 +320,20 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
         host: ws.root,
         risk: () => riskOf(opts.settings()),
         beforeOrder: guardLimits,
+        notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
+    }));
+    // A level right-clicked on the plot, onto the ticket as a resting order — not sent.
+    off.push(wirePendingMenu({
+        chart,
+        sidebar,
+        price: () => controller.price(),
+        tick: () => tickSizeOf(opts.epic) ?? null,
+    }));
+    // The ticket drawn where it would trade, before it is sent — see chartPreview.ts.
+    off.push(wireTradePreview({
+        chart,
+        indicator,
+        sidebar,
         notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
     }));
     /* The keys — the same ones every traded chart here answers to. Break-even applies to the
@@ -536,6 +554,10 @@ export function mountCapitalTrading(opts: CapitalMountOptions): CapitalMount {
     controller.start();
 
     return {
+        summary: () => ({
+            mllRoom: prop.last().room,
+            realised: journalRows(journal).reduce((sum, row) => sum + row.netPnl, 0),
+        }),
         unmount(): void {
             controller.stop();
             controller.onChange = null;

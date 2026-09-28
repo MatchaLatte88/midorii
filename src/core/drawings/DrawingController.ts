@@ -4,7 +4,7 @@ import type { TypedEventBus } from '../events/EventBus';
 import type { VelaEventMap } from '../events/types';
 import type { IDrawingsRendererPort, DrawingIntent, DrawingMode } from './port';
 import type { DrawingSeriesGateway } from './series';
-import type { DrawingsOption } from './toolbar';
+import type { DrawingsOption, RadialToolSlot } from './toolbar';
 import { getDrawingType } from './registry';
 import { buildToolbar } from './toolbar';
 import { DrawingStore } from './DrawingStore';
@@ -186,6 +186,11 @@ export class DrawingController {
 
     setToolShortcuts(map: Readonly<Partial<Record<DrawingTypeKey, string>>>): void {
         this.port?.setToolShortcuts?.(map);
+    }
+
+    /** Configure the renderer's hold-to-open radial tool menu. */
+    setRadialMenu(slots: readonly RadialToolSlot[]): void {
+        this.port?.setRadialMenu?.(slots);
     }
 
     // ── programmatic CRUD (facade-facing) ── each is one undo step

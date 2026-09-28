@@ -82,10 +82,9 @@ export interface CellState {
     rendererConfig?: unknown;
     /** The user-drawings document (`drawings.toJSON()`). */
     drawings?: unknown;
-    /** The indicator ledger: manifest entries + present native types. A manifest entry
-     *  is the bare NAME when every value sits on its declaration default, else the
-     *  name plus the input/prop DELTAS (defaults are never frozen into documents). */
-    indicators?: { manifest: PersistedManifestEntry[]; natives: string[] };
+    /** The indicator ledger: manifest entries + present native instances. An entry is
+     *  compact while visible and on its defaults; hidden instances carry `visible: false`. */
+    indicators?: { manifest: PersistedManifestEntry[]; natives: PersistedNativeEntry[] };
     /** Third-party per-chart state, by namespaced key (`'vendor.feature'`) — written and
      *  read by registered state-persistence handlers (`registerStatePersistence`, scope
      *  `'cell'`). Values are OPAQUE here: the codec preserves entries verbatim — a key
@@ -95,7 +94,15 @@ export interface CellState {
 }
 
 /** One persisted manifest-instance entry (see `CellState.indicators`). */
-export type PersistedManifestEntry = string | { name: string; inputs?: Record<string, unknown>; props?: Record<string, unknown> };
+export type PersistedManifestEntry = string | {
+    name: string;
+    inputs?: Record<string, unknown>;
+    props?: Record<string, unknown>;
+    visible?: boolean;
+};
+
+/** One persisted native instance. A bare type is the backwards-compatible visible form. */
+export type PersistedNativeEntry = string | { type: string; visible?: boolean };
 
 /** One entry of the document's `charts` array: a chart's state plus its cell IDENTITY. */
 export interface ChartState extends CellState {
@@ -236,22 +243,34 @@ function sanitizeCell(raw: unknown): CellState | null {
     if (c.drawings != null && typeof c.drawings === 'object') out.drawings = c.drawings;
     const ind = c.indicators as Record<string, unknown> | undefined;
     if (ind != null && typeof ind === 'object') {
-        // Bare names pass as-is; object entries keep only a string name and plain-object
-        // value bags (the add path validates individual values against the schema).
+        // Bare names pass as-is; object entries keep only a string name, plain-object
+        // value bags, and boolean visibility (the add path validates individual values).
         const manifest: PersistedManifestEntry[] = Array.isArray(ind.manifest)
             ? ind.manifest.flatMap((n): PersistedManifestEntry[] => {
                   if (typeof n === 'string') return [n];
                   if (n != null && typeof n === 'object' && typeof (n as { name?: unknown }).name === 'string') {
-                      const e = n as { name: string; inputs?: unknown; props?: unknown };
+                      const e = n as { name: string; inputs?: unknown; props?: unknown; visible?: unknown };
                       const bag = (v: unknown): Record<string, unknown> | undefined => (v != null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
                       const inputs = bag(e.inputs);
                       const props = bag(e.props);
-                      return [inputs || props ? { name: e.name, ...(inputs ? { inputs } : {}), ...(props ? { props } : {}) } : e.name];
+                      const visible = typeof e.visible === 'boolean' ? e.visible : undefined;
+                      return [inputs || props || visible !== undefined
+                          ? { name: e.name, ...(inputs ? { inputs } : {}), ...(props ? { props } : {}), ...(visible !== undefined ? { visible } : {}) }
+                          : e.name];
                   }
                   return [];
               })
             : [];
-        const natives = Array.isArray(ind.natives) ? ind.natives.filter((n): n is string => typeof n === 'string') : [];
+        const natives: PersistedNativeEntry[] = Array.isArray(ind.natives)
+            ? ind.natives.flatMap((n): PersistedNativeEntry[] => {
+                  if (typeof n === 'string') return [n];
+                  if (n != null && typeof n === 'object' && typeof (n as { type?: unknown }).type === 'string') {
+                      const e = n as { type: string; visible?: unknown };
+                      return [typeof e.visible === 'boolean' ? { type: e.type, visible: e.visible } : e.type];
+                  }
+                  return [];
+              })
+            : [];
         out.indicators = { manifest, natives };
     }
     const ext = sanitizeExt(c.ext);

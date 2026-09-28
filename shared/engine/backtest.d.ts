@@ -2,7 +2,7 @@
  * Hand-written types for backtest.js — the loop that drives a strategy over history.
  * The .js file stays the single source of truth (it carries the full reasoning).
  */
-import type { Costs, Order, Position, PositionMode, Side } from './broker';
+import type { Costs, Management, Order, Position, PositionMode, Side } from './broker';
 import type { RunStats } from './summary';
 
 /** A bar as the loop reads it. `time` is the bar's open time in epoch ms. */
@@ -73,6 +73,9 @@ export interface RunnableStrategy<P = Record<string, unknown>> {
     /** Discrete objects, bucketed by their `index` — see {@link BacktestEvent}. */
     events?: Record<string, readonly BacktestEvent[]>;
     params?: P;
+    /** Break-even and trailing, handed to the account because both are decided inside a
+     *  bar — see `management` in broker.js. */
+    management?: Management | null;
     init?(ctx: BacktestContext<P>): void;
     onBar(ctx: BacktestContext<P>): void;
     onFinish?(ctx: BacktestContext<P>): void;
@@ -95,6 +98,12 @@ export interface BacktestResult {
     /** The costs the run was actually charged, not the overrides it was handed. */
     costs: Required<Costs>;
     initialBalance: number;
+    /** Money per point per unit the run was actually charged in — see `Broker.pointValue`. */
+    pointValue: number;
+    /** The size step the run enforced, or null — see `Broker.sizeStep`. */
+    sizeStep: number | null;
+    /** The minimum size the run enforced, or null — see `Broker.minSize`. */
+    minSize: number | null;
     /** `'intrabar'` when minute bars settled the ambiguous bars, else `'pessimistic'`. */
     resolution: 'intrabar' | 'pessimistic';
     elapsedMs: number;
@@ -104,8 +113,19 @@ export declare function runBacktest<P = Record<string, unknown>>(params: {
     bars: readonly BacktestBar[];
     baseBars?: readonly BacktestBar[] | null;
     strategy: RunnableStrategy<P>;
-    broker?: { balance?: number; costs?: Costs; mode?: PositionMode };
+    broker?: {
+        balance?: number;
+        costs?: Costs;
+        mode?: PositionMode;
+        pointValue?: number;
+        sizeStep?: number | null;
+        minSize?: number | null;
+        limitFillMode?: 'touch' | 'through';
+        management?: Management | null;
+    };
     stepMs?: number | null;
+    /** Bar time (ms) trading starts at — see the reasoning in backtest.js. */
+    tradeFrom?: number | null;
 }): BacktestResult;
 
 export type { Side };

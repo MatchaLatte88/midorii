@@ -97,6 +97,15 @@ const WATCH_MS = 5_000;
 
 export type BotStatus = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
 
+export interface BotAccountSummary {
+    balance: number | null;
+    dailyLossRoom: number | null;
+    realised: number | null;
+    unrealised: number | null;
+    currency: string | null;
+    live: boolean;
+}
+
 export interface BotRunnerOptions {
     bot: BotConfig;
     /** Every market source the app can reach — the bot builds its own instance from these,
@@ -141,6 +150,16 @@ export class BotRunner {
     private readonly writer = botAccountWriter();
     /** The strategy's own store, kept here so it survives every rebuild. */
     private strategyState: Record<string, unknown> = {};
+    /**
+     * Whether `strategy.init` has run for this start.
+     *
+     * The backtest calls it once, before the loop's first bar, so a strategy can seed
+     * `ctx.state` before `onBar` ever reads it. The bot rebuilds `strategy` fresh on every
+     * bar — detection has to see the growing history — so there is no single instance to
+     * call it on the way the backtest does; this flag is what makes "once" mean the same
+     * thing here as it does there; see {@link closeBar}.
+     */
+    private initialized = false;
     /**
      * The bot's settings, resolved.
      *
@@ -216,6 +235,41 @@ export class BotRunner {
         return this.account?.equity() ?? 0;
     }
 
+    /** The figures the app title bar can state from this bot's own account and guards. */
+    accountSummary(): BotAccountSummary {
+        const paper = this.paper;
+        let balance: number | null = null;
+        let realised: number | null = null;
+        let unrealised: number | null = null;
+        let currency: string | null = null;
+
+        if (paper) {
+            const figures = paper.account();
+            balance = figures.cash;
+            realised = figures.cash - figures.initialBalance;
+            unrealised = figures.open ?? 0;
+        } else if (this.capital) {
+            const open = this.capital.book().positions.reduce((sum, position) => sum + position.unrealized, 0);
+            balance = this.capital.equity() - open;
+            unrealised = open;
+            currency = this.capital.accountCurrency();
+        }
+
+        const limit = this.guards.dailyLossLimit;
+        const dailyLossRoom = limit > 0 && this.dayOpenEquity > 0 && this.account
+            ? this.dayOpenEquity * (limit / 100) + (this.account.equity() - this.dayOpenEquity)
+            : null;
+
+        return {
+            balance,
+            dailyLossRoom,
+            realised,
+            unrealised,
+            currency,
+            live: this.isLive,
+        };
+    }
+
     /** The last price it has seen. */
     price(): number {
         return this.account?.price() ?? 0;
@@ -281,6 +335,7 @@ export class BotRunner {
         const lifetime = ++this.lifetime;
         this.runtimeReady = false;
         this.pendingLiveEntries = 0;
+        this.initialized = false;
         this.restoredGuards = null;
         this.capitalOwnership = null;
         this.paper = null;
@@ -485,6 +540,19 @@ export class BotRunner {
                 );
             },
         });
+
+        if (!this.initialized) {
+            /* Once per start, against the first bar the strategy is actually run on — the
+             * same moment the backtest calls it, before onBar has ever seen this ctx.state.
+             * Marked done whether or not it throws: a strategy whose init keeps failing must
+             * not be retried every bar under a name that promises "once". */
+            this.initialized = true;
+            try {
+                strategy.init?.(ctx);
+            } catch (err) {
+                this.log.note('error', `The strategy's init failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }
 
         try {
             strategy.onBar(ctx);

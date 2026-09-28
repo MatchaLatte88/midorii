@@ -6,7 +6,8 @@
 // See app/renderer/providers/CapitalProvider.ts.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { CapitalProvider } from '../app/renderer/providers/CapitalProvider';
-import type { MidoriCapitalMarketInfo, MidoriCapitalQuote } from '../app/renderer/midori';
+import type { MidoriCapitalBar, MidoriCapitalMarketInfo, MidoriCapitalQuote } from '../app/renderer/midori';
+import type { OHLCV } from '../src';
 
 /** A EURUSD record shaped the way `GET /markets/{epic}` answers. */
 function eurusd(overrides: Partial<MidoriCapitalMarketInfo> = {}): MidoriCapitalMarketInfo {
@@ -45,6 +46,80 @@ function stubBridge(capital: Partial<Window['midori']['capital']>): void {
 
 beforeEach(() => {
     delete (globalThis as { window?: unknown }).window;
+});
+
+/** A Capital history page, ascending as the bridge returns it. */
+function bars(from: number, count: number): MidoriCapitalBar[] {
+    return Array.from({ length: count }, (_, i) => ({
+        time: from + i,
+        open: from + i,
+        high: from + i,
+        low: from + i,
+        close: from + i,
+        volume: 1,
+    }));
+}
+
+describe('progressive history', () => {
+    type ProgressiveProvider = CapitalProvider & {
+        getBarsProgressive(
+            ticker: string,
+            timeframe: string,
+            range: { limit?: number },
+            onBatch: (batch: OHLCV[]) => void,
+            opts?: { signal?: AbortSignal },
+        ): Promise<OHLCV[]>;
+    };
+
+    it('paints the newest 500 bars before fetching the next segment', async () => {
+        const recent = bars(1_501, 500);
+        let releaseSecond: (page: MidoriCapitalBar[]) => void = () => {};
+        const second = new Promise<MidoriCapitalBar[]>((resolve) => { releaseSecond = resolve; });
+        const pages = [second, Promise.resolve(bars(501, 500)), Promise.resolve(bars(1, 500))];
+        const prices = vi.fn((request: Parameters<Window['midori']['capital']['prices']>[0]) => {
+            if (request.to == null) return Promise.resolve(recent);
+            return pages.shift() ?? Promise.resolve([]);
+        });
+        stubBridge({ prices });
+        const provider = new CapitalProvider() as ProgressiveProvider;
+        const snapshots: OHLCV[][] = [];
+
+        const loading = provider.getBarsProgressive('GOLD', '5', { limit: 2_000 }, (batch) => snapshots.push(batch));
+        await vi.waitFor(() => expect(snapshots.map((batch) => batch.length)).toEqual([500]));
+
+        expect(prices).toHaveBeenNthCalledWith(1, {
+            epic: 'GOLD', resolution: 'MINUTE_5', limit: 500,
+        });
+        expect(prices).toHaveBeenNthCalledWith(2, {
+            epic: 'GOLD', resolution: 'MINUTE_5', to: 1_500, limit: 500,
+        });
+
+        releaseSecond(bars(1_001, 500));
+        const full = await loading;
+        expect(snapshots.map((batch) => batch.length)).toEqual([500, 1_000, 1_500]);
+        expect(full).toHaveLength(2_000);
+        expect(full[0]?.time).toBe(1);
+        expect(full[full.length - 1]?.time).toBe(2_000);
+        expect(prices).toHaveBeenCalledTimes(4);
+    });
+
+    it('does not start another segment after the chart switches away', async () => {
+        const prices = vi.fn(() => Promise.resolve(bars(1_501, 500)));
+        stubBridge({ prices });
+        const provider = new CapitalProvider() as ProgressiveProvider;
+        const abort = new AbortController();
+
+        const full = await provider.getBarsProgressive(
+            'GOLD',
+            '5',
+            { limit: 2_000 },
+            () => abort.abort(),
+            { signal: abort.signal },
+        );
+
+        expect(full).toHaveLength(500);
+        expect(prices).toHaveBeenCalledTimes(1);
+    });
 });
 
 describe('getSymbolInfo', () => {
@@ -113,6 +188,54 @@ describe('snapshot', () => {
         const snap = await new CapitalProvider().snapshot('EURUSD');
         expect(snap?.tradeable).toBe(false);
         expect(snap?.status).toBe('CLOSED');
+    });
+});
+
+describe('subscribe', () => {
+    it('refines the forming candle from every bid/ask midpoint without regressing on a slower OHLC update', async () => {
+        let emitOhlc: (payload: { subscriptionId: string; bar: MidoriCapitalBar }) => void = () => {};
+        let emitQuote: (payload: { subscriptionId: string; quote: MidoriCapitalQuote }) => void = () => {};
+        const unsubscribed: string[] = [];
+        stubBridge({
+            subscribe: () => Promise.resolve('ohlc-1'),
+            unsubscribe: (id: string) => { unsubscribed.push(id); return Promise.resolve(); },
+            onOhlc: (handler) => { emitOhlc = handler; return () => { emitOhlc = () => {}; }; },
+            subscribeQuotes: () => Promise.resolve('quote-1'),
+            unsubscribeQuotes: (id: string) => { unsubscribed.push(id); return Promise.resolve(); },
+            onQuote: (handler) => { emitQuote = handler; return () => { emitQuote = () => {}; }; },
+        });
+        const seen: OHLCV[] = [];
+        const stop = new CapitalProvider().subscribe('EURUSD', '1', (bar) => seen.push(bar));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const time = 1_700_000_040_000;
+        emitOhlc({
+            subscriptionId: 'ohlc-1',
+            bar: { time, open: 100, high: 102, low: 99, close: 101, volume: 5 },
+        });
+        emitQuote({
+            subscriptionId: 'quote-1',
+            quote: { epic: 'EURUSD', bid: 102, ask: 104, bidSize: null, askSize: null, time: time + 18_000 },
+        });
+
+        expect(seen[seen.length - 1]).toEqual({ time, open: 100, high: 103, low: 99, close: 103, volume: 5 });
+
+        // A later bid-based OHLC payload must not pull the visible close behind the newer mid.
+        emitOhlc({
+            subscriptionId: 'ohlc-1',
+            bar: { time, open: 100, high: 104, low: 98, close: 102, volume: 7 },
+        });
+        expect(seen[seen.length - 1]).toEqual({ time, open: 100, high: 104, low: 98, close: 103, volume: 7 });
+
+        emitQuote({
+            subscriptionId: 'quote-1',
+            quote: { epic: 'EURUSD', bid: 96, ask: 98, bidSize: null, askSize: null, time: time + 19_000 },
+        });
+        expect(seen[seen.length - 1]).toEqual({ time, open: 100, high: 104, low: 97, close: 97, volume: 7 });
+
+        stop();
+        expect(unsubscribed).toEqual(['ohlc-1', 'quote-1']);
     });
 });
 

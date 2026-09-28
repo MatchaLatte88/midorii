@@ -110,6 +110,71 @@ describe('backtest runner', () => {
         expect(run.costs.feeRate).toBeGreaterThan(0);
         expect(run.initialBalance).toBe(10_000);
         expect(run.stepMs).toBe(STEP);
+        expect(run.pointValue).toBe(1);
+        expect(run.sizeStep).toBeNull();
+        expect(run.minSize).toBeNull();
+    });
+
+    it('tracks the worst drawdown by percentage independently of the worst in cash', () => {
+        // Long 100 units at 200. Equity then walks 20,000 -> 18,000 (-10%, from a 20,000
+        // peak) -> 30,000 (a new peak) -> 27,500 (-2,500 cash, the larger drop, but only
+        // -8.3% of the higher peak it fell from). The worse PERCENTAGE happened first, at
+        // the smaller cash figure — a drawdownPct only ever updated alongside a new cash
+        // record would overwrite 10% with 8.3% at the second drop and report the wrong one.
+        const closes = [200, 200, 180, 300, 275];
+        const strategy: RunnableStrategy = {
+            onBar(ctx) { if (ctx.index === 0) ctx.buy({ size: 100 }); },
+        };
+
+        const run = runBacktest({ bars: bars(closes), strategy, broker: { balance: 20_000, costs: FREE.costs } });
+
+        expect(run.stats.maxDrawdown).toBe(2_500); // 30,000 - 27,500, the bigger cash drop
+        expect(run.stats.maxDrawdownPct).toBeCloseTo(0.10, 5); // from the earlier, smaller drop
+    });
+
+    it('lets bars before tradeFrom warm up the strategy without counting as trading', () => {
+        const seen: number[] = [];
+        const strategy: RunnableStrategy = {
+            series: { sma: [1, 2, 3, 4, 5, 6] },
+            onBar(ctx) {
+                seen.push(ctx.index);
+                if (ctx.index === 3) ctx.buy({ size: 1 });
+            },
+        };
+
+        const run = runBacktest({
+            bars: bars([10, 20, 30, 40, 50, 60]), strategy, broker: FREE, tradeFrom: 3 * STEP,
+        });
+
+        // The series has no warm-up of its own (every value is non-null), so without
+        // tradeFrom onBar would run from bar 0. With it, bars 0-2 are skipped entirely —
+        // they still fed `series`, just never reached onBar — and trading starts at bar 3.
+        expect(seen).toEqual([3, 4, 5]);
+        expect(run.warmupBars).toBe(3);
+        expect(run.fills).toHaveLength(1);
+        expect(run.fills[0]).toMatchObject({ time: 4 * STEP }); // placed on bar 3, filled on bar 4
+    });
+
+    it('takes whichever of the series warm-up and tradeFrom skips more bars', () => {
+        const seen: number[] = [];
+        const strategy: RunnableStrategy = {
+            series: { slow: [null, null, 3, 4, 5] },
+            onBar(ctx) { seen.push(ctx.index); },
+        };
+
+        // tradeFrom asks for bar 1, but the series is not ready until bar 2 — the series wins.
+        const early = runBacktest({
+            bars: bars([1, 2, 3, 4, 5]), strategy, broker: FREE, tradeFrom: 1 * STEP,
+        });
+        expect(early.warmupBars).toBe(2);
+
+        // tradeFrom asks for bar 4, well past the series' own warm-up — tradeFrom wins.
+        seen.length = 0;
+        const late = runBacktest({
+            bars: bars([1, 2, 3, 4, 5]), strategy, broker: FREE, tradeFrom: 4 * STEP,
+        });
+        expect(late.warmupBars).toBe(4);
+        expect(seen).toEqual([4]);
     });
 
     it('refuses a run it cannot make sense of', () => {

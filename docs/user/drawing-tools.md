@@ -55,6 +55,27 @@ right, so the bar never overlaps candles, the legend, or the axes).
   via `chart.drawings.setToolShortcuts({ trendline: 'Alt+T', … })`, so they always match the
   host's actual bindings and platform formatting.
 
+### Radial tool menu
+
+The native renderer can expose a tool wheel on a held **right mouse button**. Hold over the plot
+until the wheel opens, move towards a segment, then release to arm that tool. Move back into the
+centre before releasing to close it without changing tools. A short right-click keeps its normal
+behavior: it cancels an armed drawing tool or opens the chart context menu.
+
+The menu is opt-in and takes its clockwise slots from the public drawings control surface. The
+first slot is centred at 12 o'clock; `null` maps a segment to the pointer/select tool:
+
+```js
+chart.drawings.setRadialMenu([
+  'trendline', 'hline', 'vline', 'ray', 'box',
+  null, 'freehand', 'text', 'fibretracement', 'parallelchannel',
+]);
+```
+
+Midorii enables these ten defaults for every chart. Change any segment under **Settings → Radial
+menu**; the app applies that machine-wide mapping immediately to the live chart, replays, and the
+bot chart.
+
 Arm a tool, then **click** to place its anchors (most tools, including shapes, are
 click-then-move-then-click; freehand/brush is the exception and captures the drag path; the
 polyline takes any number of clicks and finishes on **Enter** or double-click).

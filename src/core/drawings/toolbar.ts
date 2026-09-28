@@ -32,6 +32,9 @@ export interface ToolbarDefinition {
     groups: ToolGroup[];
 }
 
+/** One radial-menu segment: a drawing type, or `null` for the pointer/select tool. */
+export type RadialToolSlot = DrawingTypeKey | null;
+
 /** A developer-supplied explicit group (just type keys; the registry fills the rest). */
 export interface ToolbarGroupConfig {
     id: string;

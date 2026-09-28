@@ -52,9 +52,21 @@ const CLUSTER_SIZE = 24;
 const CLUSTER_RIGHT = 6;
 /** Down from the top of the pane — the line the host's corner chrome sits on too. */
 const CLUSTER_TOP = 10;
-/** How far in from the axis a pane's cluster reaches, gap included — what a host sharing the
- *  corner steps past while the price pane has one. */
-export const PANE_CONTROLS_CORNER = CLUSTER_RIGHT + CLUSTER_SIZE;
+/** One button, and the gap between two. */
+const BUTTON_PX = 20;
+const BUTTON_GAP = 2;
+
+/**
+ * How far in from the axis a pane's cluster reaches, gap included — what a host sharing the
+ * top-right corner steps past. Counts the buttons {@link PaneControls} builds for that pane;
+ * 0 when it builds none (a lone price pane).
+ */
+export function paneControlsCorner(kind: 'price' | 'study', count: number): number {
+    const buttons = (kind === 'study' ? 3 : 0) + (count > 1 ? 1 : 0);
+    if (buttons === 0) return 0;
+    // Buttons and gaps, plus 1px padding and 1px border either side — CLUSTER_SIZE for one.
+    return CLUSTER_RIGHT + buttons * BUTTON_PX + (buttons - 1) * BUTTON_GAP + (CLUSTER_SIZE - BUTTON_PX);
+}
 
 /** Hover/active states as CSS, so they can never lag behind a pointer or drift from the
  *  tokens (the buttons only carry their per-instance color/opacity inline). */
@@ -132,7 +144,7 @@ export class PaneControls {
                     boxSizing: 'border-box',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '2px',
+                    gap: `${BUTTON_GAP}px`,
                     padding: '1px',
                     height: `${CLUSTER_SIZE}px`,
                     border: CLUSTER_BORDER,
@@ -201,8 +213,8 @@ export class PaneControls {
         b.className = selected ? 'vela-pc-btn vela-pc-on' : 'vela-pc-btn';
         Object.assign(b.style, {
             cursor: disabled ? 'default' : 'pointer',
-            width: '20px',
-            height: '20px',
+            width: `${BUTTON_PX}px`,
+            height: `${BUTTON_PX}px`,
             opacity: disabled ? '0.3' : '1',
         });
         if (!disabled) b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });

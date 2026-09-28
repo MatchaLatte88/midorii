@@ -11,6 +11,7 @@
 // rebound to each new chart instance after a widget rebuild.
 import type { Vela } from '../Vela';
 import type { IndicatorHandle } from '../core/IndicatorHandle';
+import { getNativeIndicator } from '../core/native-indicators';
 import type { SerializedDrawing } from '../core/drawings/Drawing';
 import { injectStyles } from '../ui/styles';
 import { iconEl } from '../ui/icons';
@@ -439,6 +440,10 @@ export class ObjectTree extends SidePanel {
         const stackable = chart.renderer.supports('seriesOrder') && chart.renderer.supports('candleZOrder');
         return {
             panes: chart.panes.list(),
+            indicatorIncluded: (id) => {
+                const indicator = handle(id);
+                return !indicator?.nativeType || getNativeIndicator(indicator.nativeType)?.internal !== true;
+            },
             indicatorVisible: (id) => handle(id)?.visible !== false,
             handleTitle: (id) => handle(id)?.title,
             stackable,

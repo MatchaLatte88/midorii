@@ -1,5 +1,6 @@
 import { positionSize } from '../../../shared/strategies/risk.js';
 import type { OrderBracket, OrderSpec } from '../../../shared/engine/broker.js';
+import { formatMoney } from '../format';
 import { levelAllowed } from './replayLevels';
 import type { RiskSettings } from './replayOrders';
 
@@ -415,6 +416,117 @@ export function ticketRefusal(draft: TicketDraft, side: 'buy' | 'sell', account:
         return 'A target belongs on the winning side of the entry.';
     }
     return null;
+}
+
+/**
+ * Which resting order waits at `level` on this `side`, or null where there is none to be had.
+ *
+ * The rule {@link ticketRefusal} holds a typed ticket to, asked the other way round: a buy
+ * below the market is a limit and above it a stop, a sell the opposite. A level picked off the
+ * chart already says where, and this is what saves asking which. Null at the market itself and
+ * without a market — neither kind of order rests at the price it would fill at.
+ */
+export function restingTypeAt(side: 'buy' | 'sell', level: number, market: number): 'limit' | 'stop' | null {
+    if (!(market > 0) || !(level > 0) || level === market) return null;
+    return (side === 'buy') === (level > market) ? 'stop' : 'limit';
+}
+
+/**
+ * A price on the instrument's grid, or unchanged where there is no grid to put it on.
+ *
+ * For a level that came off the chart rather than off a keyboard: the pointer lands on whatever
+ * price its pixel works out to, and a stop at 21034.1237 is one no venue would take and nobody
+ * would have typed.
+ */
+export function priceOnGrid(price: number, tick: number | null): number {
+    if (tick == null || !(tick > 0)) return price;
+    return Number((Math.round(price / tick) * tick).toFixed(8));
+}
+
+/**
+ * The risk setting this ticket's stop would lose more than, as it reads — or null where it would
+ * not, or where there is no stop to lose anything at.
+ *
+ * In practice only a typed size gets here. A size worked out from the risk IS the risk, snapped
+ * down; a typed size is a number nobody held against it, and a size one digit too long is how an
+ * account is lost by accident rather than by judgement.
+ */
+export function riskExcess(plan: TicketPlan, account: TicketAccount, risk: RiskSettings): string | null {
+    if (plan.risk == null) return null;
+    const allowed = risk.mode === 'percent' ? (account.equity * risk.value) / 100 : risk.value;
+    /* The same tolerance the cap check uses: a size worked out from this very figure lands a
+     * binary-float hair either side of it, and that is not over. */
+    if (!(allowed > 0) || plan.risk.cash <= allowed * (1 + 1e-9)) return null;
+    return risk.mode === 'percent' ? `${Number(risk.value.toFixed(2))}%` : formatMoney(risk.value);
+}
+
+/**
+ * The ticket as the chart draws it before anything is sent: where it would go in, where it would
+ * get out, and what each of those comes to.
+ *
+ * Plain numbers, so it crosses into the chart as data and is drawn without the chart knowing what
+ * a ticket is.
+ */
+export interface TicketPreview {
+    side: 'buy' | 'sell';
+    type: TicketOrderType;
+    /**
+     * The plan's reference: the market for a market order, so the line moves with every tick,
+     * and the typed level for a resting one, so it stays where it was put.
+     */
+    entryPrice: number;
+    size: number;
+    stopPrice: number | null;
+    targetPrice: number | null;
+    /** What each level would come to if it traded — signed, in the account's money. */
+    stopPnl: number | null;
+    targetPnl: number | null;
+    /** The stop's loss as a share of equity. Null without a stop, or without equity to share. */
+    stopShare: number | null;
+    rr: number | null;
+    /** The risk setting the stop would lose more than — see {@link riskExcess}. */
+    overRisk: string | null;
+}
+
+/**
+ * The preview of a ticket, or null where there is nothing honest to draw: no size yet, or a
+ * resting order with no price to wait at.
+ *
+ * Every figure is the plan's or measured the way the plan measures — from the same reference, at
+ * the same size, through the same point value — so the loss on the chart and the loss on the
+ * panel cannot be two different numbers.
+ */
+export function ticketPreview(
+    draft: TicketDraft,
+    side: 'buy' | 'sell',
+    account: TicketAccount,
+    plan: TicketPlan,
+    risk: RiskSettings,
+): TicketPreview | null {
+    if (plan.size == null || plan.reference == null) return null;
+    const reference = plan.reference;
+    const size = plan.size;
+    const value = pointValueOf(account);
+    const direction = side === 'buy' ? 1 : -1;
+    const at = (level: number | null): number | null => (level == null ? null : (level - reference) * direction * size * value);
+    const stopPnl = at(draft.stopLoss);
+    /* The plan's risk is a distance, whichever side the stop is on. A stop on the winning side
+     * is one the ticket refuses to send, and a share of equity or a warning measured off it
+     * would label a gain as the thing that is too big. */
+    const losing = stopPnl != null && stopPnl < 0;
+    return {
+        side,
+        type: draft.type,
+        entryPrice: reference,
+        size,
+        stopPrice: draft.stopLoss,
+        targetPrice: draft.takeProfit,
+        stopPnl,
+        targetPnl: at(draft.takeProfit),
+        stopShare: losing ? plan.risk?.share ?? null : null,
+        rr: plan.rr,
+        overRisk: losing ? riskExcess(plan, account, risk) : null,
+    };
 }
 
 /**

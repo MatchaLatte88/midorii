@@ -1,8 +1,12 @@
 import { NumberInput, injectStyles, overlayScrollbarCss } from '../../../src/ui';
 import { formatMoney, formatPercent, formatPrice, formatR, formatSignedMoney, formatSize, formatWhen } from '../format';
 import { equityPath } from '../runs/runStats';
-import { bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPlan, ticketRefusal } from './orderTicket';
-import type { BracketSettings, TicketAccount, TicketDraft, TicketSizing } from './orderTicket';
+import {
+    bracketLevels, emptyTicket, normalizeQuickSizes, priceOnGrid, restingTypeAt, riskExcess, ticketOrder, ticketPlan,
+    ticketPreview, ticketRefusal,
+} from './orderTicket';
+import type { BracketSettings, TicketAccount, TicketDraft, TicketPreview, TicketSizing } from './orderTicket';
+import { levelAllowed } from './replayLevels';
 import { loadOverlayDisplay, onOverlayDisplayChange, saveOverlayDisplay } from './overlayDisplay';
 import { mountPriceLadder, type LadderOrder, type LadderPosition, type PriceLadder } from './priceLadder';
 import { loadSidebarDisplay, onSidebarDisplayChange } from './sidebarDisplay';
@@ -703,6 +707,35 @@ export interface TradeSidebar {
      * the button are the same press, refusals included, and there is nothing to keep in step.
      */
     submit(which: 'buy' | 'sell'): void;
+    /**
+     * Point the ticket one way, as a resting order at `price` — and send nothing.
+     *
+     * For a level picked on the chart. Only the direction, the order type and the entry are
+     * written; the size, the exits and whether it may be sent stay the ticket's, and the press
+     * on its button is still the one that sends. Unfolds the ticket onto its Trade face, since
+     * a ticket filled in out of sight has not been shown to anybody.
+     */
+    stage(which: 'buy' | 'sell', type: 'limit' | 'stop', price: number): void;
+    /**
+     * Hear the ticket as the chart should preview it — at once, and then on every repaint. Null
+     * while there is nothing to show. Returns an unsubscribe.
+     *
+     * A preview is shown from the moment a size is entered until the ticket is sent or the
+     * preview is put away, and never before: a ticket keeps its size between trades, and a
+     * preview that came back by itself after every order would sit on top of the position that
+     * order just opened.
+     */
+    onPreview(listener: (preview: TicketPreview | null) => void): () => void;
+    /**
+     * A preview level dropped on the chart, written into the ticket as though it had been typed.
+     *
+     * Returns why it cannot go there, or null once it has. The stop and the target are held to the
+     * losing and winning side of the entry, as a dragged position level is. An entry dropped on
+     * the chart makes the ticket a resting order, and which kind follows from where it landed.
+     */
+    dragLevel(level: 'entry' | 'stop' | 'target', price: number): string | null;
+    /** Put the preview away until a size is entered again. The ticket itself is untouched. */
+    dismissPreview(): void;
     /** Fold a bar into the ladder's session volume. Does nothing without a ladder. */
     markVolume(price: number, volume: number): void;
     /** Hand the tape a burst of prints. Does nothing without one. */
@@ -1098,6 +1131,12 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
      * ticketPlan and ticketRefusal, which split exactly along that line. */
     let side: 'buy' | 'sell' = 'buy';
 
+    /* Whether the chart previews this ticket — see `onPreview` on the returned panel. Entering a
+     * size turns it on and sending turns it off; nothing else does either. */
+    let previewArmed = false;
+    let preview: TicketPreview | null = null;
+    const previewListeners = new Set<(preview: TicketPreview | null) => void>();
+
     const quote = doc.createElement('div');
     quote.className = 'midorii-side-quote';
     const quoteSide = (which: 'sell' | 'buy'): { btn: HTMLButtonElement; value: HTMLElement } => {
@@ -1131,6 +1170,8 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         () => draft.type,
         (value) => {
             draft.type = value;
+            // A previewed ticket turned into a resting one needs a price to be drawn at.
+            captureEntry();
             types.sync();
             refresh();
         },
@@ -1167,7 +1208,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
     const riskValue = new NumberInput({
         value: risk.value, min: 0.01, max: 1e6, step: 0.25, size: 'sm', fill: true,
-        onChange: (v) => { risk.value = v; refresh(); },
+        onChange: (v) => { risk.value = v; armPreview(); refresh(); },
     });
     /* Percent or cash, on the field itself rather than in a second dropdown: it is one
      * question about one number, and the answer belongs next to it. */
@@ -1183,7 +1224,7 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
     const fixed = new NumberInput({
         value: 0, min: 0, step: 0.01, size: 'sm', fill: true,
-        onChange: (v) => { draft.fixedSize = v > 0 ? v : null; refresh(); },
+        onChange: (v) => { draft.fixedSize = v > 0 ? v : null; armPreview(); refresh(); },
     });
     const fixedAside = fieldAside(doc);
     const fixedField = fieldBox(doc, fixed.el, fixedAside);
@@ -1538,7 +1579,39 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         setSizing('fixed');
         draft.fixedSize = size > 0 ? size : null;
         fixed.setValue(size);
+        armPreview();
         refresh();
+    }
+
+    /** A size was entered: preview the ticket on the chart from here until it is sent. */
+    function armPreview(): void {
+        previewArmed = true;
+        captureEntry();
+    }
+
+    /**
+     * Give a previewed resting order the market's price to start from, where it has none.
+     *
+     * Only into an empty box and never into one being typed in — a price somebody entered is
+     * theirs. It lands AT the market, which a limit or a stop cannot rest at, so the ticket goes
+     * on refusing until the level is moved; that is the point. It is a starting place to drag
+     * from, not a price anybody chose.
+     */
+    function captureEntry(): void {
+        if (!previewArmed || draft.type === 'market' || draft.entryPrice != null || doc.activeElement === entryBox) return;
+        const price = opts.account().price;
+        if (!(price > 0)) return;
+        draft.entryPrice = priceOnGrid(price, opts.tick?.() ?? null);
+        entryBox.value = formatPrice(draft.entryPrice);
+    }
+
+    /** Point the ticket one way as a resting order at `price`. Writes the boxes; paints nothing. */
+    function restAt(which: 'buy' | 'sell', type: 'limit' | 'stop', price: number): void {
+        side = which;
+        draft.type = type;
+        types.sync();
+        draft.entryPrice = price;
+        entryBox.value = formatPrice(price);
     }
 
     /* What the row currently has drawn on it. refresh() runs on every tick and the sizes
@@ -1741,7 +1814,18 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         outNotional.sub.classList.toggle('warn', plan.margin != null && plan.margin.required > plan.margin.available);
 
         outRisk.value.textContent = plan.risk == null ? NONE : formatMoney(plan.risk.cash);
-        outRisk.sub.textContent = plan.risk?.share == null ? '' : `${formatPercent(plan.risk.share)} of equity`;
+        /* Said beside the figure it is about, in the words the chart's preview uses: a typed size
+         * whose stop loses more than this account's own risk setting is the oversized trade the
+         * setting exists to prevent. */
+        const losing = plan.reference != null && draft.stopLoss != null
+            && levelAllowed('stop', side, plan.reference, draft.stopLoss);
+        // A stop on the winning side is refused below the button, and is not a size that loses too much.
+        const excess = losing ? riskExcess(plan, account, risk) : null;
+        outRisk.sub.textContent = [
+            plan.risk?.share == null ? null : `${formatPercent(plan.risk.share)} of equity`,
+            excess == null ? null : `over ${excess} risk`,
+        ].filter(Boolean).join(' · ');
+        outRisk.sub.classList.toggle('warn', excess != null);
 
         /* The button is the direction, so it says the direction, and underneath it says
          * exactly what pressing it sends. */
@@ -1761,6 +1845,10 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
 
         if (!ladderHost.hidden) ladder?.refresh();
         renderHistory();
+
+        // Last: it reads the draft once every automatic level above has been written into it.
+        preview = previewArmed ? ticketPreview(draft, side, account, plan, risk) : null;
+        for (const listener of previewListeners) listener(preview);
     }
 
     function send(): void {
@@ -1769,6 +1857,8 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
         if (ticketRefusal(draft, side, account, plan) != null || plan.size == null) return;
 
         opts.actions.order(ticketOrder(draft, side, plan.size));
+        // The preview was of this order; from here the chart draws whatever it became.
+        previewArmed = false;
 
         /* Emptied afterwards. A ticket still holding the last trade's stop is the one mistake
          * here that costs money: the next click would send a level from a setup that is over.
@@ -1807,7 +1897,66 @@ export function mountTradeSidebar(host: HTMLElement, opts: TradeSidebarOptions):
             refresh();
             send();
         },
+        stage(which: 'buy' | 'sell', type: 'limit' | 'stop', price: number): void {
+            restAt(which, type, price);
+            setFolded(false);
+            setTab('trade');
+            // A level picked on the chart is a trade being set up: shown there too, if it has a size.
+            armPreview();
+            // The automatic exits follow the new entry here, as they do for a typed one.
+            refresh();
+        },
+        onPreview(listener: (preview: TicketPreview | null) => void): () => void {
+            previewListeners.add(listener);
+            listener(preview);
+            return () => {
+                previewListeners.delete(listener);
+            };
+        },
+        dragLevel(level: 'entry' | 'stop' | 'target', price: number): string | null {
+            const account = opts.account();
+            const at = priceOnGrid(price, opts.tick?.() ?? null);
+
+            if (level === 'entry') {
+                /* Limit or stop is not asked again: the side of the market the entry was dropped
+                 * on answers it, exactly as it does for a level right-clicked on the chart. */
+                const type = restingTypeAt(side, at, account.price);
+                if (type == null) return 'A resting order needs a price away from the market.';
+                restAt(side, type, at);
+                refresh();
+                return null;
+            }
+
+            const reference = ticketPlan(draft, account, risk).reference;
+            if (reference == null) return 'There is no entry yet to measure a level from.';
+            if (!levelAllowed(level, side, reference, at)) {
+                return level === 'stop'
+                    ? 'A stop belongs on the losing side of the entry.'
+                    : 'A target belongs on the winning side of the entry.';
+            }
+            /* The same three things typing the level does: the draft, the box, and the level
+             * stops being the settings' answer. The switch goes on, since a level dragged out is
+             * one somebody wants. */
+            if (level === 'stop') {
+                draft.stopLoss = at;
+                autoStop = false;
+                stopSwitch.set(true);
+                stopBox.value = formatPrice(at);
+            } else {
+                draft.takeProfit = at;
+                autoTarget = false;
+                targetSwitch.set(true);
+                targetBox.value = formatPrice(at);
+            }
+            refresh();
+            return null;
+        },
+        dismissPreview(): void {
+            previewArmed = false;
+            refresh();
+        },
         dispose(): void {
+            previewListeners.clear();
             stopWatchingDisplay();
             stopWatchingSidebar();
             ladder?.destroy();

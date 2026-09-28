@@ -5,7 +5,7 @@
 // button for each of these, and a greyed button is not a test.
 import { describe, it, expect } from 'vitest';
 import {
-    MAX_QUICK_SIZES, bracketLevels, emptyTicket, normalizeQuickSizes, ticketOrder, ticketPlan, ticketRefusal,
+    MAX_QUICK_SIZES, bracketLevels, emptyTicket, normalizeQuickSizes, restingTypeAt, ticketOrder, ticketPlan, ticketRefusal,
 } from '../app/renderer/replay/orderTicket';
 import type { BracketSettings, TicketAccount, TicketDraft } from '../app/renderer/replay/orderTicket';
 import type { RiskSettings } from '../app/renderer/replay/replayOrders';
@@ -162,6 +162,30 @@ describe('the order the ticket sends', () => {
     it('sends one leg where only one was given', () => {
         expect(ticketOrder(ticket({ stopLoss: 95 }), 'buy', 20).bracket).toEqual({ stopLoss: 95 });
         expect(ticketOrder(ticket({ takeProfit: 110 }), 'buy', 20).bracket).toEqual({ takeProfit: 110 });
+    });
+});
+
+describe('the kind of resting order a level makes', () => {
+    it('is a limit on the side a pullback comes from, and a stop on the breakout side', () => {
+        expect(restingTypeAt('buy', 90, 100)).toBe('limit');
+        expect(restingTypeAt('buy', 110, 100)).toBe('stop');
+        expect(restingTypeAt('sell', 110, 100)).toBe('limit');
+        expect(restingTypeAt('sell', 90, 100)).toBe('stop');
+    });
+
+    it('agrees with what the ticket would accept at that level', () => {
+        for (const side of ['buy', 'sell'] as const) {
+            for (const level of [90, 110]) {
+                const type = restingTypeAt(side, level, ACCOUNT.price)!;
+                expect(refusal(ticket({ type, entryPrice: level, fixedSize: 1 }), side)).toBeNull();
+            }
+        }
+    });
+
+    it('makes none at the market, or with no market to measure from', () => {
+        expect(restingTypeAt('buy', 100, 100)).toBeNull();
+        expect(restingTypeAt('sell', 100, 0)).toBeNull();
+        expect(restingTypeAt('buy', 0, 100)).toBeNull();
     });
 });
 

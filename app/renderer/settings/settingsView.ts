@@ -22,6 +22,14 @@ import type {
     MidoriProjectXAccount, MidoriProjectXCredentialStatus, MidoriRecorderStatus,
 } from '../midori';
 import { STARTUP_TABS, loadPrefs, savePrefs, type AppPrefs, type StartupTab } from './prefs';
+import { drawingTypes, type DrawingTypeKey } from '../../../src/plugin';
+import {
+    DEFAULT_RADIAL_MENU_PREFS,
+    RADIAL_MENU_SLOT_LABELS,
+    loadRadialMenuPrefs,
+    saveRadialMenuPrefs,
+    type RadialMenuPrefs,
+} from './radialMenuPrefs';
 
 /**
  * The Settings tab: everything about the program that is a choice rather than a result.
@@ -150,11 +158,12 @@ ${overlayScrollbarCss('.midorii-settings-body')}
 `;
 
 /** Which pane is on screen. The rail is the whole of this list, in this order. */
-export type SettingsPane = 'general' | 'customization' | 'trading' | 'brokers' | 'developer';
+export type SettingsPane = 'general' | 'customization' | 'radial-menu' | 'trading' | 'brokers' | 'developer';
 
 const PANES: ReadonlyArray<{ id: SettingsPane; label: string }> = [
     { id: 'general', label: 'General' },
     { id: 'customization', label: 'Customization' },
+    { id: 'radial-menu', label: 'Radial menu' },
     { id: 'trading', label: 'Trading' },
     { id: 'brokers', label: 'Broker connection' },
     { id: 'developer', label: 'Developer' },
@@ -238,6 +247,7 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
     let style: PositionStyle = loadPositionStyle();
     let alertDisplay: AlertDisplay = loadAlertDisplay();
     let quoteDisplay: QuoteDisplay = loadQuoteDisplay();
+    let radialMenu: RadialMenuPrefs = loadRadialMenuPrefs();
     /** What is stored for the broker — never the secret itself, which the main process
      *  has no channel to hand back. Null until the first read. */
     let broker: MidoriCapitalCredentialStatus | null = null;
@@ -625,6 +635,51 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
             )),
         ));
 
+    }
+
+    function paintRadialMenu(): void {
+        inner.append(head(
+            'Radial menu',
+            'Hold the right mouse button over a chart, move towards a tool, then release to arm it. '
+            + 'A short right-click keeps the chart’s normal context menu.',
+        ));
+
+        const pointerValue = '__pointer__';
+        const toolOptions = [
+            { value: pointerValue, label: 'Pointer' },
+            ...drawingTypes().map((tool) => ({ value: tool.type, label: tool.label })),
+        ];
+        const rows: Node[] = [
+            fieldSection('Clockwise tool mapping'),
+            note('The first segment is at 12 o’clock. Move back into the centre and release to close '
+                + 'the menu without changing tools.'),
+        ];
+        for (let index = 0; index < RADIAL_MENU_SLOT_LABELS.length; index++) {
+            const slot = radialMenu.slots[index] ?? null;
+            rows.push(selectRow(
+                RADIAL_MENU_SLOT_LABELS[index]!,
+                toolOptions,
+                slot ?? pointerValue,
+                (value) => {
+                    const slots = [...radialMenu.slots];
+                    slots[index] = value === pointerValue ? null : value as DrawingTypeKey;
+                    radialMenu = { slots };
+                    saveRadialMenuPrefs(radialMenu);
+                },
+                220,
+            ));
+        }
+
+        const mapping = card(...rows);
+        const reset = button('Back to defaults');
+        reset.onclick = () => {
+            radialMenu = { slots: [...DEFAULT_RADIAL_MENU_PREFS.slots] };
+            saveRadialMenuPrefs(radialMenu);
+            status = { text: 'The radial menu uses its original tool order.' };
+            paint();
+        };
+        mapping.appendChild(actions(reset));
+        inner.append(mapping);
     }
 
     function paintDeveloper(): void {
@@ -1677,6 +1732,7 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         inner.replaceChildren();
         if (active === 'general') paintGeneral();
         else if (active === 'customization') paintCustomization();
+        else if (active === 'radial-menu') paintRadialMenu();
         else if (active === 'brokers') paintBrokers();
         else if (active === 'developer') paintDeveloper();
         else paintTrading();
@@ -1695,6 +1751,7 @@ export function mountSettingsView(host: HTMLElement, opts: SettingsViewOptions):
         style = loadPositionStyle();
         alertDisplay = loadAlertDisplay();
         quoteDisplay = loadQuoteDisplay();
+        radialMenu = loadRadialMenuPrefs();
         /* What is stored for the broker, asked fresh: it can be changed from here and read
          * back by the same page, and the answer comes from the main process rather than from
          * anything this page could hold. Repaints when it lands — the pane is drawn from

@@ -11,6 +11,7 @@ import { mountTradeDock, type TradeDock } from '../replay/tradeDock';
 import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIndicator';
 import { button, ensureFigureStyles } from '../runs/runViews';
 import { shareChartDoc } from '../shell/sharedChartDoc';
+import { wireRadialMenu } from '../settings/radialMenuPrefs';
 import { STRATEGIES } from '../strategies';
 import { BotEngine } from './BotEngine';
 import { setBotChart } from './botChart';
@@ -180,6 +181,9 @@ export interface BotViewOptions {
 }
 
 export interface BotViewHandle {
+    readonly selectedBotId: string | null;
+    /** Select the bot shown by the list, chart and app-level account strip. */
+    selectBot(id: string): void;
     /** Re-read the stored bots and repaint. Called whenever the tab is opened. */
     refresh(): Promise<void>;
     /** Dress the view's own chart in the app's current palette. */
@@ -314,6 +318,7 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
             storage: doc.storage,
         });
         doc.attach(ws);
+        wireRadialMenu(ws);
 
         /* Claimed before anything else, so the app's own topbar actions know not to project
          * onto it — the Trade menu most of all, which on a bot's chart would wire a second
@@ -870,6 +875,15 @@ export function mountBotView(host: HTMLElement, opts: BotViewOptions): BotViewHa
     paint();
 
     return {
+        get selectedBotId(): string | null {
+            return selected || null;
+        },
+        selectBot(id: string): void {
+            if (!engine.find(id)) return;
+            selected = id;
+            pane = 'live';
+            paint();
+        },
         async refresh(): Promise<void> {
             await refreshCapitalEnvironment();
             if (!engine.ready) {

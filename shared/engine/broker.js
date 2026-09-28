@@ -42,10 +42,33 @@ export const SIDE = { BUY: 'buy', SELL: 'sell' };
 export const DEFAULT_COSTS = {
   /** Round-trip commission per side, as a fraction of notional. 0.001 = 0.1%. */
   feeRate: 0.001,
+  /**
+   * Commission per unit traded, in account money — a futures-style flat rate
+   * ($1.50 a contract, say) rather than a share of notional. Added to `feeRate`,
+   * not instead of it, so an instrument that charges both states both; one left
+   * at zero is simply not part of how this instrument is billed. Zero by
+   * default, so nothing changes for every market this engine was written
+   * against, where a commission really is a fraction of notional.
+   */
+  feePerUnit: 0,
   /** Full bid/ask spread as a fraction of price. Half is paid on each side. */
   spreadPct: 0.0002,
   /** Extra adverse move on market and triggered stop orders. */
   slippagePct: 0.0002,
+};
+
+/**
+ * Every cost switched off — the run that asks what the rules alone are worth.
+ *
+ * Not a default and not a recommendation. A result produced with these is the
+ * ceiling of what the strategy could ever make, and the distance between it and
+ * the same run with real costs is the only honest thing either number says. It
+ * earns its place because the reverse — costs that belong to another instrument
+ * — is worse: 0.1% of notional per side is a crypto taker fee, and charged
+ * against an index future it can be ten times the trade's entire risk.
+ */
+export const NO_COSTS = {
+  feeRate: 0, feePerUnit: 0, spreadPct: 0, slippagePct: 0,
 };
 
 /**
@@ -72,9 +95,16 @@ export class Broker {
    * @param {object} [options.costs]          overrides for DEFAULT_COSTS
    * @param {'netting'|'hedging'} [options.mode='netting']  see POSITION_MODE
    * @param {number} [options.pointValue=1]   money per point per unit — see `pointValue`
+   * @param {?number} [options.sizeStep=null]   the smallest size may move by — see `sizeStep`
+   * @param {?number} [options.minSize=null]    the least a position may ever be — see `sizeStep`
+   * @param {'touch'|'through'} [options.limitFillMode='touch']  see `limitFillMode`
+   * @param {?object} [options.management=null]  break-even and trailing rules — see `management`
    */
   constructor(options = {}) {
-    const { balance = 10_000, costs = {}, mode = POSITION_MODE.NETTING, pointValue = 1 } = options;
+    const {
+      balance = 10_000, costs = {}, mode = POSITION_MODE.NETTING, pointValue = 1,
+      sizeStep = null, minSize = null, limitFillMode = 'touch', management = null,
+    } = options;
 
     if (mode !== POSITION_MODE.NETTING && mode !== POSITION_MODE.HEDGING) {
       throw new Error(`Broker: mode must be "netting" or "hedging", got ${JSON.stringify(mode)}`);
@@ -87,10 +117,52 @@ export class Broker {
     this.balance = balance;
     this.costs = { ...DEFAULT_COSTS, ...costs };
 
-    for (const key of ['feeRate', 'spreadPct', 'slippagePct']) {
+    for (const key of ['feeRate', 'feePerUnit', 'spreadPct', 'slippagePct']) {
       const v = this.costs[key];
       if (!Number.isFinite(v) || v < 0) throw new Error(`Broker: ${key} must be a number >= 0, got ${v}`);
     }
+
+    /**
+     * The smallest amount a size may move by, and the least it may ever be — a futures
+     * contract, a share lot, a venue's own minimum trade. Both null by default: nothing
+     * this engine was written against (a coin, a spot share) has to move in whole steps at
+     * all, and forcing one on every market would make backtests on those markets lie about
+     * sizes just as surely as `pointValue 1` lies about an index future's money.
+     *
+     * Enforced in `placeOrder`, the one door every order — a strategy's entry, a bracket
+     * leg, a scale-out — walks through. `ProjectXController.snapSize` rounds a live order
+     * down onto a venue's step the same way; a backtest that skipped this would trade sizes
+     * the bot it is meant to predict could never actually send.
+     */
+    if (sizeStep != null && !(Number.isFinite(sizeStep) && sizeStep > 0)) {
+      throw new Error(`Broker: sizeStep must be a positive number or null, got ${sizeStep}`);
+    }
+    if (minSize != null && !(Number.isFinite(minSize) && minSize > 0)) {
+      throw new Error(`Broker: minSize must be a positive number or null, got ${minSize}`);
+    }
+    this.sizeStep = sizeStep ?? null;
+    this.minSize = minSize ?? null;
+
+    /**
+     * Whether a resting limit fills on a bar that merely TOUCHES its price, or only one that
+     * trades THROUGH it.
+     *
+     * `'touch'` is the default and the optimistic reading: `low <= limitPrice` for a buy is
+     * generous about queue position, since a real limit order sitting in a book has to wait
+     * for everything ahead of it at that price before it fills, and a bar that only grazes a
+     * level is not proof that happened. `'through'` is the conservative answer — the level
+     * has to be strictly crossed — and it is the honest one to reach for wherever a strategy's
+     * apparent edge turns out to live inside a handful of bars that just touched a limit and
+     * moved on, rather than in ones that actually traded past it.
+     *
+     * A stop order is not this decision: a stop's queue position is irrelevant, because
+     * touching the level is the entire triggering condition — the moment price is there, the
+     * stop becomes a market order, which is what a stop always was.
+     */
+    if (limitFillMode !== 'touch' && limitFillMode !== 'through') {
+      throw new Error(`Broker: limitFillMode must be "touch" or "through", got ${JSON.stringify(limitFillMode)}`);
+    }
+    this.limitFillMode = limitFillMode;
 
     /** @type {Array<object>} orders still waiting to fill */
     this.pending = [];
@@ -126,6 +198,25 @@ export class Broker {
     this.setPointValue(pointValue);
 
     /**
+     * Rules that manage an open position by themselves, or null.
+     *
+     * Here rather than in the strategy because of when they have to be decided.
+     * A strategy only ever sees a bar that has already closed; both of these
+     * questions — has the trade gone a whole R in front, where is the extreme so
+     * far — are answered *inside* a bar, after that step's fills and before the
+     * next step is offered to the stop. On an hourly chart a break-even rule
+     * evaluated at the close would move the stop an hour after the trade earned
+     * it, and every one of those hours is a stop that was never where it said.
+     *
+     * `{ breakEvenAtR, trailAtR, trailR }`, all in R — the unit the position
+     * fixed at entry (`riskPerUnit`), which is the only one that keeps meaning
+     * the same thing after the stop has been moved. Zero switches a rule off.
+     * @type {?{breakEvenAtR: number, trailAtR: number, trailR: number}}
+     */
+    this.management = null;
+    this.setManagement(management);
+
+    /**
      * The market's two sides, where a feed states them — null otherwise.
      *
      * Only `fillNow` reads it: a market order sent by hand takes the ask or the bid that is
@@ -149,6 +240,36 @@ export class Broker {
       throw new Error('Broker: what a point is worth cannot change while something is open or waiting');
     }
     this.pointValue = value;
+  }
+
+  /**
+   * Install the rules that manage an open position, or clear them with null.
+   *
+   * Validated here rather than trusted, because a trail distance of zero would
+   * put the stop on the price and close the next step at market — a rule that
+   * looks like protection and is the opposite of it.
+   */
+  setManagement(rules) {
+    if (rules == null) {
+      this.management = null;
+      return;
+    }
+    const breakEvenAtR = Number(rules.breakEvenAtR) || 0;
+    const trailAtR = Number(rules.trailAtR) || 0;
+    const trailR = Number(rules.trailR) || 0;
+
+    for (const [key, value] of [['breakEvenAtR', breakEvenAtR], ['trailAtR', trailAtR], ['trailR', trailR]]) {
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`Broker: management.${key} must be a number >= 0, got ${value}`);
+      }
+    }
+    if (trailAtR > 0 && !(trailR > 0)) {
+      throw new Error('Broker: a trail that arms needs a trailR distance above zero');
+    }
+
+    this.management = breakEvenAtR > 0 || trailAtR > 0
+      ? { breakEvenAtR, trailAtR, trailR }
+      : null;
   }
 
   /** Set the two sides a market order fills at, or clear them with null. */
@@ -236,10 +357,11 @@ export class Broker {
    */
   placeOrder(spec) {
     const {
-      side, type = 'market', size, limitPrice, stopPrice,
+      side, type = 'market', limitPrice, stopPrice,
       reduceOnly = false, tag = null, parentId = null, bracket = null,
       positionId = null,
     } = spec;
+    let { size } = spec;
 
     if (side !== SIDE.BUY && side !== SIDE.SELL) {
       throw new Error(`placeOrder: side must be "buy" or "sell", got ${JSON.stringify(side)}`);
@@ -247,6 +369,21 @@ export class Broker {
     if (!Number.isFinite(size) || size <= 0) {
       throw new Error(`placeOrder: size must be a positive number, got ${size}`);
     }
+    /* Snapped onto the instrument's step before anything else sees it, so a fraction
+     * nobody could actually hold never becomes an order, a fill, or a stored trade. */
+    const rounded = this._roundSize(size);
+    if (!(rounded > 0)) {
+      throw new Error(
+        `placeOrder: ${size} rounds down to nothing at a size step of ${this.sizeStep} — `
+        + 'nothing this small can be held on this instrument',
+      );
+    }
+    if (this.minSize != null && rounded < this.minSize) {
+      throw new Error(
+        `placeOrder: ${rounded} is below this instrument's minimum size of ${this.minSize}`,
+      );
+    }
+    size = rounded;
     if (type === 'limit' && !Number.isFinite(limitPrice)) {
       throw new Error('placeOrder: a limit order needs a limitPrice');
     }
@@ -349,6 +486,15 @@ export class Broker {
     }
 
     return order;
+  }
+
+  /** Snaps a size down onto the instrument's step, or leaves it exactly as given
+   *  when the instrument has none. */
+  _roundSize(size) {
+    if (this.sizeStep == null) return size;
+    // A hair of tolerance so a size landing exactly on a step is not rounded under it —
+    // the same reasoning expandRange in sweep.js gives for a step landing on its own end.
+    return Math.floor((size + this.sizeStep * 1e-9) / this.sizeStep) * this.sizeStep;
   }
 
   /** Cancels every pending order, optionally only those with a given tag. */
@@ -513,14 +659,15 @@ export class Broker {
       throw new Error(`exitResult: price must be a finite number, got ${price}`);
     }
 
-    const { feeRate, spreadPct, slippagePct } = this.costs;
+    const { feeRate, feePerUnit, spreadPct, slippagePct } = this.costs;
     const long = position.size > 0;
     const cost = spreadPct / 2 + (takesLiquidity ? slippagePct : 0);
     // The same fill an exit order would actually get — see _executeOrder.
     const fill = price * (long ? 1 - cost : 1 + cost);
+    const size = Math.abs(position.size);
 
     const gross = (fill - position.entryPrice) * position.size * this.pointValue;
-    return gross - position.fees - Math.abs(position.size) * fill * feeRate * this.pointValue;
+    return gross - position.fees - (size * fill * feeRate * this.pointValue + size * feePerUnit);
   }
 
   /**
@@ -542,11 +689,15 @@ export class Broker {
    */
   breakEvenPrice(position) {
     if (!position) throw new Error('breakEvenPrice: there is no position');
-    const { feeRate, spreadPct, slippagePct } = this.costs;
+    const { feeRate, feePerUnit, spreadPct, slippagePct } = this.costs;
     const size = Math.abs(position.size);
 
-    // Fees are money; the level is in points — so what was paid is turned into points first.
-    const paid = size > 0 ? position.fees / (size * this.pointValue) : 0;
+    /* Fees are money; the level is in points — so what was paid, or is still owed on the
+     * way out, is turned into points first. `position.fees` is whatever was already paid
+     * to get in; `feePerUnit` on the way out has not been paid yet but does not scale with
+     * price the way `feeRate` does, so it has to join `position.fees` here rather than the
+     * `(1 - feeRate)` divisor below, which already accounts for feeRate's share of the exit. */
+    const paid = size > 0 ? (position.fees + size * feePerUnit) / (size * this.pointValue) : 0;
     const cost = spreadPct / 2 + slippagePct;
 
     return position.size > 0
@@ -706,8 +857,12 @@ export class Broker {
     this.time = bar.time;
 
     /* A trailing stop has to be walked through the bar even with nothing
-     * pending: the trail is what places the stop order in the first place. */
-    const busy = () => this.pending.length > 0 || this.positions.some((p) => p.trailing);
+     * pending: the trail is what places the stop order in the first place. So
+     * do the managed rules — a break-even that has not fired yet has no order
+     * of its own to notice. */
+    const busy = () => this.pending.length > 0
+      || this.positions.some((p) => p.trailing)
+      || (this.management != null && this.positions.length > 0);
 
     if (busy()) {
       // With sub-bars the sequence inside the bar is known and fills happen in
@@ -719,6 +874,7 @@ export class Broker {
         if (!busy()) break;
         this._fillAgainst(step, resolution);
         // After the fills of this step, never before — see `setTrailing`.
+        this._manage(step);
         this._trail(step);
       }
     }
@@ -726,60 +882,116 @@ export class Broker {
     this.lastPrice = bar.close;
   }
 
-  /** Runs every pending order against one price step. */
+  /**
+   * Runs every pending order against one price step, to a fixed point.
+   *
+   * A fixed point, not a single pass, because a fill can itself place new pending
+   * orders — a bracket attaching the instant its entry fills (`_attachBracket`) is
+   * the case that matters. Those are exactly as reachable within what remains of
+   * THIS step as anything that rested there since an earlier bar; a protective
+   * stop placed the moment a position opens is not somehow later to the market
+   * than one that arrived a bar ago. Stopping after one pass would leave that
+   * stop unprotected for the rest of the step — the whole bar, without sub-bars
+   * — for no reason but where in the loop it happened to be born.
+   *
+   * Ranking is recomputed every pass rather than decided once up front, for the
+   * same reason. Two orders that both trigger before either has filled — a fresh
+   * entry and the bracket legs `submitEntry` pre-places beside it — have no
+   * position to be ranked against yet, so a one-shot sort sees them all as equally
+   * adverse and falls back to whatever order they happened to be placed in. Fixing
+   * one fill at a time and re-ranking afterwards lets the entry open the position
+   * first, so the stop and the target that follow it are ranked against a
+   * position that actually exists — pessimism the loop can act on, not a tie it
+   * has to guess at.
+   *
+   * `referencePrice` is what makes a bracket born mid-step honest about what "gapped"
+   * means for it. The bar's own open is the right reference for the FIRST thing checked
+   * in a step — nothing has happened yet, so that is genuinely the earliest known price.
+   * It stops being the right reference the moment something has already filled: an entry
+   * that needed the market to climb from 102.20 up through a 102.50 stop before it could
+   * fire has, by definition, already used up that distance. Attaching its bracket and then
+   * asking "did the bar's ORIGINAL open already blow through this stop" would answer yes
+   * whenever the open happens to sit below the new stop too — a gap the position was never
+   * actually exposed to, since it did not exist until price was already back up at 102.50.
+   * So each fill updates the reference to its own price, and every order checked after it
+   * is asked the same question from there — the one place in the bar's story that is
+   * actually known to have happened.
+   */
   _fillAgainst(step, resolution) {
-    // Snapshot: a fill can cancel siblings, and that must not disturb this pass.
-    const candidates = [...this.pending];
-    const triggered = [];
+    let referencePrice = step.open;
 
-    for (const order of candidates) {
-      if (order.status !== 'pending') continue;
-      const price = this._triggerPrice(order, step);
-      if (price === null) continue;
-      triggered.push({ order, price });
-    }
+    for (;;) {
+      // Snapshot: a fill can cancel siblings, and that must not disturb this pass.
+      const candidates = this.pending.filter((o) => o.status === 'pending');
+      const triggered = [];
 
-    if (triggered.length === 0) return;
+      for (const order of candidates) {
+        const price = this._triggerPrice(order, step, referencePrice);
+        if (price !== null) triggered.push({ order, price });
+      }
 
-    /* Two orders triggering in the same step is exactly the ambiguous case.
-     * Without sub-bars, settle it against the position: the order that hurts
-     * fills first. Never in the strategy's favour — that is how a backtest
-     * starts flattering itself. */
-    if (triggered.length > 1 && resolution === 'pessimistic') {
+      if (triggered.length === 0) return;
+
+      if (resolution !== 'pessimistic' || triggered.length === 1) {
+        // No ambiguity to settle: a single trigger, or a sub-bar step whose own
+        // sequence already decided the order — execute everything this step
+        // makes fillable and loop back in case one of them just placed more.
+        for (const { order, price } of triggered) {
+          if (order.status !== 'pending') continue; // cancelled by an earlier fill
+          this._executeOrder(order, price, step, resolution);
+          referencePrice = price;
+        }
+        continue;
+      }
+
+      /* Two or more orders triggering in the same step, pessimistic and genuinely
+       * ambiguous. Settle it against the position AS IT STANDS RIGHT NOW: the
+       * order that hurts fills first, never the one that helps — that is how a
+       * backtest starts flattering itself. Only the worst one fills; the loop
+       * comes back around to rank the rest against whatever it just did. */
       triggered.sort((a, b) => this._adverseRank(b.order, b.price) - this._adverseRank(a.order, a.price));
-    }
-
-    for (const { order, price } of triggered) {
-      if (order.status !== 'pending') continue; // cancelled by an earlier fill
-      this._executeOrder(order, price, step, resolution);
+      this._executeOrder(triggered[0].order, triggered[0].price, step, resolution);
+      referencePrice = triggered[0].price;
     }
   }
 
   /**
    * The price at which an order becomes fillable within this step, or null.
    *
-   * A gap through the level fills at the open, not at the level — that is the
-   * whole point of a gap, and pretending otherwise understates risk.
+   * A gap through the level fills at the reference price, not at the level — that is the
+   * whole point of a gap, and pretending otherwise understates risk. `referencePrice` is
+   * the bar's own open for whatever is checked first, and the last fill's price for
+   * anything checked afterward in the same step — see `_fillAgainst`.
    */
-  _triggerPrice(order, step) {
+  _triggerPrice(order, step, referencePrice = step.open) {
     switch (order.type) {
       case 'market':
+        // Never born mid-step — see _attachBracket and _setLeg, neither of which places
+        // one — so this always runs before any fill has moved the reference, and the
+        // bar's own open is always the right answer for it.
         return step.open;
 
-      case 'limit':
+      case 'limit': {
+        // 'through' asks for the level to be crossed, not merely touched — see
+        // `limitFillMode`. A gap past the level is filled either way: there is no
+        // "touch" question left once the market has already traded beyond it.
+        const crossed = this.limitFillMode === 'through';
         if (order.side === SIDE.BUY) {
-          if (step.open <= order.limitPrice) return step.open; // gapped below: better fill
-          return step.low <= order.limitPrice ? order.limitPrice : null;
+          if (referencePrice <= order.limitPrice) return referencePrice; // gapped below: better fill
+          const reached = crossed ? step.low < order.limitPrice : step.low <= order.limitPrice;
+          return reached ? order.limitPrice : null;
         }
-        if (step.open >= order.limitPrice) return step.open;
-        return step.high >= order.limitPrice ? order.limitPrice : null;
+        if (referencePrice >= order.limitPrice) return referencePrice;
+        const reached = crossed ? step.high > order.limitPrice : step.high >= order.limitPrice;
+        return reached ? order.limitPrice : null;
+      }
 
       case 'stop':
         if (order.side === SIDE.BUY) {
-          if (step.open >= order.stopPrice) return step.open; // gapped through
+          if (referencePrice >= order.stopPrice) return referencePrice; // gapped through
           return step.high >= order.stopPrice ? order.stopPrice : null;
         }
-        if (step.open <= order.stopPrice) return step.open;
+        if (referencePrice <= order.stopPrice) return referencePrice;
         return step.low <= order.stopPrice ? order.stopPrice : null;
 
       default:
@@ -798,7 +1010,9 @@ export class Broker {
   }
 
   _executeOrder(order, rawPrice, step, resolution, { quoted = false } = {}) {
-    const { spreadPct, slippagePct, feeRate } = this.costs;
+    const {
+      spreadPct, slippagePct, feeRate, feePerUnit,
+    } = this.costs;
     const dir = order.side === SIDE.BUY ? 1 : -1;
 
     // Half the spread is paid on every fill; slippage only where the fill is
@@ -821,7 +1035,8 @@ export class Broker {
     }
 
     const notional = size * fillPrice * this.pointValue;
-    const fee = notional * feeRate;
+    // Both cost models add, rather than one replacing the other — see DEFAULT_COSTS.
+    const fee = notional * feeRate + size * feePerUnit;
 
     order.status = 'filled';
     order.filledAt = step.time ?? this.time;
@@ -1003,6 +1218,10 @@ export class Broker {
       stopLoss: fill.stopLoss ?? null,
       takeProfit: fill.takeProfit ?? null,
       trailing: null,
+      /* Whether the managed break-even has already fired — see `_manage`. It may
+       * only fire once: a second one after the stop had trailed past break-even
+       * would drag it back to the entry. */
+      breakEvenDone: false,
       /**
        * What one unit of this position risked when it first had a stop.
        *
@@ -1258,6 +1477,54 @@ export class Broker {
    * would have taken it out — the kind of look-ahead that makes every trailing
    * backtest look better than the trade would have been.
    */
+  /**
+   * Applies the account's own management rules to every open position, once per step.
+   *
+   * Called after that step's fills and before `_trail`, for the same reason `_trail`
+   * comes after the fills: a stop may only be moved by prices that have already had
+   * their chance to hit it. Moving it first would let the high of a bar lift the stop
+   * out of the way of the low that would have taken the trade out — which is how a
+   * break-even rule can be made to look free.
+   *
+   * Running before `_trail` is deliberate too. A trail armed on this step picks up this
+   * step's extreme immediately, so the stop it places is one the *next* step is offered.
+   * Arming it a step late would quietly hand the trade a bar of slack it never had.
+   *
+   * How far in front the trade is is measured against the step's extreme, not its close:
+   * a stop is a thing price touches, and so is the level that arms these rules.
+   */
+  _manage(step) {
+    const rules = this.management;
+    if (!rules) return;
+
+    for (const position of [...this.positions]) {
+      const risk = position.riskPerUnit;
+      // Until the trade has a stop it has no R to be measured in — see `_rememberRisk`.
+      if (risk == null || !(risk > 0)) continue;
+
+      const long = position.size > 0;
+      const extreme = long ? step.high : step.low;
+      const advanceR = (long ? extreme - position.entryPrice : position.entryPrice - extreme) / risk;
+
+      /* Once, and only forward. A second firing after the stop has trailed past
+       * break-even would drag it back down to the entry. */
+      if (rules.breakEvenAtR > 0 && !position.breakEvenDone && advanceR >= rules.breakEvenAtR) {
+        position.breakEvenDone = true;
+        const level = this.breakEvenPrice(position);
+        const current = position.stopLoss;
+        if (current == null || (long ? level > current : level < current)) {
+          this._setLeg(position, 'stop-loss', level);
+        }
+      }
+
+      if (rules.trailAtR > 0 && !position.trailing && advanceR >= rules.trailAtR) {
+        /* From here, not from the whole excursion so far: `setTrailing` seeds the
+         * extreme with the last price, and `_trail` widens it with this step below. */
+        this.setTrailing(position, rules.trailR * risk);
+      }
+    }
+  }
+
   _trail(step) {
     for (const position of [...this.positions]) {
       const trail = position.trailing;
@@ -1307,6 +1574,7 @@ export class Broker {
       initialBalance: this.initialBalance,
       balance: this.balance,
       costs: { ...this.costs },
+      management: this.management ? { ...this.management } : null,
       orders: this.orders.map((o) => ({ ...o })),
       pendingIds: this.pending.map((o) => o.id),
       fills: this.fills.map((f) => ({ ...f })),
@@ -1322,6 +1590,9 @@ export class Broker {
       time: this.time,
       lastPrice: this.lastPrice,
       pointValue: this.pointValue,
+      sizeStep: this.sizeStep,
+      minSize: this.minSize,
+      limitFillMode: this.limitFillMode,
     };
   }
 
@@ -1331,6 +1602,10 @@ export class Broker {
       balance: data.initialBalance, costs: data.costs, mode: data.mode,
       // Absent from anything stored before a point had a value, which is what one meant then.
       pointValue: data.pointValue ?? 1,
+      sizeStep: data.sizeStep ?? null,
+      minSize: data.minSize ?? null,
+      limitFillMode: data.limitFillMode ?? 'touch',
+      management: data.management ?? null,
     });
 
     broker.balance = data.balance;

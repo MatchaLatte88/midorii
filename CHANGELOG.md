@@ -3,13 +3,158 @@
 All notable changes to Midorii, newest first. Entries from `v0.6.16` down are
 Vela's — the charting library Midorii is built on and forked from.
 
-## [Unreleased]
+## [v0.7.1]
+
+### Added
+
+- **Search a market's history for candlestick patterns that hold up.** The new Patterns tab
+  tries every combination of up to three candle conditions — body and wick shapes, how a
+  candle sits against the one before it, trend, session, volume, taker flow and what price is
+  doing at a fair value gap — as longs and as shorts, with one fixed exit and your costs
+  charged on every trade. A search can also be anchored at a fair value gap, such as a
+  rejection off an open bullish gap, so that it asks only which candles pay at that place.
+  Patterns are chosen on
+  the first 60% of the range, checked on the next 20%, and only those that pass are shown on
+  the last 20%. The whole search is also repeated with the outcomes slid in time against the
+  candles, so the result states how good a pattern looks by luck alone, and each row ends in
+  a plain verdict. Patterns that pass validation are also run through the backtest engine.
+
+- **Trade a range fakeout back through the middle.** A new chart study and strategy look for a
+  compressed range that breaks on a close, leaves a fair value gap beyond the broken edge, and
+  is then closed back past its middle within a chosen number of bars. The trade goes against
+  the breakout at the next open, with the stop beyond the fakeout's extreme and the target at
+  a fixed reward-to-risk or at the far range edge — skipped when that edge offers too little
+  reward. The gap may be required to point back into the range, with the breakout, or either
+  way. It starts on a 15-minute chart with a 1.5 reward-to-risk, a gap pointing back into the
+  range, and no leverage ceiling.
+
+- **Return a backtest's settings to the strategy's defaults.** The settings card in the
+  Backtest tab now ends with **Reset to defaults**, for single runs and sweeps alike. It puts
+  every setting back on the strategy's own defaults and, for a strategy tuned for one
+  timeframe, switches back to that timeframe — which is also where picking such a strategy
+  starts.
+
+- **Follow accumulation, manipulation and distribution cycles, and trade the return.** A new
+  chart study boxes each narrow accumulation range and the breakout beyond one of its edges,
+  drops a breakout that does not come back inside in time, and waits one accumulation length
+  after a distribution before looking again. It also keeps the fair value gaps above a chosen
+  share of ATR live, optionally as inverted gaps once a close breaks them, and alerts when an
+  accumulation or a manipulation begins. The matching strategy trades against the breakout
+  with the stop beyond its extreme, either at the next open after price returns inside the
+  range or with a limit at the first fair value gap that follows, and targets a fixed
+  reward-to-risk or the opposite edge of the range.
+
+- **Spot and trade the AMD fair value gap setup.** A new chart study marks a tight
+  accumulation range, the sweep of one of its edges, and a fair value gap back into the range
+  that is larger than a chosen share of ATR, then projects an ATR stop and a reward-to-risk
+  target from the signal close. Sydney, Tokyo, London, and New York hours can each be switched
+  on and highlighted, and every new signal raises an alert. The matching strategy trades the
+  same setups in backtests, parameter sweeps, and trading bots: it enters at the next open,
+  measures the stop and target from the actual fill, and trades each accumulation at most once,
+  even when an open position made it skip the first signal.
+
+- **Compare both AW liquidity-reversal entries under the same rules.** The strategy follows a
+  confirmed swing sweep with ATR displacement through the captured neckline and a fair value
+  gap, then either rests an executable limit at the gap edge or reproduces the reference
+  trigger at the next available open. New York sessions, higher-timeframe and previous-day
+  liquidity targets, structural stops, fixed-R fallback targets, and the shared risk controls
+  apply to backtests, parameter sweeps, and trading bots.
+
+- **Candle Range Theory can be tested and automated as one complete setup.** A completed
+  higher-timeframe candle now supplies the range, a confirmed structural level supplies the
+  liquidity key, and a strict sweep plus Model 1 displacement arms a retest order. The stop
+  sits beyond the sweep, the target stays at the opposite range edge, and the same detector
+  drives the chart study, backtests, parameter sweeps, and trading bots.
+
+- **Account context stays visible across trading views.** The live chart and Trading Bot now
+  keep their selected account, settled balance, loss-limit room, realised result, and open
+  result beside Settings in the app bar. The selector switches the active chart account or
+  bot, while the lock returns the live chart to Just Watching or stops a bot without closing
+  its exposure. Backtests show the same compact result strip without an account selector,
+  using maximum drawdown in place of a live account limit.
+
+- **Review every trade where it happened.** A finished backtest now opens an embedded chart on
+  its exact run data. Previous and next controls frame each round trip from entry to exit, mark
+  its prices and result in the same risk/reward style as a drawn position, and keep the matching
+  trade-table row selected; choosing a row jumps straight to that trade. The list shows at most
+  100 trades per page and follows the selected trade automatically when navigation crosses a
+  page boundary.
+
+- **Drawing tools are one right-button hold away.** Hold the right mouse button over any chart
+  to open a ten-segment radial menu, move towards a tool, and release to arm it. Releasing in
+  the centre closes the menu, while a short right-click keeps its existing action. Every segment
+  can be remapped under Settings → Radial menu, and the mapping follows the live chart, replays,
+  and the bot chart.
+
+- **A pending order starts with a right-click at its level.** While an account is being traded,
+  right-click the chart at a price for **Buy Limit/Stop @ price** and **Sell Limit/Stop @ price**.
+  Whether it is a limit or a stop follows from which side of the market the level sits on. The row
+  fills in the ticket (direction, order type, entry) and opens it; the ticket's own button still
+  sends, with its size, exits and refusals.
+
+- **See what a trade would lose before you send it.** As soon as you enter a size in the trade
+  ticket, the chart previews the order: a dashed entry, stop and target, each tagged with what it
+  comes to in money, with the stop's share of equity alongside. A market order's entry moves with
+  the price; a limit or stop keeps its level, and starts at the current price when none was typed.
+  Drag the stop or target on the chart to set them, pull a missing one out of a market entry, or
+  drag a resting entry to move it — whichever side of the market it lands on decides limit or stop.
+  When the stop would lose more than your risk per trade, or there is no stop at all, the preview's
+  entry turns red and the ticket says so. The preview goes away once the order is sent, or with the
+  ✕ on its entry, and comes back the next time you enter a size.
+
+- **A fixed risk can be made to cost exactly what it says.** Two switches in the Backtest tab
+  decide whether anything stands between the rules and the result. **Cap by leverage** (under
+  Risk and size) turns off the notional ceiling, so the position is the size the risk asks for
+  rather than the largest the account could carry — on a market quoted in the thousands those
+  were never the same number, and the ceiling was quietly deciding every trade. **Trading
+  costs** (under Advanced run settings) turns off commission, spread and slippage, so a stop
+  fills exactly at the stop and a target exactly at the target. With both off, a fixed risk of
+  100 at a reward-to-risk of 1.4 gives trades of exactly −100 and +140. A sweep now stores what
+  its combinations were charged, the way a single run always has.
+
+- **Move the stop to break-even, and trail it.** Risk and size gains three settings every
+  strategy shares: **Break-even at** moves the stop to where the trade comes out flat once it is
+  that many R in front, **Trail from** starts following price at a chosen R, and **Trail
+  distance** is how far behind the best price the stop sits. Both are applied by the account
+  rather than by the strategy, and inside the bar: on a five-minute chart the stop moves in the
+  minute the trade earns it, and only ever after that minute's fills have had their chance at it.
+  Zero leaves either rule out.
 
 ### Changed
 
-- **Read trade levels as compact chart brackets.** Position, stop, target, and resting-order
-  labels now use a thin outlined shape with a pointed cap, dotted grab handle, segmented values,
-  and a level-coloured close control. Other chart price labels keep their existing style.
+- **Read trade levels as compact chart brackets.** Position, stop, target, preview, and resting-
+  order labels now use a thin outlined shape with a pointed cap, dotted grab handle, segmented
+  values, and a level-coloured close control. Other chart price labels keep their existing style.
+
+- **Risk per trade is picked at a glance, not out of a list.** Percent and cash are two badges
+  side by side — `% of equity` and `$ fixed` — and the field beside them says which reading
+  applies: *Risk (% of equity)* or *Risk ($ per trade)*. A dropdown showed the wrong one just as
+  confidently as the right one, and "Risk 100" read as percent instead of cash is the account.
+
+- **Backtests are calmer to set up.** The Backtest tab now follows the same card language as
+  the app's dialogs, keeps the run action in a clear footer, and groups market choices into a
+  shorter path. Starting balance, fill precision, inherited signal rules, and the less common
+  sweep controls stay available under Advanced sections instead of competing with every run.
+
+### Fixed
+
+- **Capital.com candles keep pace with the live spread.** The forming candle and its current
+  price now follow every bid/ask update at the midpoint instead of waiting for the slower
+  candle stream to catch up.
+
+- **Market-data imports fit their contents.** The import dialog now uses the available window
+  width and keeps every mapping field visible instead of clipping the right-hand columns.
+
+- **Hidden indicators stay hidden after restarting Midorii.** Each chart now remembers the
+  visibility of every study. Position, replay-position, bid/ask, and price-alert helpers no
+  longer appear in the indicator legend or object tree and remain available in Settings instead.
+
+- **Capital.com and Topstep charts appear sooner after a timeframe change.** The newest 500
+  candles now paint first, then older history arrives in 500-candle segments without moving
+  the visible chart. Switching again stops the superseded history load before its next segment.
+
+- **Midorii shows its own icon on Windows.** The taskbar and the Alt+Tab switcher now show the
+  refreshed Midorii icon instead of a generic one.
 
 ## [v0.7.0]
 

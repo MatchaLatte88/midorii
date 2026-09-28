@@ -1,5 +1,7 @@
 import { registerNativeIndicator } from '../../../src';
-import { DEFAULT_POSITION_STYLE, normalizeStyle, withAlpha, type PositionStyle } from '../trading/positionStyle';
+import { DEFAULT_POSITION_STYLE, normalizeStyle, type PositionStyle } from '../trading/positionStyle';
+import { positionLevelLine, positionZone } from '../trading/positionVisual';
+import type { TicketPreview } from './orderTicket';
 import type {
     DrawingBox, DrawingLabel, DrawingLine, NativeIndicator, NativeIndicatorContext,
     NativeIndicatorOutput, PriceLine,
@@ -102,6 +104,20 @@ export function readOrderLineId(id: string): number | null {
     return m ? Number(m[1]) : null;
 }
 
+/* A ticket's preview has one of each level at most, so its ids are fixed — and unlike a
+ * position's, so a drag on the preview is never read as a drag on a trade that is on. */
+export const PREVIEW_ENTRY_ID = 'preview_entry';
+export const PREVIEW_STOP_ID = 'preview_sl';
+export const PREVIEW_TARGET_ID = 'preview_tp';
+
+/** Which of the preview's lines `id` is. Null for anything that is not one of them. */
+export function readPreviewLineId(id: string): 'entry' | 'stop' | 'target' | null {
+    if (id === PREVIEW_ENTRY_ID) return 'entry';
+    if (id === PREVIEW_STOP_ID) return 'stop';
+    if (id === PREVIEW_TARGET_ID) return 'target';
+    return null;
+}
+
 /** The mark a currency is written with, for the ones this app is likely to meet. Anything
  *  else is written as its own code — clumsier than a symbol, and better than the wrong one. */
 const CURRENCY_MARKS: Record<string, string> = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$' };
@@ -153,40 +169,6 @@ function pnlColor(n: number | null, style: PositionStyle): string {
 }
 
 /**
- * One of the two areas a position spans, from its entry out to a level.
- *
- * The fill is strongest AT THE LEVEL and fades towards the entry, which is the direction the
- * area actually means something in: how far this is from where the trade is wrong (or done).
- * Which end that is follows from where the level sits, so a short's risk zone shades upwards
- * and a long's downwards without either being spelled out anywhere.
- *
- * Box defaults are all written out — the neutral model has no partials.
- */
-function zone(id: string, left: number, right: number, entryPrice: number, levelPrice: number, color: string, style: PositionStyle): DrawingBox {
-    const strong = withAlpha(color, style.zoneOpacity);
-    const faded = withAlpha(color, 0);
-    const levelOnTop = levelPrice > entryPrice;
-    return {
-        id, paneId: 'price', xloc: 'bar_time', overlay: true,
-        left, right, top: Math.max(entryPrice, levelPrice), bottom: Math.min(entryPrice, levelPrice),
-        extend: style.extendRight ? 'right' : 'none',
-        bgColor: style.zoneGradient ? (levelOnTop ? strong : faded) : strong,
-        ...(style.zoneGradient ? { bgColorTo: levelOnTop ? faded : strong } : {}),
-        borderWidth: 0, borderStyle: 'solid',
-        textSize: 'auto', hAlign: 'center', vAlign: 'center',
-        wrap: false, fontFamily: 'default', bold: false, italic: false,
-    };
-}
-
-function line(id: string, x1: number, x2: number, y: number, color: string, style: 'solid' | 'dashed' | 'dotted', extend: 'none' | 'right', width = 1): DrawingLine {
-    return {
-        id, paneId: 'price', xloc: 'bar_time', overlay: true,
-        x1, y1: y, x2, y2: y, extend, color,
-        invisible: false, width, style, arrowLeft: false, arrowRight: false,
-    };
-}
-
-/**
  * The mark left where an order filled: a small cross, on the candle, on the exact point the
  * trade happened — its upright stroke standing on the fill TIME, its crossbar lying on the fill
  * PRICE. Two readings of one event, which is what a fill is: a when and a what for.
@@ -229,9 +211,9 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
 
     for (const p of state.positions) {
         const right = Math.max(nowTime, p.entryTime);
-        if (style.zones && p.stopPrice != null) boxes.push(zone(`pos_${p.id}_risk`, p.entryTime, right, p.entryPrice, p.stopPrice, style.stopColor, style));
-        if (style.zones && p.targetPrice != null) boxes.push(zone(`pos_${p.id}_reward`, p.entryTime, right, p.entryPrice, p.targetPrice, style.targetColor, style));
-        lines.push(line(`pos_${p.id}_entry`, p.entryTime, right, p.entryPrice, style.entryColor, style.entryStyle, reach, style.lineWidth));
+        if (style.zones && p.stopPrice != null) boxes.push(positionZone(`pos_${p.id}_risk`, p.entryTime, right, p.entryPrice, p.stopPrice, style.stopColor, style));
+        if (style.zones && p.targetPrice != null) boxes.push(positionZone(`pos_${p.id}_reward`, p.entryTime, right, p.entryPrice, p.targetPrice, style.targetColor, style));
+        lines.push(positionLevelLine(`pos_${p.id}_entry`, p.entryTime, right, p.entryPrice, style.entryColor, style.entryStyle, reach, style.lineWidth));
         /* Each level says what it is WORTH, not just where it is: a stop at 93,805 is a number
          * you have to do arithmetic on, "−$820 −1.36R" is the thing you were actually deciding
          * about. The price itself goes on the axis, where prices belong. */
@@ -282,7 +264,7 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
      *
      * Neither decides anything here: the drop is reported and the account answers. */
     for (const o of state.orders) {
-        lines.push(line(`ord_${o.id}`, nowTime, nowTime, o.price, ORDER_COLOR, 'dashed', 'right'));
+        lines.push(positionLevelLine(`ord_${o.id}`, nowTime, nowTime, o.price, ORDER_COLOR, 'dashed', 'right', 1));
         priceLines.push({
             id: `ord_${o.id}_lvl`, paneId: 'price', price: o.price, color: ORDER_COLOR,
             lineStyle: 'dotted',
@@ -303,6 +285,88 @@ export function buildReplayOutput(state: ReplayVisualState, nowTime: number, sty
     return { boxes, lines, labels, priceLines };
 }
 
+const ORDER_TYPE_NAMES: Record<TicketPreview['type'], string> = { market: 'Market', limit: 'Limit', stop: 'Stop' };
+
+/**
+ * A ticket that has not been sent, drawn where it would trade.
+ *
+ * Dashed, half as solid as a position and labelled as a preview, because the one thing it must
+ * never be taken for is a trade that is on. Its areas start at the newest bar and run to the right
+ * edge whatever the style says: nothing about it has happened yet, so there is nothing behind now
+ * for it to cover.
+ *
+ * The loss sits on the stop's tag and the alarm on the ENTRY's. The stop's tag is the losing colour
+ * already, so a stop that loses too much would look exactly like one that does not; the entry's is
+ * neutral, and it turning red is what gets noticed.
+ *
+ * Taken hold of the way a position is. The stop and the target move. A market entry pulls a missing
+ * level out of itself, since it has nowhere else to be held from; a resting entry moves, because
+ * where it waits is the one thing about it somebody chose. The ✕ puts the preview away.
+ */
+export function buildPreviewOutput(
+    preview: TicketPreview | null,
+    nowTime: number,
+    style: PositionStyle = DEFAULT_POSITION_STYLE,
+    currency?: string | null,
+): NativeIndicatorOutput {
+    if (!preview) return { boxes: [], priceLines: [] };
+    const mark = currencyMark(currency);
+    const faint: PositionStyle = { ...style, extendRight: true, zoneOpacity: style.zoneOpacity / 2 };
+
+    const boxes: DrawingBox[] = [];
+    if (style.zones && preview.stopPrice != null) {
+        boxes.push(positionZone('preview_risk', nowTime, nowTime, preview.entryPrice, preview.stopPrice, style.stopColor, faint));
+    }
+    if (style.zones && preview.targetPrice != null) {
+        boxes.push(positionZone('preview_reward', nowTime, nowTime, preview.entryPrice, preview.targetPrice, style.targetColor, faint));
+    }
+
+    const overRisk = preview.overRisk != null ? `over ${preview.overRisk} risk` : null;
+    const alarm = preview.stopPrice == null || overRisk != null;
+    const priceLines: PriceLine[] = [{
+        id: PREVIEW_ENTRY_ID,
+        paneId: 'price',
+        price: preview.entryPrice,
+        color: style.entryColor,
+        lineStyle: 'dashed',
+        width: style.lineWidth,
+        /* Without a stop there is no stop tag to carry the warning, so the entry says it. */
+        title: [
+            'Preview',
+            `${preview.side === 'buy' ? 'Buy' : 'Sell'} ${formatSize(preview.size)}`,
+            ORDER_TYPE_NAMES[preview.type],
+            preview.stopPrice == null ? 'no stop' : null,
+        ].filter(Boolean).join('  '),
+        titleColor: alarm ? style.stopColor : style.entryColor,
+        tagStyle: 'bracket',
+        axisTag: true,
+        action: 'close',
+        ...(preview.type === 'market' ? { dragSpawns: true } : { draggable: true }),
+    }];
+    if (preview.stopPrice != null) {
+        priceLines.push({
+            id: PREVIEW_STOP_ID, paneId: 'price', price: preview.stopPrice, color: style.stopColor,
+            lineStyle: 'dashed', width: style.lineWidth,
+            title: [
+                'SL',
+                money(preview.stopPnl, mark),
+                preview.stopShare != null ? `${(preview.stopShare * 100).toFixed(2)}% of equity` : null,
+                overRisk,
+            ].filter(Boolean).join('  '),
+            tagStyle: 'bracket', axisTag: true, draggable: true,
+        });
+    }
+    if (preview.targetPrice != null) {
+        priceLines.push({
+            id: PREVIEW_TARGET_ID, paneId: 'price', price: preview.targetPrice, color: style.targetColor,
+            lineStyle: 'dashed', width: style.lineWidth,
+            title: ['TP', money(preview.targetPnl, mark), rMultiple(preview.rr)].filter(Boolean).join('  '),
+            tagStyle: 'bracket', axisTag: true, draggable: true,
+        });
+    }
+    return { boxes, priceLines };
+}
+
 /**
  * The replay account's visuals, mounted as a native indicator.
  *
@@ -315,6 +379,7 @@ class ReplayPositionIndicator implements NativeIndicator {
     private ctx: NativeIndicatorContext | null = null;
     private state: ReplayVisualState = EMPTY_STATE;
     private style: PositionStyle = DEFAULT_POSITION_STYLE;
+    private preview: TicketPreview | null = null;
 
     start(ctx: NativeIndicatorContext, inputs: Record<string, unknown>): void {
         this.ctx = ctx;
@@ -369,18 +434,43 @@ class ReplayPositionIndicator implements NativeIndicator {
                 /* keep the previous style */
             }
         }
+        const rawPreview = inputs[PREVIEW_INPUT];
+        if (typeof rawPreview === 'string' && rawPreview.length > 0) {
+            /* Unlike the state, a preview that cannot be read is taken DOWN rather than left up:
+             * the last good one is a loss worked out for a ticket that no longer says that. */
+            try {
+                this.preview = JSON.parse(rawPreview) as TicketPreview | null;
+            } catch (err) {
+                this.preview = null;
+                console.error('[midorii] could not read the ticket preview', err);
+            }
+        }
     }
 
     private emit(): void {
         if (!this.ctx) return;
         const bars = this.ctx.bars();
         const now = bars.length > 0 ? bars[bars.length - 1]!.time : Date.now();
-        this.ctx.emit(buildReplayOutput(this.state, now, this.style));
+        const account = buildReplayOutput(this.state, now, this.style);
+        // After the account's own, so a preview line lying on a position's is the one on top.
+        const preview = buildPreviewOutput(this.preview, now, this.style, this.state.currency);
+        this.ctx.emit({
+            ...account,
+            boxes: [...(account.boxes ?? []), ...(preview.boxes ?? [])],
+            priceLines: [...(account.priceLines ?? []), ...(preview.priceLines ?? [])],
+        });
     }
 }
 
 /** The single string input carrying the serialized account state. */
 export const STATE_INPUT = 'stateJson';
+
+/**
+ * The ticket's preview, as JSON — `null` when there is none. Its own input for the reason the
+ * style has one: it changes with the ticket, not with the account, and neither is a reason to
+ * resend the other.
+ */
+export const PREVIEW_INPUT = 'previewJson';
 
 /** The same channel for the drawing style — see {@link PositionStyle}. Its own input rather
  *  than a field on the state: the state is rewritten on every tick and the style almost never,
@@ -404,7 +494,7 @@ function register(type: string, title: string): void {
         // so neither appears in the indicator's own dialog. The style IS edited — in the
         // chart settings' Trading tab, through controls that know what a colour is.
         inputsSchema: () => [],
-        defaultInputs: () => ({ [STATE_INPUT]: '{}', [STYLE_INPUT]: '{}' }),
+        defaultInputs: () => ({ [STATE_INPUT]: '{}', [STYLE_INPUT]: '{}', [PREVIEW_INPUT]: 'null' }),
         create: () => new ReplayPositionIndicator(),
     });
 }

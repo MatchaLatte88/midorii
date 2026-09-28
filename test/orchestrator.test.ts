@@ -510,6 +510,32 @@ describe('EngineOrchestrator', () => {
         }
     });
 
+    it('marks internal native chart machinery as absent from the indicator legend', async () => {
+        const descriptor: NativeIndicatorDescriptor = {
+            ...testNativeDescriptor,
+            type: 'test-internal-native',
+            title: 'Internal helper',
+            internal: true,
+            create: () => new TestNativeIndicator(),
+        };
+        registerNativeIndicator(descriptor);
+        try {
+            const renderer = new FakeRenderer();
+            const chart = new Vela({} as unknown as HTMLElement, { live: false, volume: false }, {
+                renderer,
+                engines: [],
+                dataFeed: new MockDataFeed(),
+            });
+            const handle = chart.addNativeIndicator(descriptor.type);
+            await chart.ready();
+            await flush();
+
+            expect(renderer.mountedModels.find((model) => model.id === handle.id)?.legend).toBe(false);
+        } finally {
+            unregisterNativeIndicator(descriptor.type);
+        }
+    });
+
     it('routes a native indicator alert through both the chart and its handle', async () => {
         class AlertNative implements NativeIndicator {
             private ctx: NativeIndicatorContext | null = null;

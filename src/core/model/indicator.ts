@@ -41,8 +41,12 @@ export interface IndicatorModel {
      * Compact label the legend chip and the settings dialog show instead of the full
      * {@link title}. Absent ⇒ both use {@link title}. Mirrors Pine
      * `indicator(..., shorttitle=)`.
-     */
+    */
     shorttitle?: string;
+    /** Whether the renderer should expose an in-chart indicator legend row. Absent means
+     *  yes. Internal host machinery renders through this model without presenting itself
+     *  as a user-managed study. */
+    legend?: boolean;
     overlay: boolean;
     paneHint: PaneHint;
     /**

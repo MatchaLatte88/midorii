@@ -6,6 +6,8 @@ import { formatMoney } from '../format';
 import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIndicator';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { wireOrderEntry } from '../replay/replayOrders';
+import { wirePendingMenu } from '../replay/chartPending';
+import { wireTradePreview } from '../replay/chartPreview';
 import { mountTradeDock } from '../replay/tradeDock';
 import { mountTradeSidebar } from '../replay/tradeSidebar';
 import { mountQuickPanel } from '../replay/quickPanel';
@@ -149,6 +151,20 @@ export function mountBybitTrading(opts: BybitMountOptions): BybitMount {
         controller,
         host: ws.root,
         risk: () => riskOf(opts.settings()),
+        notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
+    }));
+    // A level right-clicked on the plot, onto the ticket as a resting order — not sent.
+    off.push(wirePendingMenu({
+        chart,
+        sidebar,
+        price: () => controller.price(),
+        tick: () => controller.info.tickSize,
+    }));
+    // The ticket drawn where it would trade, before it is sent — see chartPreview.ts.
+    off.push(wireTradePreview({
+        chart,
+        indicator,
+        sidebar,
         notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
     }));
     off.push(wirePositionLevels({

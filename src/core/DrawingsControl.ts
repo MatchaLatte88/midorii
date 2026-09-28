@@ -3,7 +3,7 @@ import type { Drawing, DrawingTypeKey, SerializedDrawing } from './drawings/Draw
 import type { DrawingsDocument } from './drawings/document';
 import type { SnapMode } from './drawings/geometry';
 import type { DrawingMode } from './drawings/port';
-import type { DrawingsOption } from './drawings/toolbar';
+import type { DrawingsOption, RadialToolSlot } from './drawings/toolbar';
 
 /**
  * The chart's drawing control surface (`chart.drawings`) — sibling of
@@ -85,6 +85,13 @@ export class DrawingsControl {
      *  platform formatting, so hints always match the host's actual bindings. */
     setToolShortcuts(map: Readonly<Partial<Record<DrawingTypeKey, string>>>): this {
         if (this.ok('setToolShortcuts')) this.ctrl.setToolShortcuts(map);
+        return this;
+    }
+
+    /** Configure the right-button hold menu. Each entry is one clockwise segment,
+     *  starting at 12 o'clock; `null` maps a segment to pointer/select. */
+    setRadialMenu(slots: readonly RadialToolSlot[]): this {
+        if (this.ok('setRadialMenu')) this.ctrl.setRadialMenu(slots);
         return this;
     }
 

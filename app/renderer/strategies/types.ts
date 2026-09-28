@@ -55,6 +55,14 @@ export interface StrategyParam {
     max?: number;
     step?: number;
     options?: readonly StrategyParamOption[];
+    /**
+     * How to draw the control where the type alone leaves a choice.
+     *
+     * `badges` puts a `select`'s options side by side instead of behind a dropdown. For
+     * the two or three options that decide what the field under them MEANS — percent or
+     * cash — one click less matters more than the space it costs.
+     */
+    variant?: 'badges';
     hint?: string;
 }
 
@@ -68,6 +76,9 @@ export interface StrategySpec {
     /** What the indicator it reads is called, for a screen that has to explain the
      *  difference between the two. */
     indicatorName?: string;
+    /** The timeframe the defaults were chosen for, in the app's timeframe spelling. The Backtest
+     *  tab switches to it when the strategy is picked and when its settings are reset. */
+    timeframe?: string;
     /** Entry, stop, target and size — see {@link StrategyRules}. */
     rules?: StrategyRules;
     /** Risk first, then whatever the strategy itself asks. */
@@ -117,4 +128,7 @@ export type StrategyInfo = Omit<StrategySpec, 'build'>;
 
 /** The keys `RISK_PARAMS` contributes, which every strategy shares. Used to split a schema
  *  into "what every strategy is asked" and "what this one asks". */
-export const RISK_PARAM_KEYS: readonly string[] = ['riskMode', 'riskValue', 'maxLeverage', 'rrr'];
+export const RISK_PARAM_KEYS: readonly string[] = [
+    'riskMode', 'riskValue', 'capLeverage', 'maxLeverage', 'rrr',
+    'breakEvenAtR', 'trailAtR', 'trailR',
+];

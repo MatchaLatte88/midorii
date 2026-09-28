@@ -8,6 +8,8 @@ import { TRADE_INDICATOR_TYPE, registerTradeIndicator } from '../replay/replayIn
 import { makeOverlayCard } from '../replay/overlayCards';
 import { wirePositionStyle } from './positionStyleSettings';
 import { wireOrderEntry } from '../replay/replayOrders';
+import { wirePendingMenu } from '../replay/chartPending';
+import { wireTradePreview } from '../replay/chartPreview';
 import { wirePositionLevels } from '../replay/replayLevels';
 import { PaperController } from './PaperController';
 import { catchUpLabel, fetchGapBars } from './paperCatchUp';
@@ -74,6 +76,8 @@ export interface PaperMountOptions {
 }
 
 export interface PaperMount {
+    /** The latest room before the configured maximum-loss floor, or null with no floor. */
+    mllRoom(): number | null;
     /** Fetch and play whatever the account missed, and put it on a price. Safe to call
      *  again — it re-reads where the account stands each time. */
     resync(): Promise<void>;
@@ -214,6 +218,20 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
         // to "how much may this lose", whichever hand places the trade.
         risk: () => riskOf(opts.settings()),
         beforeOrder: guardLimits,
+        notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
+    }));
+    // A level right-clicked on the plot, onto the ticket as a resting order — not sent.
+    off.push(wirePendingMenu({
+        chart,
+        sidebar,
+        price: () => controller.price(),
+        tick: () => market.tick ?? tickSizeOf(controller.symbol) ?? null,
+    }));
+    // The ticket drawn where it would trade, before it is sent — see chartPreview.ts.
+    off.push(wireTradePreview({
+        chart,
+        indicator,
+        sidebar,
         notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
     }));
 
@@ -540,6 +558,7 @@ export function mountPaperTrading(opts: PaperMountOptions): PaperMount {
     }));
 
     return {
+        mllRoom: () => prop.last().room,
         resync,
         unmount(): void {
             wiring += 1;

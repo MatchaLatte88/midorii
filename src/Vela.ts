@@ -29,6 +29,10 @@ import { registerPressureChannels } from './core/native-indicators/pressure-chan
 import { registerVolumeSentimentChannels } from './core/native-indicators/volume-sentiment-channels';
 import { registerStopHunt } from './core/native-indicators/stophunt';
 import { registerSilverBullet } from './core/native-indicators/silverbullet';
+import { registerCrt } from './core/native-indicators/crt';
+import { registerAmdFvg } from './core/native-indicators/amd-fvg';
+import { registerAmdCycles } from './core/native-indicators/amd-cycles';
+import { registerRangeFakeout } from './core/native-indicators/range-fakeout';
 import { registerClassicIndicators } from './core/native-indicators/classics';
 
 /** Outcome of {@link Vela.runIndicator}: success carries the live handle, failure the error. */
@@ -77,6 +81,10 @@ export class Vela {
         registerVolumeSentimentChannels();
         registerStopHunt();
         registerSilverBullet();
+        registerCrt();
+        registerAmdFvg();
+        registerAmdCycles();
+        registerRangeFakeout();
         registerClassicIndicators();
         const element = resolveElement(container);
         const theme = resolveTheme(options.theme);

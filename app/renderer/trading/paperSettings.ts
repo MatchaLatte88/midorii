@@ -90,6 +90,10 @@ const STORAGE_KEY = 'midorii-paper-settings';
 export function costsOf(settings: PaperSettings): Required<Costs> {
     return {
         feeRate: settings.feeRate,
+        // No paper setting for this yet — every paper account is a fraction-of-notional
+        // instrument today, the same assumption `feeRate` alone made before feePerUnit
+        // existed. Zero is the same "not part of how this is billed" default as elsewhere.
+        feePerUnit: 0,
         spreadPct: settings.spreadPct,
         slippagePct: settings.slippagePct,
     };

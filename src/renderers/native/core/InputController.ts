@@ -93,6 +93,15 @@ export interface InputControllerDeps {
     drawingsDblClick?(x: number, y: number): boolean;
     /** Clear a finished transient overlay (the ruler) — fired on any press / wheel before pan/zoom. */
     drawingsClearTransient?(): void;
+    /** Whether this chart has a right-button hold menu configured. When false/absent,
+     *  right presses keep their immediate legacy path. */
+    rightHoldAvailable?(): boolean;
+    /** A stationary right press reached the hold threshold. Viewport coordinates keep
+     *  a body-hosted wheel clear of the chart cell's clipping boundary. */
+    rightHoldStart?(clientX: number, clientY: number): boolean;
+    rightHoldMove?(clientX: number, clientY: number): void;
+    rightHoldEnd?(clientX: number, clientY: number): void;
+    rightHoldCancel?(): void;
 }
 
 const FLING_MIN_SPEED = 0.04; // px/ms below which a release is treated as a stop (no fling)
@@ -124,6 +133,18 @@ const WHEEL_ZOOM_K = 0.004;
 // (span ×~1.10). Deliberately slower than the time wheel-zoom: the scale is a fine
 // adjustment, not a navigation gesture.
 const WHEEL_PRICE_DRAG_PX = 0.25;
+/** A deliberate hold, still short enough that the menu feels attached to the press. */
+export const RIGHT_HOLD_MS = 220;
+
+interface RightHoldState {
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    clientX: number;
+    clientY: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    active: boolean;
+}
 
 /** Which strip a gesture started over — the data plot, the right price axis, the bottom
  *  time axis, a sub-pane separator (drag to resize the panes above/below it), or one of
@@ -233,6 +254,7 @@ export class InputController {
     private vx = 0; // smoothed pointer velocity, px/ms
     private middleDeleted = false; // the last middle press deleted a drawing (suppress autoscroll/paste)
     private rightCancelled = false; // the last right press cancelled a placement (suppress the context menu)
+    private rightHold: RightHoldState | null = null;
     // Last cursor position over the element (NaN once it leaves) — lets a modifier
     // press/release re-shape the drawings preview with the pointer stationary.
     private cursorX = NaN;
@@ -308,6 +330,7 @@ export class InputController {
         el.removeEventListener('mousedown', this.onMiddleGuard);
         el.removeEventListener('auxclick', this.onMiddleGuard);
         el.removeEventListener('contextmenu', this.onContextGuard);
+        this.cancelRightHold();
         this.cancelLongPress();
         this.touches.clear();
         this.el = null;
@@ -327,6 +350,19 @@ export class InputController {
     /** A right press that cancelled a placement must not ALSO open the host's chart
      *  context menu — swallow its companion event before it bubbles to the host. */
     private readonly onContextGuard = (e: MouseEvent): void => {
+        // Some platforms raise `contextmenu` before pointerup. Resolve a still-short
+        // press through the normal right-click path; an opened wheel always owns it.
+        if (this.rightHold) {
+            const held = this.rightHold;
+            if (held.active) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
+            this.clearRightHoldState();
+            const { x, y } = this.local(e);
+            this.handleRightPress(x, y, e.clientX, e.clientY);
+        }
         if (!this.rightCancelled) return;
         this.rightCancelled = false;
         e.preventDefault();
@@ -377,22 +413,12 @@ export class InputController {
             return;
         }
         if (e.button === 2) {
-            // Right-click cancels/disarms the active tool — placement, armed drawing
-            // tool, ruler, or eraser — reverting to the pointer. The flag lets the
-            // contextmenu companion suppress the host's chart menu for THIS press
-            // only — a plain right-click still opens it.
-            this.rightCancelled = this.deps.drawingsCancelPlacement?.() ?? false;
-            // Nothing to cancel, but an interactive price-line tag (or a drawing) under the
-            // cursor: that level's (or drawing's) own answer is the more specific one, so the
-            // chart's menu is suppressed the same way. Price lines are chrome painted over
-            // every drawing (see onDown's pan-claim order below), so they get first refusal.
-            if (!this.rightCancelled) {
-                const { x, y } = this.local(e);
-                this.rightCancelled = this.deps.priceLinesContextAt?.(x, y) ?? false;
-                if (!this.rightCancelled) {
-                    this.rightCancelled = this.deps.drawingsContextAt?.(x, y, e.clientX, e.clientY) ?? false;
-                }
+            if (e.pointerType === 'mouse' && this.deps.rightHoldAvailable?.()) {
+                this.beginRightHold(e);
+                return;
             }
+            const { x, y } = this.local(e);
+            this.handleRightPress(x, y, e.clientX, e.clientY);
             if (this.rightCancelled) e.preventDefault();
             return;
         }
@@ -459,6 +485,55 @@ export class InputController {
         this.vx = 0;
         this.capture(e.pointerId);
     };
+
+    private beginRightHold(e: PointerEvent): void {
+        this.cancelRightHold();
+        const held: RightHoldState = {
+            pointerId: e.pointerId,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            timer: null,
+            active: false,
+        };
+        held.timer = setTimeout(() => {
+            if (this.rightHold !== held) return;
+            held.timer = null;
+            held.active = this.deps.rightHoldStart?.(held.startClientX, held.startClientY) ?? false;
+            if (held.active) this.deps.rightHoldMove?.(held.clientX, held.clientY);
+        }, RIGHT_HOLD_MS);
+        this.rightHold = held;
+        this.capture(e.pointerId);
+    }
+
+    /** The established right-click priority, shared by immediate and deferred short presses. */
+    private handleRightPress(x: number, y: number, clientX: number, clientY: number): void {
+        // Right-click cancels/disarms the active tool — placement, armed drawing
+        // tool, ruler, or eraser — reverting to the pointer. The flag lets the
+        // contextmenu companion suppress the host's chart menu for THIS press only.
+        this.rightCancelled = this.deps.drawingsCancelPlacement?.() ?? false;
+        // Price-line chrome is painted above drawings, so it gets first refusal.
+        if (!this.rightCancelled) {
+            this.rightCancelled = this.deps.priceLinesContextAt?.(x, y) ?? false;
+            if (!this.rightCancelled) {
+                this.rightCancelled = this.deps.drawingsContextAt?.(x, y, clientX, clientY) ?? false;
+            }
+        }
+    }
+
+    private clearRightHoldState(): RightHoldState | null {
+        const held = this.rightHold;
+        if (!held) return null;
+        if (held.timer !== null) clearTimeout(held.timer);
+        this.rightHold = null;
+        return held;
+    }
+
+    private cancelRightHold(): void {
+        const held = this.clearRightHoldState();
+        if (held?.active) this.deps.rightHoldCancel?.();
+    }
 
     /** Arm the long-press timer for a data-area → crosshair or axis → sheet hold;
      *  movement past TOUCH_SLOP or a second finger cancels it. */
@@ -531,6 +606,12 @@ export class InputController {
     }
 
     private readonly onMove = (e: PointerEvent): void => {
+        if (this.rightHold?.pointerId === e.pointerId) {
+            this.rightHold.clientX = e.clientX;
+            this.rightHold.clientY = e.clientY;
+            if (this.rightHold.active) this.deps.rightHoldMove?.(e.clientX, e.clientY);
+            return;
+        }
         const { x, y } = this.local(e);
         this.cursorX = x;
         this.cursorY = y;
@@ -613,6 +694,24 @@ export class InputController {
     };
 
     private readonly onUp = (e: PointerEvent): void => {
+        if (this.rightHold?.pointerId === e.pointerId) {
+            const held = this.clearRightHoldState()!;
+            if (held.active) {
+                this.deps.rightHoldEnd?.(e.clientX, e.clientY);
+                // Whether a segment was selected or the centre dismissed it, the hold
+                // gesture owns this press and its browser contextmenu companion.
+                this.rightCancelled = true;
+            } else {
+                const { x, y } = this.local(e);
+                this.handleRightPress(x, y, e.clientX, e.clientY);
+            }
+            try {
+                this.el?.releasePointerCapture(e.pointerId);
+            } catch {
+                /* never captured or already released */
+            }
+            return;
+        }
         if (e.pointerType === 'touch') this.touches.delete(e.pointerId);
         this.cancelLongPress();
         if (this.dragging && this.region === 'pinch') {
@@ -703,6 +802,15 @@ export class InputController {
     /** The browser took the pointer back (system gesture, palm rejection, tab switch):
      *  drop the gesture where it is — no click, no fling, no stuck `dragging`. */
     private readonly onCancel = (e: PointerEvent): void => {
+        if (this.rightHold?.pointerId === e.pointerId) {
+            this.cancelRightHold();
+            try {
+                this.el?.releasePointerCapture(e.pointerId);
+            } catch {
+                /* never captured or already released */
+            }
+            return;
+        }
         if (e.pointerType === 'touch') this.touches.delete(e.pointerId);
         this.cancelLongPress();
         if (!this.dragging) return;

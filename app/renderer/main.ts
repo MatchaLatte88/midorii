@@ -8,7 +8,7 @@ import { BinanceProvider } from '../../src/data/providers/binance';
 import { CoinbaseProvider } from '../../src/data/providers/coinbase';
 import { HyperliquidProvider } from '../../src/data/providers/hyperliquid';
 import { registerIcon, registerWidgetAction, type WidgetContext } from '../../src/plugin';
-import { ensureUIHost } from '../../src/ui';
+import { ensureUIHost, Menu, type MenuItemDescriptor } from '../../src/ui';
 import type { VelaTheme } from '../../src/core/options';
 import { VelaWorkspace } from '../../src/workspace';
 import { BRAND } from './about/brand';
@@ -17,6 +17,7 @@ import { BotEngine } from './bot/BotEngine';
 import { mountBotView, type BotViewHandle } from './bot/botView';
 import { isBotContext } from './bot/botChart';
 import { mountBacktestView, type BacktestViewHandle } from './backtest/backtestView';
+import { mountPatternsView, type PatternsViewHandle } from './patterns/patternsView';
 import { mountStrategiesView, type StrategiesViewHandle } from './strategies/strategiesView';
 import { openDownloadDialog } from './data/downloadDialog';
 import { BybitProvider } from './providers/BybitProvider';
@@ -30,6 +31,7 @@ import { askReplaySetup } from './replay/replaySetup';
 import { openRunsDialog } from './runs/runsDialog';
 import { loadPrefs, savePrefs, type AppPrefs } from './settings/prefs';
 import { mountSettingsView, type SettingsViewHandle } from './settings/settingsView';
+import { wireRadialMenu } from './settings/radialMenuPrefs';
 import { mountAppTopbar, type AppTab } from './shell/appTopbar';
 import { shareChartDoc } from './shell/sharedChartDoc';
 import { paletteOf, type AppStyle, type AppThemeName } from './shell/themes';
@@ -98,6 +100,7 @@ const appTopbarRoot = document.getElementById('app-topbar')!;
 const chartRoot = document.getElementById('chart')!;
 const replayRoot = document.getElementById('replay-root')!;
 const backtestRoot = document.getElementById('backtest-root')!;
+const patternsRoot = document.getElementById('patterns-root')!;
 const analysisRoot = document.getElementById('analysis-root')!;
 const strategiesRoot = document.getElementById('strategies-root')!;
 const settingsRoot = document.getElementById('settings-root')!;
@@ -144,6 +147,7 @@ const workspace = new VelaWorkspace(chartHost, {
     storage: chartDoc.storage,
 });
 chartDoc.attach(workspace);
+wireRadialMenu(workspace);
 
 /* The kit's theme tokens live on the workspace's own root, and the dialogs below open on
  * document.body — outside it. Without this they render with every --vela-* unresolved:
@@ -160,7 +164,7 @@ ensureUIHost(document.body, palette());
 
 /** Only ONE root is ever visible — the tabs are mutually exclusive views. */
 function showOnly(root: HTMLElement): void {
-    for (const r of [chartRoot, replayRoot, backtestRoot, analysisRoot, strategiesRoot, settingsRoot, botRoot]) {
+    for (const r of [chartRoot, replayRoot, backtestRoot, patternsRoot, analysisRoot, strategiesRoot, settingsRoot, botRoot]) {
         r.hidden = r !== root;
     }
 }
@@ -210,6 +214,7 @@ function repaint(): void {
     const t = palette();
     workspace.setTheme(t);
     mountedReplayWs?.setTheme(t);
+    backtestView?.setTheme(t);
     ensureUIHost(document.body, t);
     // The Trading Bot tab builds a chart of its own, which is wearing the old palette until
     // it is told otherwise. Only if it has ever been opened — nothing is built before that.
@@ -230,17 +235,17 @@ function repaint(): void {
 async function selectTab(tab: AppTab): Promise<void> {
     if (tab === 'chart') {
         showOnly(chartRoot);
-        appTopbar.setActiveTab('chart');
+        activateTopbar('chart');
         return;
     }
     if (tab === 'replay') {
         const opened = await openReplay();
-        appTopbar.setActiveTab(opened ? 'replay' : 'chart');
+        activateTopbar(opened ? 'replay' : 'chart');
         return;
     }
     if (tab === 'analysis') {
         showOnly(analysisRoot);
-        appTopbar.setActiveTab('analysis');
+        activateTopbar('analysis');
         /* Read on the way in rather than kept live: a run that finished — or a paper
          * account that traded — while this tab was hidden is exactly what somebody opens
          * it to look at. The view reports its own failures in the panel. */
@@ -249,30 +254,37 @@ async function selectTab(tab: AppTab): Promise<void> {
     }
     if (tab === 'backtest') {
         showOnly(backtestRoot);
-        appTopbar.setActiveTab('backtest');
+        activateTopbar('backtest');
         /* Read on the way in, like Analysis: a market downloaded while this tab was hidden
          * is exactly the one somebody opens it to run on — and so are settings changed on
          * the Strategies tab, which this one starts from. */
         await backtest().refresh();
         return;
     }
+    if (tab === 'patterns') {
+        showOnly(patternsRoot);
+        activateTopbar('patterns');
+        // Read on the way in: a market downloaded meanwhile is the one somebody came to search.
+        await patterns().refresh();
+        return;
+    }
     if (tab === 'strategies') {
         showOnly(strategiesRoot);
-        appTopbar.setActiveTab('strategies');
+        activateTopbar('strategies');
         // Same reason again: the settings on disk are what this screen is for.
         await strategies().refresh();
         return;
     }
     if (tab === 'settings') {
         showOnly(settingsRoot);
-        appTopbar.setActiveTab('settings');
+        activateTopbar('settings');
         /* Read on the way in, like the others: everything this screen shows is stored
          * somewhere else, and the chart's own settings dialog edits some of it. */
         settings().refresh();
         return;
     }
     showOnly(botRoot);
-    appTopbar.setActiveTab('bot');
+    activateTopbar('bot');
     /* Read on the way in, like the others. Unlike the others, what this screen shows may
      * already be RUNNING — the bots are started at launch (below) and keep running with the
      * tab shut, so this is the view catching up with them rather than the other way round. */
@@ -355,8 +367,23 @@ function analysis(): AnalysisViewHandle {
  * for it. Kept afterwards, so a form half filled in survives a look at the chart. */
 let backtestView: BacktestViewHandle | null = null;
 function backtest(): BacktestViewHandle {
-    backtestView ??= mountBacktestView(backtestRoot);
+    backtestView ??= mountBacktestView(backtestRoot, { theme: palette });
     return backtestView;
+}
+
+/* The Patterns tab — the candlestick pattern search. Built on first open like the others, and
+ * kept afterwards: a search that took a minute is worth coming back to after a look at the
+ * chart. */
+let patternsView: PatternsViewHandle | null = null;
+function patterns(): PatternsViewHandle {
+    patternsView ??= mountPatternsView(patternsRoot);
+    return patternsView;
+}
+
+/** Keep the selected view and the view-specific account strip on the same switch. */
+function activateTopbar(tab: AppTab): void {
+    appTopbar.setActiveTab(tab);
+    syncAccountTopbar(tab);
 }
 
 /* The Strategies tab — what this app can trade on its own, and what each one is set to.
@@ -392,6 +419,154 @@ function bots(): BotViewHandle {
     });
     return botView;
 }
+
+/* ── account strip in the app title bar ──────────────────────────────────
+ *
+ * The strip owns presentation only. Each view remains the one source of truth for its
+ * figures, account choice and safety action; switching the app tab merely points the strip
+ * at the matching reader. Views with no account story hide it altogether. */
+
+const chartAccountSource = {
+    read: () => {
+        const account = trading.summary();
+        return {
+            context: 'live' as const,
+            account: {
+                label: account.label,
+                detail: account.detail,
+                accent: account.accent,
+                live: account.live,
+            },
+            balance: account.balance,
+            limit: {
+                label: 'MLL' as const,
+                value: account.mllRoom,
+                title: 'What this account may still lose before its configured maximum loss limit.',
+            },
+            realised: account.realised,
+            unrealised: account.unrealised,
+            currency: account.currency,
+            selectable: true,
+            canLock: account.broker !== 'off',
+            lockTitle: account.broker === 'off'
+                ? 'Trading is locked — choose an account to arm it'
+                : 'Lock trading and return this chart to Just Watching',
+        };
+    },
+    openSelector: (trigger: HTMLElement): void => trading.openAccountMenu(trigger),
+    lock: (): void => trading.stop(),
+};
+
+const backtestAccountSource = {
+    read: () => {
+        const result = backtest().summary();
+        return {
+            context: 'backtest' as const,
+            balance: result.balance,
+            limit: {
+                label: 'MDD' as const,
+                value: result.maxDrawdown,
+                title: 'The largest peak-to-trough loss in the current backtest result.',
+            },
+            realised: result.realised,
+            unrealised: result.unrealised,
+        };
+    },
+};
+
+let botAccountMenu: Menu | null = null;
+let botAccountMenuOpen = false;
+let botAccountMenuClosedAt = 0;
+
+function selectedBotId(): string | null {
+    return botView?.selectedBotId ?? botEngine.list()[0]?.id ?? null;
+}
+
+function botMenuItems(): MenuItemDescriptor[] {
+    const selected = selectedBotId();
+    const items = botEngine.list().map((bot) => ({
+        id: bot.id,
+        label: `${bot.name} — ${bot.venue === 'paper' ? 'Paper' : 'Capital.com'} · ${bot.symbol}`,
+        checked: bot.id === selected,
+    }));
+    return items.length > 0 ? items : [{ id: 'empty', label: 'No bots yet', disabled: true }];
+}
+
+function openBotAccountMenu(trigger: HTMLElement): void {
+    if (botAccountMenuOpen || Date.now() - botAccountMenuClosedAt < 200) {
+        botAccountMenu?.close();
+        return;
+    }
+    botAccountMenu ??= new Menu({
+        host: botRoot,
+        items: botMenuItems(),
+        placement: 'bottom-end',
+        checkmarks: true,
+        onOpenChange: (open) => {
+            botAccountMenuOpen = open;
+            if (!open) botAccountMenuClosedAt = Date.now();
+        },
+        onSelect: (id) => {
+            if (id === 'empty') return;
+            bots().selectBot(id);
+            appTopbar.account.refresh();
+        },
+    });
+    botAccountMenu.setItems(botMenuItems());
+    const rect = trigger.getBoundingClientRect();
+    botAccountMenu.openAt(rect.right, rect.bottom + 4);
+}
+
+const botAccountSource = {
+    read: () => {
+        const id = selectedBotId();
+        const bot = id ? botEngine.find(id) : undefined;
+        const runner = id ? botEngine.displayRunner(id) : null;
+        const account = runner?.accountSummary() ?? null;
+        const status = id ? botEngine.status(id) : 'stopped';
+        const running = status === 'running' || status === 'starting';
+        return {
+            context: 'bot' as const,
+            account: {
+                label: bot?.name ?? 'No bots',
+                detail: bot ? `${bot.venue === 'paper' ? 'Paper' : 'Capital.com'} · ${bot.symbol}` : 'Create a bot',
+                live: account?.live === true,
+            },
+            balance: account?.balance ?? null,
+            limit: {
+                label: 'DLL' as const,
+                value: account?.dailyLossRoom ?? null,
+                title: 'What the selected bot may still lose today before its daily loss guard stops new entries.',
+            },
+            realised: account?.realised ?? null,
+            unrealised: account?.unrealised ?? null,
+            currency: account?.currency ?? null,
+            selectable: botEngine.list().length > 0,
+            canLock: running,
+            lockTitle: running
+                ? 'Stop this bot without closing its positions or orders'
+                : 'This bot is not running',
+        };
+    },
+    openSelector: openBotAccountMenu,
+    lock: async (): Promise<void> => {
+        const id = selectedBotId();
+        if (!id) return;
+        await botEngine.stop(id);
+        appTopbar.account.refresh();
+    },
+};
+
+function syncAccountTopbar(tab: AppTab): void {
+    if (tab === 'chart') appTopbar.account.setSource(chartAccountSource);
+    else if (tab === 'backtest') appTopbar.account.setSource(backtestAccountSource);
+    else if (tab === 'bot') appTopbar.account.setSource(botAccountSource);
+    else appTopbar.account.setSource(null);
+}
+
+// `index.html` already opens on Chart, so point the initially empty presenter at the live
+// account once trading and bots have both been composed.
+syncAccountTopbar('chart');
 
 /* The Settings tab — what the app is, as opposed to what it has done. Built on first open
  * like the others; until somebody asks for it there is nothing on it worth reading, and the

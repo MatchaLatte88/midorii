@@ -21,6 +21,7 @@
 // a stale look either.
 import type { VelaStorage } from '../../../src/widget';
 import { decodeState, encodeState, type ChartState, type VelaWorkspace, type WorkspaceState } from '../../../src/workspace';
+import type { PersistedNativeEntry } from '../../../src/state/document';
 import { ALERT_INDICATOR_TYPE } from '../alerts/alertIndicator';
 import { QUOTE_INDICATOR_TYPE } from '../quotes/quoteIndicator';
 import { REPLAY_INDICATOR_TYPE, TRADE_INDICATOR_TYPE } from '../replay/replayIndicator';
@@ -52,6 +53,8 @@ const LEGACY_KEY: Record<string, string> = {
  * behind them, and on the chart that owns it a SECOND copy of what is already there.
  */
 const APP_INDICATORS: readonly string[] = [ALERT_INDICATOR_TYPE, QUOTE_INDICATOR_TYPE, TRADE_INDICATOR_TYPE, REPLAY_INDICATOR_TYPE];
+
+const nativeType = (entry: PersistedNativeEntry): string => typeof entry === 'string' ? entry : entry.type;
 
 /** A chart's market — the one thing each mode keeps to itself. */
 export interface ChartMarket {
@@ -161,7 +164,7 @@ function strip(doc: WorkspaceState): WorkspaceState {
     const cell = doc.charts[0];
     if (!cell) return { ...doc, charts: [] };
     const { symbol: _s, provider: _p, timeframe: _t, ...rest } = cell;
-    const natives = cell.indicators?.natives.filter((type) => !APP_INDICATORS.includes(type));
+    const natives = cell.indicators?.natives.filter((entry) => !APP_INDICATORS.includes(nativeType(entry)));
     return {
         ...doc,
         charts: [{ ...rest, ...(cell.indicators ? { indicators: { ...cell.indicators, natives: natives ?? [] } } : {}) }],

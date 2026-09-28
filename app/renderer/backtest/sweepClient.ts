@@ -3,6 +3,7 @@ import type { SweepProgress, SweepRun } from './sweepRunner';
 import { packBars, type SweepCommand, type SweepEvent, type SweepRequest } from './sweepProtocol';
 import type { BacktestBar } from '../../../shared/engine/backtest';
 import type { RankMetricId, SweepRanges } from '../../../shared/analysis/sweep';
+import type { Costs } from '../../../shared/engine/broker';
 
 /**
  * Starting a sweep on its own thread, and getting it back.
@@ -22,6 +23,14 @@ export interface StartSweepOptions {
     from: number;
     to: number;
     balance: number;
+    /** What every combination is charged. Null takes the Broker's defaults. */
+    costs?: Costs | null;
+    /** Money per point per unit. 1 unless the instrument says otherwise. */
+    pointValue?: number;
+    /** The smallest a size may move by, or null for no step. */
+    sizeStep?: number | null;
+    /** The least a position may ever be, or null. */
+    minSize?: number | null;
     stepMs?: number | null;
     trainFraction: number;
     metric: RankMetricId;
@@ -58,6 +67,10 @@ export function startSweep(options: StartSweepOptions): SweepHandle {
         from: options.from,
         to: options.to,
         balance: options.balance,
+        costs: options.costs ?? null,
+        pointValue: options.pointValue ?? 1,
+        sizeStep: options.sizeStep ?? null,
+        minSize: options.minSize ?? null,
         stepMs: options.stepMs ?? null,
         trainFraction: options.trainFraction,
         metric: options.metric,

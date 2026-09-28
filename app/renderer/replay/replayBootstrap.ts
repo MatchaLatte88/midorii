@@ -15,11 +15,14 @@ import type { TradeSidebar } from './tradeSidebar';
 import { setActiveReplay, syncControls } from './replayActions';
 import { REPLAY_INDICATOR_TYPE, registerReplayIndicator } from './replayIndicator';
 import { wireOrderEntry } from './replayOrders';
+import { wirePendingMenu } from './chartPending';
+import { wireTradePreview } from './chartPreview';
 import { wirePositionLevels } from './replayLevels';
 import { wirePositionStyle } from '../trading/positionStyleSettings';
 import { wireOverlaySettings } from './overlaySettings';
 import { shareChartDoc } from '../shell/sharedChartDoc';
 import { loadReplayWindow } from './replayWindow';
+import { wireRadialMenu } from '../settings/radialMenuPrefs';
 import { TickFeed } from './tickFeed';
 import type { TapePrint } from './timeAndSales';
 
@@ -129,6 +132,7 @@ async function mount(
         storage: doc.storage,
     });
     doc.attach(ws);
+    wireRadialMenu(ws);
     await ws.chart.ready();
 
     /**
@@ -174,6 +178,13 @@ async function mount(
 
     // The ticket beside the plot: the way in that does not go through a drawing.
     const sidebar = showTicket(ws, main, controller, theme);
+    // The ticket drawn where it would trade, before it is sent — see chartPreview.ts.
+    wireTradePreview({
+        chart: ws.chart,
+        indicator,
+        sidebar,
+        notify: (message, kind) => ws.toast(message, kind === 'error' ? 'error' : 'info'),
+    });
 
     // Vela's own position tool is the other way in — drawn like any other drawing, traded only
     // when its right-click menu says so, and sized by the panel's risk settings either way.
@@ -306,6 +317,13 @@ function showTicket(ws: VelaWorkspace, main: HTMLElement, controller: ReplayCont
 
     ensureUIHost(sidebar.el, theme);
     ws.chart.on('theme:changed', (theme) => applyThemeTokens(sidebar.el, theme));
+    // A level right-clicked on the plot, onto the ticket as a resting order — not sent.
+    wirePendingMenu({
+        chart: ws.chart,
+        sidebar,
+        price: () => controller.price(),
+        tick: () => tickSize ?? inferredTick,
+    });
     return sidebar;
 }
 

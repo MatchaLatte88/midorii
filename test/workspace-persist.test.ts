@@ -31,7 +31,10 @@ const fullDoc: WorkspaceState = {
             indicatorValues: false,
             rendererConfig: { theme: 'dark', nested: { any: ['shape'] } },
             drawings: { version: 1, items: [{ type: 'trendline' }] },
-            indicators: { manifest: ['EMA 20'], natives: ['volume'] },
+            indicators: {
+                manifest: [{ name: 'EMA 20', visible: false }],
+                natives: ['volume', { type: 'rsi', visible: false }],
+            },
             ext: { 'velapro.indicators': [{ slug: 'smart-money', inputs: { len: 20 } }] },
         },
         { id: 'c2', symbol: 'ETHUSDT', timeframe: '15' },
@@ -81,7 +84,14 @@ describe('sanitizeState (the applyState gate)', () => {
                 ,
                 {
                     id: 'c4', // VALUE-carrying entries: name required, value bags must be plain objects
-                    indicators: { manifest: [{ name: 'RSI', inputs: { len: 21 }, props: 'oops' }, { name: 'MACD', inputs: [1, 2] }, { inputs: { x: 1 } }], natives: [] },
+                    indicators: {
+                        manifest: [
+                            { name: 'RSI', inputs: { len: 21 }, props: 'oops', visible: false },
+                            { name: 'MACD', inputs: [1, 2], visible: 'no' },
+                            { inputs: { x: 1 } },
+                        ],
+                        natives: ['volume', { type: 'vpvr', visible: false }, { type: 42, visible: false }, { type: 'range', visible: 'no' }],
+                    },
                 },
             ],
         });
@@ -94,7 +104,13 @@ describe('sanitizeState (the applyState gate)', () => {
                 { id: 'c1', symbol: 'BTCUSDT' },
                 { id: 'c3', indicators: { manifest: ['EMA'], natives: [] } },
                 // bad bags dropped (an all-default entry collapses to the bare name); nameless entries vanish
-                { id: 'c4', indicators: { manifest: [{ name: 'RSI', inputs: { len: 21 } }, 'MACD'], natives: [] } },
+                {
+                    id: 'c4',
+                    indicators: {
+                        manifest: [{ name: 'RSI', inputs: { len: 21 }, visible: false }, 'MACD'],
+                        natives: ['volume', { type: 'vpvr', visible: false }, 'range'],
+                    },
+                },
             ],
         });
     });

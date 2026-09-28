@@ -299,6 +299,19 @@ describe('indicatorLedger', () => {
         expect(indicatorLedger({ ...base, pendingManifest: ['Old'] })).toEqual({ manifest: [], natives: [] });
     });
 
+    it('keeps hidden state beside the exact native and manifest instances', () => {
+        const hiddenNative = { type: 'rsi', visible: false } as const;
+        const hiddenScript = { name: 'EMA', visible: false } as const;
+        expect(indicatorLedger({
+            ...base,
+            present: ['volume', hiddenNative],
+            instanceEntries: [hiddenScript, 'EMA'],
+        })).toEqual({
+            manifest: [hiddenScript, 'EMA'],
+            natives: ['volume', hiddenNative],
+        });
+    });
+
     it('falls back to the restored manifest names only while the manifest is UNSETTLED', () => {
         expect(indicatorLedger({ ...base, manifestSettled: false, pendingManifest: ['A', 'B'] })).toEqual({ manifest: ['A', 'B'], natives: [] });
         // Unsettled with nothing pending: the live (empty) instances are all there is.

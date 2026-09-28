@@ -41,6 +41,20 @@ import { leftArmedMarket, leftBehindNotice, loadAccountMarket, marketForAccount,
 /** Which broker the chart is wired to. */
 export type TradeBroker = 'off' | 'paper' | 'capital' | 'binance-spot' | 'bybit' | 'projectx';
 
+/** The account facts the app title bar can state without owning a second ledger. */
+export interface TradeAccountSummary {
+    broker: TradeBroker;
+    label: string;
+    detail: string;
+    accent?: string;
+    live: boolean;
+    currency: string | null;
+    balance: number | null;
+    mllRoom: number | null;
+    realised: number | null;
+    unrealised: number | null;
+}
+
 export interface TradeModeOptions {
     workspace: VelaWorkspace;
     /** The column the chart lives in — the dock mounts at the bottom of it. */
@@ -65,6 +79,10 @@ export interface TradeModeHandle {
      * older of two answers about the same account is the drift this exists to avoid.
      */
     readonly account: PaperController | null;
+    /** Current facts for the app-level account strip. */
+    summary(): TradeAccountSummary;
+    /** Open the same account menu as the chart action, anchored to the app title bar. */
+    openAccountMenu(trigger: HTMLElement): void;
     /** Put the account down and take the trading UI off — what Just Watching does. */
     stop(): void;
 
@@ -845,6 +863,18 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         return menu;
     }
 
+    function openAccountMenu(trigger: HTMLElement): void {
+        void refreshVenues();
+        if (menuOpen || Date.now() - closedAt < REOPEN_GUARD_MS) {
+            menu?.close();
+            return;
+        }
+        const list = ensureMenu(ws.root);
+        list.setItems(items());
+        const rect = trigger.getBoundingClientRect();
+        list.openAt(rect.right, rect.bottom + 4);
+    }
+
     registerWidgetAction({
         id: 'midorii.trade',
         target: 'topbar',
@@ -853,19 +883,12 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         label: 'Trade',
         when: opts.when,
         run: (ctx) => {
-            void refreshVenues();
-            if (menuOpen || Date.now() - closedAt < REOPEN_GUARD_MS) {
-                menu?.close();
-                return;
+            const trigger = ctx.trigger;
+            if (trigger) openAccountMenu(trigger);
+            else {
+                void refreshVenues();
+                ensureMenu(ctx.host).open();
             }
-            const list = ensureMenu(ctx.host);
-            list.setItems(items());
-            /* Anchored to the button the press came from. A contributed action's button is
-             * rebuilt whenever the topbar re-projects, so the menu is not bound to one —
-             * it is opened at whichever button is currently on screen. */
-            const rect = ctx.trigger?.getBoundingClientRect();
-            if (rect) list.openAt(rect.right, rect.bottom + 4);
-            else list.open();
         },
     });
 
@@ -960,6 +983,96 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
     });
     void offChartOnlyMarket;
 
+    const openPnl = (book: { positions: ReadonlyArray<{ unrealized: number }> }): number => (
+        book.positions.reduce((sum, position) => sum + position.unrealized, 0)
+    );
+
+    function summary(): TradeAccountSummary {
+        if (broker === 'paper' && controller) {
+            const account = controller.account();
+            return {
+                broker,
+                label: 'Paper',
+                detail: controller.symbol,
+                live: false,
+                currency: null,
+                balance: account.cash,
+                mllRoom: mount?.mllRoom() ?? null,
+                realised: account.cash - account.initialBalance,
+                unrealised: account.open ?? 0,
+            };
+        }
+        if (broker === 'capital' && live) {
+            const unrealised = openPnl(live.book());
+            const account = liveMount?.summary();
+            return {
+                broker,
+                label: 'Capital.com',
+                detail: capital?.live ? 'Live money' : 'Demo',
+                live: capital?.live === true,
+                currency: live.accountCurrency(),
+                balance: live.equity() - unrealised,
+                mllRoom: account?.mllRoom ?? null,
+                realised: account?.realised ?? null,
+                unrealised,
+            };
+        }
+        if (broker === 'binance-spot' && spot) {
+            const unrealised = openPnl(spot.book());
+            return {
+                broker,
+                label: 'Binance Spot',
+                detail: 'Demo',
+                live: false,
+                currency: spot.accountCurrency(),
+                balance: spot.equity() - unrealised,
+                mllRoom: null,
+                realised: null,
+                unrealised,
+            };
+        }
+        if (broker === 'bybit' && bybit) {
+            const unrealised = openPnl(bybit.book());
+            return {
+                broker,
+                label: 'Bybit',
+                detail: `${bybitVenue?.live ? 'Live money' : 'Demo'} · ${bybitProduct() ?? 'account'}`,
+                live: bybitVenue?.live === true,
+                currency: bybit.accountCurrency(),
+                balance: bybit.equity() - unrealised,
+                mllRoom: null,
+                realised: null,
+                unrealised,
+            };
+        }
+        if (broker === 'projectx' && projectx) {
+            const unrealised = openPnl(projectx.book());
+            return {
+                broker,
+                label: projectx.accountName,
+                detail: 'ProjectX',
+                accent: PROJECTX_ACCENT,
+                live: projectx.isLive,
+                currency: projectx.accountCurrency(),
+                balance: projectx.available(),
+                mllRoom: projectxMountHandle?.mllRoom() ?? null,
+                realised: projectx.history().reduce((sum, trade) => sum + trade.netPnl, 0),
+                unrealised,
+            };
+        }
+        return {
+            broker: 'off',
+            label: 'Select account',
+            detail: 'Just Watching',
+            live: false,
+            currency: null,
+            balance: null,
+            mllRoom: null,
+            realised: null,
+            unrealised: null,
+        };
+    }
+
     return {
         get broker(): TradeBroker {
             return broker;
@@ -967,6 +1080,8 @@ export function installTradeMenu(opts: TradeModeOptions): TradeModeHandle {
         get account(): PaperController | null {
             return controller;
         },
+        summary,
+        openAccountMenu,
         get settings(): PaperSettings {
             return settings;
         },

@@ -10,6 +10,9 @@ import { guardWindowClose } from './windowCloseGuard.js';
 // under the old "project-midori" name, so the walking skeleton shows real
 // local bars instead of an empty library on the first run.
 app.setName('project-midori');
+// Windows otherwise groups a development Electron window under Electron's own app ID
+// and picks Electron's taskbar icon instead of the BrowserWindow icon below.
+app.setAppUserModelId('com.midorii.app');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_URL = 'http://localhost:5301';
@@ -47,7 +50,7 @@ function createWindow() {
     // taskbar and the Alt+Tab switcher still ask for one; without this they show
     // Electron's default. It sits with the renderer's own assets because that is the
     // one place both the dev server and the build reach (vite.config.ts roots there).
-    icon: path.join(__dirname, '..', 'renderer', 'assets', 'midorii-logo.png'),
+    icon: path.join(__dirname, '..', 'renderer', 'assets', 'midorii-icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

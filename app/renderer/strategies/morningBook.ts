@@ -8,7 +8,7 @@ import type { PhaseOscillatorCross } from '../../../src/core/analysis/phaseOscil
 import { TIME_BASED_RANGE_DEFAULTS } from '../../../src/core/analysis/timeBasedRange';
 import type { BarClock } from '../../../src/core/analysis/barClock';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
-import { RISK_PARAMS, positionSize } from '../../../shared/strategies/risk.js';
+import { RISK_PARAMS, leverageCap, positionSize } from '../../../shared/strategies/risk.js';
 import type { RiskMode } from '../../../shared/strategies/risk.js';
 import { cached, detectionCacheKey, type DetectionCache } from './detection';
 import type { StrategyParam, StrategyParams, StrategySpec } from './types';
@@ -306,6 +306,11 @@ export const MORNING_BOOK_STRATEGY: StrategySpec = {
         const riskMode = stringOf(params, 'riskMode') as RiskMode;
         const riskValue = numberOf(params, 'riskValue');
         const maxLeverage = numberOf(params, 'maxLeverage');
+        /* Null when the ceiling is switched off: then the size is whatever the risk asks
+         * for, and being stopped out costs exactly what was typed in. Only the risk-based
+         * branch reads it — a position sized AT the ceiling has no other size to fall back
+         * on. See `leverageCap`. */
+        const cap = leverageCap(params);
 
         const cellEntryFromMin = numberOf(params, 'cellEntryFromMin');
         const cellExitMin = numberOf(params, 'cellExitMin');
@@ -426,7 +431,7 @@ export const MORNING_BOOK_STRATEGY: StrategySpec = {
             const size = stop == null
                 // No stop, so no risk distance: the ceiling is the size.
                 ? (ctx.equity > 0 && price > 0 ? (ctx.equity * maxLeverage) / price : null)
-                : positionSize(ctx.equity, price, stop, riskMode, riskValue, maxLeverage);
+                : positionSize(ctx.equity, price, stop, riskMode, riskValue, cap);
             if (size == null || !(size > 0)) return;
 
             ctx.order({

@@ -117,7 +117,8 @@ export interface NativeIndicatorDescriptor {
     readonly vendor?: string;
     /**
      * Host machinery that draws through the native pipeline (alert levels, bid/ask lines, a
-     * position) but is not an indicator anyone picks — kept out of a host "add indicator" UI.
+     * position) but is not a user-managed indicator — kept out of indicator pickers, legends,
+     * and object trees while remaining available through its dedicated host settings.
      */
     readonly internal?: boolean;
     /**

@@ -48,7 +48,8 @@ const STYLE_ID = 'midorii-card';
  * axis. The View menu goes beside the full-screen button, at the same size, on the same line,
  * with the same gap — see `PaneControls.ts`, which wears this card's own surface and border
  * for the same reason. The renderer publishes what the cluster claims as
- * `--vela-pane-controls-width`, so all of this follows the panes coming and going.
+ * `--vela-pane-controls-width` — a maximized study pane's whole row included — so all of this
+ * follows the panes coming and going.
  */
 const PANE_CONTROLS = 'var(--vela-pane-controls-width, 0px)';
 /** The corner buttons, matched to the cluster they stand next to. */
@@ -103,11 +104,14 @@ const CSS = `
 .midorii-card-close:focus-visible { opacity: 1; }
 .midorii-card-close:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 
+/* Off the top of the plot, not of the price pane: a maximized study pane pushes the price
+   pane's top to the bottom edge, and these belong to the chart's corner whichever pane fills
+   it. The pane clusters sit on the same line. */
 .midorii-card-dock,
 .midorii-card-full {
     all: unset;
     position: absolute;
-    top: calc(var(--vela-price-pane-top, 0px) + 10px);
+    top: 10px;
     right: calc(var(--vela-scale-gutter, 0px) + ${PANE_CONTROLS} + ${VIEW_RIGHT}px);
     z-index: 4;
     box-sizing: border-box;

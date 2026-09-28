@@ -56,11 +56,20 @@ const EMPTY = Object.freeze([]);
  * @param {object} params
  * @param {Array} params.bars        strategy-timeframe bars, ascending, closed only
  * @param {Array} [params.baseBars]  1m bars covering the same span, for intrabar fills
- * @param {object} params.strategy   { series?, events?, params?, init?, onBar, onFinish? }
+ * @param {object} params.strategy   { series?, events?, params?, management?, init?, onBar, onFinish? }
  * @param {object} [params.broker]   Broker options (balance, costs, mode)
  * @param {number} [params.stepMs]   bar duration; inferred when absent
+ * @param {number} [params.tradeFrom]  bar time (ms) trading starts at, or absent for "from
+ *   the first bar". Everything before it still feeds `series` and `events` — real warm-up,
+ *   the same detection a live run would have had — but the strategy's `onBar` never runs
+ *   for it, so nothing before this time can become a fill, a trade, or a point on the
+ *   equity curve. Lets a caller hand in history a detector needs (a 200-session average,
+ *   say) without that history counting as part of what was tested — see the series warm-up
+ *   skip below, which this works alongside: whichever of the two skips more bars wins.
  */
-export function runBacktest({ bars, baseBars = null, strategy, broker: brokerOptions = {}, stepMs = null }) {
+export function runBacktest({
+  bars, baseBars = null, strategy, broker: brokerOptions = {}, stepMs = null, tradeFrom = null,
+}) {
   if (!Array.isArray(bars) || bars.length === 0) {
     throw new Error('runBacktest: no bars to run on');
   }
@@ -68,7 +77,15 @@ export function runBacktest({ bars, baseBars = null, strategy, broker: brokerOpt
     throw new Error('runBacktest: the strategy must provide an onBar(ctx) function');
   }
 
-  const broker = new Broker(brokerOptions);
+  /* Break-even and trailing come with the strategy but belong to the account: both
+   * are decided inside a bar, and a strategy only ever sees one that has closed. See
+   * `management` in broker.js. A caller that set them on `broker` directly wins — a
+   * run override is a deliberate act, a schema default is not. */
+  const broker = new Broker(
+    strategy.management != null && brokerOptions.management === undefined
+      ? { ...brokerOptions, management: strategy.management }
+      : brokerOptions,
+  );
   const startedAt = Date.now();
 
   const series = strategy.series ?? {};
@@ -111,6 +128,12 @@ export function runBacktest({ bars, baseBars = null, strategy, broker: brokerOpt
   let start = 0;
   if (seriesNames.length > 0) {
     while (start < bars.length && seriesNames.some((n) => series[n][start] == null)) start++;
+  }
+  /* A second, independent floor: bars before `tradeFrom` are real history — series and
+   * events already cover them — but trading starts no earlier than this. Whichever of the
+   * two skips more bars wins; neither can pull `start` backwards. */
+  if (tradeFrom != null) {
+    while (start < bars.length && bars[start].time < tradeFrom) start++;
   }
 
   const equityCurve = [];
@@ -210,9 +233,14 @@ export function runBacktest({ bars, baseBars = null, strategy, broker: brokerOpt
     const equity = broker.equity;
     if (equity > peakEquity) peakEquity = equity;
     const drawdown = peakEquity - equity;
-    if (drawdown > maxDrawdown) {
-      maxDrawdown = drawdown;
-      maxDrawdownPct = peakEquity > 0 ? drawdown / peakEquity : 0;
+    if (drawdown > maxDrawdown) maxDrawdown = drawdown;
+    /* Tracked independently of the cash figure above, not read off its winning bar: a
+     * shallower cash drawdown from a lower peak can still be the worse percentage — a
+     * 2,000 pullback from a 20,000 peak is 10%, and a later 1,500 pullback from a peak of
+     * only 5,000 is 30% — and comparing only on cash would silently drop the second one. */
+    if (peakEquity > 0) {
+      const drawdownPct = drawdown / peakEquity;
+      if (drawdownPct > maxDrawdownPct) maxDrawdownPct = drawdownPct;
     }
 
     equityCurve.push({ time: bar.time, equity, balance: broker.balance, drawdown });
@@ -246,6 +274,13 @@ export function runBacktest({ bars, baseBars = null, strategy, broker: brokerOpt
      * those defaults. */
     costs: { ...broker.costs },
     initialBalance: broker.initialBalance,
+    /* The instrument the run was actually charged in — same reasoning as `costs` above.
+     * A stored run that omitted these could not be told apart from one run against a
+     * plain spot instrument, which is exactly the confusion that let every futures
+     * backtest trade at pointValue 1 unnoticed. */
+    pointValue: broker.pointValue,
+    sizeStep: broker.sizeStep,
+    minSize: broker.minSize,
     resolution: baseBars && baseBars.length > 0 ? 'intrabar' : 'pessimistic',
     elapsedMs: Date.now() - startedAt,
   };

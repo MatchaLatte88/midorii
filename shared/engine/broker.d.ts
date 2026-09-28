@@ -10,10 +10,23 @@ export type PositionMode = 'netting' | 'hedging';
 
 export declare const SIDE: { readonly BUY: 'buy'; readonly SELL: 'sell' };
 export declare const POSITION_MODE: { readonly NETTING: 'netting'; readonly HEDGING: 'hedging' };
-export declare const DEFAULT_COSTS: { feeRate: number; spreadPct: number; slippagePct: number };
+export declare const DEFAULT_COSTS: {
+    feeRate: number; feePerUnit: number; spreadPct: number; slippagePct: number;
+};
+/** Every cost switched off — what the rules alone are worth. */
+export declare const NO_COSTS: { feeRate: 0; feePerUnit: 0; spreadPct: 0; slippagePct: 0 };
+
+/** Rules the account applies to an open position by itself, in R. Zero switches one off. */
+export interface Management {
+    breakEvenAtR?: number;
+    trailAtR?: number;
+    trailR?: number;
+}
 
 export interface Costs {
     feeRate?: number;
+    /** Commission per unit traded, in account money — added to `feeRate`, not instead of it. */
+    feePerUnit?: number;
     spreadPct?: number;
     slippagePct?: number;
 }
@@ -29,6 +42,8 @@ export interface Position {
     stopLoss: number | null;
     takeProfit: number | null;
     trailing: unknown;
+    /** Whether the managed break-even has already fired — it may only fire once. */
+    breakEvenDone?: boolean;
     /** What one unit risked when the position first had a stop — the fixed R unit. */
     riskPerUnit: number | null;
     entryTag: string | null;
@@ -80,7 +95,19 @@ export interface ProtectionLevels {
 }
 
 export declare class Broker {
-    constructor(options?: { balance?: number; costs?: Costs; mode?: PositionMode; pointValue?: number });
+    constructor(options?: {
+        balance?: number;
+        costs?: Costs;
+        mode?: PositionMode;
+        pointValue?: number;
+        /** The smallest a size may move by — a contract, a lot. Null: no step. */
+        sizeStep?: number | null;
+        /** The least a position may ever be. Null: no minimum. */
+        minSize?: number | null;
+        /** Whether a resting limit fills on a touch or needs the level crossed. Default 'touch'. */
+        limitFillMode?: 'touch' | 'through';
+        management?: Management | null;
+    });
 
     readonly mode: PositionMode;
     readonly initialBalance: number;
@@ -95,11 +122,21 @@ export declare class Broker {
     lastPrice: number | null;
     /** Money per point per unit — 1 unless an instrument says otherwise. */
     readonly pointValue: number;
+    /** The smallest a size may move by, or null — see the constructor option. */
+    readonly sizeStep: number | null;
+    /** The least a position may ever be, or null — see the constructor option. */
+    readonly minSize: number | null;
+    /** Whether a resting limit fills on a touch or needs the level crossed. */
+    readonly limitFillMode: 'touch' | 'through';
     /** The two sides a market order fills at, or null. */
     readonly quote: { bid: number; ask: number } | null;
+    /** Break-even and trailing rules the account applies itself, or null. */
+    readonly management: Required<Management> | null;
 
     /** Throws while anything is open or waiting. */
     setPointValue(value: number): void;
+    /** Install the managed break-even and trail, or clear them with null. */
+    setManagement(rules: Management | null): void;
     setQuote(bid: number | null, ask: number | null): void;
 
     get position(): Position | null;

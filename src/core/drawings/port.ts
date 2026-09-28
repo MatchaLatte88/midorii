@@ -2,7 +2,7 @@ import type { Unsubscribe } from '../util/types';
 import type { DrawingTypeKey, SerializedDrawing } from './Drawing';
 import type { SnapMode } from './geometry';
 import type { DrawingSeriesGateway } from './series';
-import type { ToolbarDefinition } from './toolbar';
+import type { RadialToolSlot, ToolbarDefinition } from './toolbar';
 
 /**
  * The renderer-local drawing MODES beyond an armed tool: the transient measure ruler,
@@ -78,6 +78,9 @@ export interface IDrawingsRendererPort {
      *  shown beside the tools in the toolbar flyouts. The host owns the keymap and the
      *  platform formatting; the renderer only displays. Optional. */
     setToolShortcuts?(map: Readonly<Partial<Record<DrawingTypeKey, string>>>): void;
+    /** Configure the press-and-hold radial tool menu. An empty list disables it; `null`
+     *  is the pointer/select action. Optional so other renderers can omit the gesture. */
+    setRadialMenu?(slots: readonly RadialToolSlot[]): void;
     /** Host takes over right-presses on drawings: report them as an intent and keep the
      *  chart's own context menu shut for that press. Off ⇒ a right-press on a drawing is
      *  nothing special and the chart menu opens as it always did. */

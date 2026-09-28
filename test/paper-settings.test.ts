@@ -48,7 +48,7 @@ describe('what starts a fresh account', () => {
 
     it('hands the two halves to the two places that read them', () => {
         const s = settings({ feeRate: 0.002, spreadPct: 0.001, slippagePct: 0, hedging: false, maxLeverage: 3 });
-        expect(costsOf(s)).toEqual({ feeRate: 0.002, spreadPct: 0.001, slippagePct: 0 });
+        expect(costsOf(s)).toEqual({ feeRate: 0.002, feePerUnit: 0, spreadPct: 0.001, slippagePct: 0 });
         expect(positionModeOf(s)).toBe('netting');
         expect(riskOf(s)).toEqual({ mode: 'percent', value: 1, maxLeverage: 3 });
     });

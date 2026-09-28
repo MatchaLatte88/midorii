@@ -1615,6 +1615,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController {
             id: record.id,
             title: record.title,
             ...(d.shortTitle ? { shorttitle: d.shortTitle } : {}),
+            ...(d.internal ? { legend: false } : {}),
             overlay: d.overlay,
             paneHint: d.paneHint,
             native: { type: record.native!.type },

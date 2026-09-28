@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { OHLCV } from '../src/core/model/ohlcv';
-import { runSweep, sliceBars, SweepCancelled } from '../app/renderer/backtest/sweepRunner';
+import { alignSplitToBars, runSweep, sliceBars, SweepCancelled } from '../app/renderer/backtest/sweepRunner';
 import { packBars, unpackBars } from '../app/renderer/backtest/sweepProtocol';
 
 /**
@@ -84,12 +84,29 @@ describe('a sweep', () => {
         const result = await sweep();
 
         expect(result.split).not.toBeNull();
-        expect(result.split!.trainBars + result.split!.testBars).toBe(bars(20).length);
+        // Train sees only its own share of the range — the part that chose the winners.
+        expect(result.split!.trainBars).toBeLessThan(bars(20).length);
+        expect(result.split!.trainBars).toBeGreaterThan(0);
+        // Test's own bars array carries the train period too, as warm-up for a detector
+        // with a long window — see runSweep. It spans the whole loaded range; `tradeFrom`
+        // is what actually keeps the ranking and the check apart.
+        expect(result.split!.testBars).toBe(bars(20).length);
         // The ranking is in-sample; the check beside it is not.
         for (const entry of result.best) {
             expect(entry.outOfSample).toBeDefined();
             expect(entry.outOfSample!.tradeCount).toBeGreaterThan(0);
         }
+    });
+
+    it('moves the split onto the start of an actual bar rather than an arithmetic instant', async () => {
+        const result = await sweep();
+        const cut = result.split!.test.from;
+
+        // The cut must land exactly on one of the loaded bars' own times, never between
+        // two — a cut inside a bar would divide that bar's minutes between train and test.
+        expect(bars(20).some((b) => b.time === cut)).toBe(true);
+        expect(cut).toBeGreaterThan(result.split!.train.from);
+        expect(cut).toBeLessThan(result.to);
     });
 
     it('ranks by the metric it was given', async () => {
@@ -180,6 +197,31 @@ describe('slicing a stretch', () => {
         expect(train[train.length - 1]!.time).toBeLessThan(cut);
         expect(test[0]!.time).toBe(cut);
         expect(train.length + test.length).toBe(series.length);
+    });
+});
+
+describe('aligning a split onto a real bar', () => {
+    it('moves an arithmetic cut forward onto the next bar it actually finds', () => {
+        const series = bars(1);
+        const arithmeticCut = series[5]!.time + 137; // lands inside bar 5, before bar 6
+        const split = { train: { from: series[0]!.time, to: arithmeticCut }, test: { from: arithmeticCut, to: series[series.length - 1]!.time + STEP } };
+
+        const aligned = alignSplitToBars(split, series);
+
+        expect(aligned.train.to).toBe(series[6]!.time);
+        expect(aligned.test.from).toBe(series[6]!.time);
+        // Never leaves bar 5 itself split between the two.
+        const train = sliceBars(series, aligned.train.from, aligned.train.to);
+        const test = sliceBars(series, aligned.test.from, aligned.test.to);
+        expect(train.some((b) => b.time === series[5]!.time)).toBe(true);
+        expect(test.some((b) => b.time === series[5]!.time)).toBe(false);
+    });
+
+    it('falls back to the last bar when the cut is beyond every bar it has', () => {
+        const series = bars(1);
+        const split = { train: { from: series[0]!.time, to: series[series.length - 1]!.time + STEP * 10 }, test: { from: 0, to: 0 } };
+        const aligned = alignSplitToBars(split, series);
+        expect(aligned.train.to).toBe(series[series.length - 1]!.time);
     });
 });
 

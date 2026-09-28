@@ -41,6 +41,7 @@ export type {
     DrawingTypeMeta,
     ToolbarDefinition,
     ToolbarGroupConfig,
+    RadialToolSlot,
     SettingsSchema,
     SettingsField,
     Projector,

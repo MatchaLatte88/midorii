@@ -39,6 +39,12 @@ function run(params: Record<string, unknown> = {}, rows = CHAIN) {
     return runBacktest({ bars: series, strategy: buildStrategy('silverbullet', params, series), broker: FREE });
 }
 
+/** The same chain on a market quoted in the thousands — an index rather than a 100-dollar
+ *  share. Multiplying every price leaves the shape, and so every setup, untouched. */
+const INDEX_CHAIN = CHAIN.map(
+    (row) => row.map((price) => price * 250) as [number, number, number, number],
+);
+
 describe('silver bullet strategy', () => {
     it('rests a limit order at the gap edge and takes the fill there', () => {
         const result = run();
@@ -109,6 +115,41 @@ describe('silver bullet strategy', () => {
         expect(run({ windows: ['am'] }).trades).toHaveLength(1);
     });
 
+    /**
+     * A fixed risk, end to end, through the strategy a person actually runs.
+     *
+     * The chain moved to an index's prices, so the figures are the ones the form promises
+     * rather than fractions of a point. With the ceiling off and nothing charged, every
+     * trade comes out at exactly the amount typed in or exactly that times the reward —
+     * which is what "risk 100 at 1.4" is supposed to mean and what it did not mean while
+     * the leverage ceiling was deciding the size. Where the ceiling binds instead of the
+     * risk is measured on its own, against real numbers, in risk-sizing.test.ts.
+     */
+    describe('a fixed risk of 100 at a reward of 1.4', () => {
+        const FIXED = { riskMode: 'fixed', riskValue: 100, rrr: 1.4, capLeverage: false };
+
+        it('makes exactly the reward on a winner', () => {
+            const trade = run(FIXED, INDEX_CHAIN).trades[0] as {
+                size: number; netPnl: number; riskPerUnit: number;
+            };
+
+            expect(trade.size * trade.riskPerUnit).toBeCloseTo(100, 6);
+            expect(trade.netPnl).toBeCloseTo(140, 6);
+        });
+
+        it('loses exactly the risk on a loser, not a point more', () => {
+            /* The same setup, with the last bars turned round so price runs up through the
+             * stop (1,750 above the 26,000 entry) instead of down to the target. */
+            const stopped = INDEX_CHAIN.map((row, i) => (
+                i >= 11 ? ([25_750, 28_000, 25_700, 27_900] as [number, number, number, number]) : row
+            ));
+            const trade = run(FIXED, stopped).trades[0] as { netPnl: number; riskPerUnit: number };
+
+            expect(trade.riskPerUnit).toBeCloseTo(1_750, 6);
+            expect(trade.netPnl).toBeCloseTo(-100, 6);
+        });
+    });
+
     it('fills in the defaults and refuses a setting it cannot honour', () => {
         const params = resolveStrategyParams('silverbullet', { riskValue: 2 });
 
@@ -130,7 +171,8 @@ describe('silver bullet strategy', () => {
         expect(entry.name).toBe('Silver Bullet');
         expect(entry.indicator).toBe('silverbullet');
         // Risk comes first, so two strategies ask the same questions in the same order.
-        expect(entry.params.slice(0, 4).map((p) => p.key)).toEqual(['riskMode', 'riskValue', 'maxLeverage', 'rrr']);
+        expect(entry.params.slice(0, 5).map((p) => p.key))
+            .toEqual(['riskMode', 'riskValue', 'capLeverage', 'maxLeverage', 'rrr']);
         expect('build' in entry).toBe(false);
         expect(Object.keys(STRATEGIES)).toContain('silverbullet');
     });

@@ -1,6 +1,8 @@
 import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor, SymbolInfo } from '../../../src';
+import { timeframeToMs } from '../../../src';
 import type { Unsubscribe } from '../../../src/core/util/types';
 import type { MidoriProjectXContract, MidoriProjectXQuote } from '../midori';
+import { loadHistoryProgressively } from './progressiveHistory';
 
 /** Canonical Vela timeframe → nothing of its own: the gateway's unit pair is worked out in
  *  the main process (see app/electron/data/projectx.js). This is only what it will accept. */
@@ -10,6 +12,9 @@ const TF_NORMALIZE: Record<string, string> = {
     '1m': '1', '2m': '2', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
     '1h': '60', '4h': '240', '8h': '480', '1d': 'D', '1D': 'D', '1w': 'W', '1W': 'W',
 };
+/** A 500-bar request still has to see across a weekend when its `to` lands at the
+ *  Sunday reopen. The gateway selects the newest bars inside this window. */
+const MIN_SEGMENT_LOOKBACK_MS = 4 * 24 * 60 * 60_000;
 
 /**
  * A timeframe in the spelling the bridge expects.
@@ -162,6 +167,38 @@ export class ProjectXProvider implements DataProvider {
             contractId: contract.id, timeframe: tf, from: range.from, to: range.to, limit: range.limit,
         });
         return bars.map(({ time, open, high, low, close, volume }) => ({ time, open, high, low, close, volume }));
+    }
+
+    /** Show the newest 500 bars first, then prepend older 500-bar segments. */
+    async getBarsProgressive(
+        ticker: string,
+        timeframe: string,
+        range: BarRange,
+        onBatch: (bars: OHLCV[]) => void,
+        opts?: { signal?: AbortSignal },
+    ): Promise<OHLCV[]> {
+        const intervalMs = timeframeToMs(normalizeTf(timeframe));
+        return loadHistoryProgressively({
+            range,
+            onBatch,
+            signal: opts?.signal,
+            fetch: (segment) => this.getBars(ticker, timeframe, segment),
+            firstRange: (limit, original) => {
+                const end = original.to ?? Date.now();
+                return {
+                    ...(original.session !== undefined ? { session: original.session } : {}),
+                    from: end - Math.max(limit * intervalMs * 1.5, MIN_SEGMENT_LOOKBACK_MS),
+                    ...(original.to !== undefined ? { to: original.to } : {}),
+                    limit,
+                };
+            },
+            olderRange: (oldest, limit, original) => ({
+                ...(original.session !== undefined ? { session: original.session } : {}),
+                from: oldest - Math.max(limit * intervalMs * 1.5, MIN_SEGMENT_LOOKBACK_MS),
+                to: oldest - 1,
+                limit,
+            }),
+        });
     }
 
     listSymbols(): Promise<SymbolDescriptor[]> {

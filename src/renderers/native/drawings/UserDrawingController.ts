@@ -8,6 +8,7 @@ import type {
     DrawingTypeKey,
     IDrawingsRendererPort,
     Projector,
+    RadialToolSlot,
     SerializedDrawing,
     SnapMode,
     ToolbarDefinition,
@@ -22,6 +23,7 @@ import { DrawingInteraction } from './DrawingInteraction';
 import { DrawingSettingsPopup } from './DrawingSettingsPopup';
 import { DrawingToolbar, TOOLBAR_WIDTH, TOOLBAR_COLLAPSED_WIDTH } from './DrawingToolbar';
 import { MeasureOverlay } from './MeasureOverlay';
+import { RadialToolMenu } from './RadialToolMenu';
 import { topDrawingAt, HIT_TOLERANCE } from './DrawingHitTester';
 import { keyToDrawingAction, isEditingText } from './DrawingKeys';
 import type { DrawingSlice } from '../core/SceneGraph';
@@ -138,6 +140,7 @@ export class UserDrawingController implements IDrawingsRendererPort {
     private readonly interaction: DrawingInteraction;
     private readonly popup: DrawingSettingsPopup;
     private readonly toolbar: DrawingToolbar;
+    private readonly radialMenu: RadialToolMenu;
 
     constructor(
         private readonly toolbarHost: HTMLElement, // the left gutter (docked toolbar)
@@ -165,6 +168,13 @@ export class UserDrawingController implements IDrawingsRendererPort {
                     this.syncToolbarGutter();
                 },
             },
+        );
+        // Explicit body host: the wheel is centred on viewport pointer coordinates and
+        // must escape the chart cell's overflow clip near an edge.
+        this.radialMenu = new RadialToolMenu(
+            overlayHost.ownerDocument.body,
+            deps.theme(),
+            (type) => this.emit({ kind: 'arm', type }),
         );
         this.interaction = new DrawingInteraction({
             projector: () => this.deps.projector(),
@@ -292,6 +302,30 @@ export class UserDrawingController implements IDrawingsRendererPort {
     /** Core push: the favorite tool set changed — reflect the flyout stars. */
     setFavorites(types: readonly DrawingTypeKey[]): void {
         this.toolbar.setFavorites(types);
+    }
+
+    setRadialMenu(slots: readonly RadialToolSlot[]): void {
+        this.radialMenu.setSlots(slots);
+    }
+
+    radialHoldAvailable(): boolean {
+        return this.radialMenu.enabled;
+    }
+
+    beginRadialHold(clientX: number, clientY: number): boolean {
+        return this.radialMenu.openAt(clientX, clientY);
+    }
+
+    moveRadialHold(clientX: number, clientY: number): void {
+        this.radialMenu.update(clientX, clientY);
+    }
+
+    endRadialHold(clientX: number, clientY: number): void {
+        this.radialMenu.finish(clientX, clientY);
+    }
+
+    cancelRadialHold(): void {
+        this.radialMenu.cancel();
     }
 
     /** Core push: the host handles right-presses on drawings (see `DrawingsControl.setContextMenu`). */
@@ -860,6 +894,7 @@ export class UserDrawingController implements IDrawingsRendererPort {
     setTheme(theme: VelaTheme): void {
         this.popup.setTheme(theme);
         this.toolbar.setTheme(theme);
+        this.radialMenu.setTheme(theme);
         this.render();
     }
 
@@ -993,6 +1028,7 @@ export class UserDrawingController implements IDrawingsRendererPort {
         this.closeTextEditor();
         this.popup.destroy();
         this.toolbar.destroy();
+        this.radialMenu.destroy();
         this.seriesGwUnsub?.();
         this.seriesGwUnsub = null;
         this.seriesGw = null;

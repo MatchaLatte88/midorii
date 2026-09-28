@@ -1,9 +1,11 @@
 import type { BacktestBar, BacktestResult } from '../../../shared/engine/backtest';
 import { runBacktest } from '../../../shared/engine/backtest';
+import { DEFAULT_COSTS } from '../../../shared/engine/broker.js';
 import {
     bestAndWorst, expandSweep, rankResults, splitRange,
 } from '../../../shared/analysis/sweep.js';
 import type { RankMetricId, SweepEntry, SweepRanges, SweepStats } from '../../../shared/analysis/sweep';
+import type { Costs } from '../../../shared/engine/broker';
 import { buildStrategy, resolveStrategyParams, type DetectionCache } from '../strategies';
 
 /**
@@ -71,6 +73,15 @@ export interface SweepOptions {
     from: number;
     to: number;
     balance?: number;
+    /** What every combination is charged. Null takes the Broker's defaults. */
+    costs?: Costs | null;
+    /** Money per point per unit. 1 unless the instrument says otherwise — see
+     *  `Broker.pointValue`. */
+    pointValue?: number;
+    /** The smallest a size may move by, or null for no step — see `Broker.sizeStep`. */
+    sizeStep?: number | null;
+    /** The least a position may ever be, or null — see `Broker.minSize`. */
+    minSize?: number | null;
     stepMs?: number | null;
     /** How much of the range chooses the winners. 0 runs the whole range and checks
      *  nothing, which is a sweep with no defence against itself. */
@@ -92,6 +103,15 @@ export interface SweepRun {
     from: number;
     to: number;
     balance: number;
+    /** What every combination was actually charged — stored, because two sweeps run with
+     *  different costs are not comparable and nothing else in here would say so. */
+    costs: Required<Costs>;
+    /** The instrument every combination was actually charged in — same reasoning as
+     *  `costs`. A sweep stored without these could not be told apart from one run
+     *  against a plain spot instrument. */
+    pointValue: number;
+    sizeStep: number | null;
+    minSize: number | null;
     metric: RankMetricId;
     minTrades: number;
     trainFraction: number;
@@ -147,6 +167,32 @@ export function sliceBars(bars: readonly BacktestBar[], from: number, to: number
 }
 
 /**
+ * Moves a split's boundary onto the start of an actual bar.
+ *
+ * `splitRange` cuts by a fraction of the clock, which almost never lands on a bar's own
+ * start — bars have gaps (a session close, a halt), so the arithmetic cut can fall inside
+ * one. Slicing there is fine for the bar itself, which simply goes whole to whichever side
+ * it belongs on; it is NOT fine for what is underneath it. `makeSubBarLookup` in the engine
+ * hands a bar every one of its own minutes, keyed by that bar's own start — so a cut inside
+ * the bar would still give the WHOLE bar, minutes included, to one side, while `sliceBars`
+ * on the base-bar array (keyed by minute, not by parent bar) would divide those same
+ * minutes between train and test by raw timestamp. A fill that happened in the half of the
+ * bar assigned to the other side would then be invisible to intrabar resolution, silently,
+ * on every sweep that does not happen to land its split exactly on a bar.
+ *
+ * Rounding forward — to the next bar at or after the arithmetic cut — keeps the split
+ * half-open exactly like `sliceBars` already reads it: the bar found becomes the first bar
+ * of test, never a bar shared between the two.
+ */
+export function alignSplitToBars(
+    split: { train: { from: number; to: number }; test: { from: number; to: number } },
+    bars: readonly BacktestBar[],
+): { train: { from: number; to: number }; test: { from: number; to: number } } {
+    const cut = bars.find((b) => b.time >= split.train.to)?.time ?? bars[bars.length - 1]!.time;
+    return { train: { from: split.train.from, to: cut }, test: { from: cut, to: split.test.to } };
+}
+
+/**
  * Hands the thread back so a posted Stop can be read.
  *
  * A worker never yields to its own message queue while a loop is running, so a stop sent
@@ -154,7 +200,7 @@ export function sliceBars(bars: readonly BacktestBar[], from: number, to: number
  * combinations is what makes the button work. `MessageChannel` rather than `setTimeout`,
  * whose minimum delay would add four milliseconds to every combination.
  */
-function breathe(): Promise<void> {
+export function breathe(): Promise<void> {
     return new Promise((resolve) => {
         if (typeof MessageChannel === 'function') {
             const channel = new MessageChannel();
@@ -179,9 +225,16 @@ function breathe(): Promise<void> {
 export async function runSweep(options: SweepOptions): Promise<SweepRun> {
     const {
         strategy: strategyId, ranges, base = {}, bars, baseBars = null, from, to,
-        balance = 10_000, stepMs = null, trainFraction = 0.7, metric = 'expectancy',
+        balance = 10_000, costs = null, pointValue = 1, sizeStep = null, minSize = null,
+        stepMs = null, trainFraction = 0.7, metric = 'expectancy',
         minTrades = 10, showCount = 4, onProgress, shouldStop,
     } = options;
+
+    /* Resolved once, so the figure stored on the run is the one every combination paid
+     * rather than the override it was handed — a sweep that stored `{}` would claim to
+     * have been free. Same reasoning as `costs` on a single run. */
+    const charged: Required<Costs> = { ...DEFAULT_COSTS, ...(costs ?? {}) };
+    const broker = { balance, costs: charged, pointValue, sizeStep, minSize };
 
     if (!Array.isArray(bars) || bars.length === 0) throw new Error('runSweep: no bars to run on');
 
@@ -192,11 +245,18 @@ export async function runSweep(options: SweepOptions): Promise<SweepRun> {
      * 900 would waste everything up to it. */
     for (const params of combinations) resolveStrategyParams(strategyId, params);
 
-    const split = trainFraction > 0 ? splitRange(from, to, trainFraction) : null;
+    const rawSplit = trainFraction > 0 ? splitRange(from, to, trainFraction) : null;
+    const split = rawSplit ? alignSplitToBars(rawSplit, bars) : null;
     const trainBars = split ? sliceBars(bars, split.train.from, split.train.to) : bars;
-    const testBars = split ? sliceBars(bars, split.test.from, split.test.to) : [];
+    /* The out-of-sample run gets everything from the very start of the loaded range as
+     * warm-up, not just its own slice — a detector with a long window (a 200-session
+     * average, say) would otherwise never produce a value inside a short test stretch and
+     * silently take no trades at all, which reads as "the setting doesn't hold" when what
+     * actually happened is "it never got to run". `tradeFrom` below keeps the ledger
+     * honest: nothing before the test period counts as a decision the test period made. */
+    const testBars = split ? sliceBars(bars, bars[0]!.time, split.test.to) : [];
     const trainBase = baseBars && split ? sliceBars(baseBars, split.train.from, split.train.to) : baseBars;
-    const testBase = baseBars && split ? sliceBars(baseBars, split.test.from, split.test.to) : null;
+    const testBase = baseBars && split ? sliceBars(baseBars, bars[0]!.time, split.test.to) : null;
 
     if (trainBars.length === 0) {
         throw new Error('runSweep: the optimisation stretch contains no bars');
@@ -215,7 +275,7 @@ export async function runSweep(options: SweepOptions): Promise<SweepRun> {
             bars: trainBars,
             baseBars: trainBase,
             strategy: buildStrategy(strategyId, params, trainBars, trainCache),
-            broker: { balance },
+            broker,
             stepMs,
         });
 
@@ -248,8 +308,11 @@ export async function runSweep(options: SweepOptions): Promise<SweepRun> {
             bars: testBars,
             baseBars: testBase,
             strategy: buildStrategy(strategyId, entry.params, testBars, testCache),
-            broker: { balance },
+            broker,
             stepMs,
+            // testBars runs from the start of the whole loaded range for warm-up; only
+            // the test period itself may become a fill, a trade, or an equity point.
+            tradeFrom: split!.test.from,
         });
         return { ...entry, outOfSample: summarize(result) };
     };
@@ -259,8 +322,18 @@ export async function runSweep(options: SweepOptions): Promise<SweepRun> {
         ranges,
         base,
         from,
-        to,
+        /* The last bar's own time, not the exclusive bound `to` was given as. `sliceBars`
+         * needs one bar-width past the last bar to include it — see the split above — but
+         * that is an implementation detail of a half-open range, not what the range
+         * covers. A single backtest stores the same bar's own time for the same field, and
+         * a sweep whose stored range read one bar later would look like it covered
+         * different bars than a single run made over the identical stretch. */
+        to: bars[bars.length - 1]!.time,
         balance,
+        costs: charged,
+        pointValue,
+        sizeStep,
+        minSize,
         metric,
         minTrades,
         trainFraction,

@@ -80,7 +80,11 @@ describe('the shared chart document', () => {
         const open = fakeWorkspace(BOT, ['trade-position']);
         bot.attach(open.ws);
 
-        chart.storage.set('chart', encodeState(doc({ ...CHART, rendererConfig: { grid: { vert: false } }, indicators: { manifest: ['EMA 20'], natives: ['volume', 'price-alerts'] } })));
+        chart.storage.set('chart', encodeState(doc({
+            ...CHART,
+            rendererConfig: { grid: { vert: false } },
+            indicators: { manifest: ['EMA 20'], natives: ['volume', { type: 'price-alerts', visible: false }] },
+        })));
 
         expect(open.applied).toHaveLength(1);
         const cell = open.applied[0]!.charts[0]!;

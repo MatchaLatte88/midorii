@@ -65,6 +65,7 @@ function draw(id: string, paneId: string, zIndex: number, extra: Partial<Seriali
 function snap(over: Partial<TreeSnapshot> = {}): TreeSnapshot {
     return {
         panes: [pane('price', 'price', 0)],
+        indicatorIncluded: () => true,
         indicatorVisible: () => true,
         handleTitle: () => undefined,
         stackable: true,
@@ -138,6 +139,21 @@ describe('buildTree — the unified stack', () => {
         const tree = buildTree(snap({ panes: [p], indicatorVisible: (id) => id !== 'a', handleTitle: () => 'Indicator' }));
         const a = paneRows(tree[0]!).find((r) => r.kind === 'indicator');
         expect(a).toMatchObject({ label: 'SMA 20', visible: false, ownScale: true });
+    });
+
+    it('omits host machinery from the indicator rows', () => {
+        const p = pane('price', 'price', 0, [
+            { id: 'position', title: 'Position' },
+            { id: 'rsi', title: 'RSI 14' },
+            { id: 'quotes', title: 'Bid / ask' },
+        ]);
+        const tree = buildTree(snap({
+            panes: [p],
+            indicatorIncluded: (id) => id === 'rsi',
+            zOrder: [{ id: 'position', z: 3 }, { id: 'rsi', z: 2 }, { id: 'quotes', z: 1 }],
+        }));
+
+        expect(names(tree[0]!)).toEqual(['rsi', 'price']);
     });
 
     it('falls back to the handle title, then the id, when the pane model has no title', () => {

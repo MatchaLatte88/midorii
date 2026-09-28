@@ -368,6 +368,79 @@ describe('a strategy that fails', () => {
     });
 });
 
+describe('strategy.init', () => {
+    /** Installs a strategy with both hooks, the way the registry actually shapes one —
+     *  `installStrategy` above only ever wires `onBar`. */
+    function installWithInit(
+        id: string,
+        init: (ctx: BacktestContext) => void,
+        onBar: (ctx: BacktestContext) => void = () => undefined,
+    ): void {
+        const spec: StrategySpec = {
+            id,
+            name: 'Test strategy',
+            description: 'Only exists inside a test.',
+            params: [],
+            build: () => ({
+                params: {}, init, onBar,
+            } as unknown as ReturnType<StrategySpec['build']>),
+        };
+        STRATEGIES[id] = spec;
+    }
+
+    it('runs once, before the first onBar ever reads ctx.state', async () => {
+        const seen: string[] = [];
+        installWithInit(
+            'test-strategy',
+            (ctx) => { seen.push('init'); ctx.state.seeded = true; },
+            (ctx) => { seen.push(`onBar:${String(ctx.state.seeded)}`); },
+        );
+        const feed = fakeProvider(seedBars(10));
+        const runner = makeRunner(feed.provider, testBot());
+        await runner.start();
+
+        feed.feed(bar(10 * MINUTE, 102));
+        feed.feed(bar(11 * MINUTE, 103));
+
+        // init before the very first onBar, and never again on the second bar.
+        expect(seen).toEqual(['init', 'onBar:true', 'onBar:true']);
+        runner.stop();
+    });
+
+    it('reports a failing init once rather than retrying it every bar', async () => {
+        let calls_ = 0;
+        installWithInit('test-strategy', () => { calls_ += 1; throw new Error('init blew up'); });
+        const feed = fakeProvider(seedBars(10));
+        const runner = makeRunner(feed.provider, testBot());
+        await runner.start();
+
+        feed.feed(bar(10 * MINUTE, 102));
+        feed.feed(bar(11 * MINUTE, 103));
+
+        expect(calls_).toBe(1);
+        expect(runner.log.list().some((e) => e.kind === 'error' && e.text.includes('init blew up'))).toBe(true);
+        expect(runner.status).toBe('running');
+        runner.stop();
+    });
+
+    it('runs again after a stop and restart', async () => {
+        let calls_ = 0;
+        installWithInit('test-strategy', () => { calls_ += 1; });
+        const feed = fakeProvider(seedBars(10));
+        const runner = makeRunner(feed.provider, testBot());
+
+        await runner.start();
+        feed.feed(bar(10 * MINUTE, 102));
+        expect(calls_).toBe(1);
+        runner.stop();
+
+        await runner.start();
+        feed.feed(bar(11 * MINUTE, 103));
+        expect(calls_).toBe(2);
+        runner.stop();
+    });
+});
+
 describe('the history window', () => {
     /** Start a runner already seeded to the brim, then feed it `extra` more closed bars. */
     async function runTo(extra: number, onBar: (ctx: BacktestContext) => void): Promise<BotRunner> {

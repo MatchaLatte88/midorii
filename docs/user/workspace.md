@@ -230,7 +230,8 @@ const state = ws.getState();
 // One ORDERED `charts` entry per cell, live AND dormant — array position i restores
 // into slot i, `id` is the cell's durable name: { id: 'btc', symbol, provider?, timeframe,
 //   priceStyle, bars?, watermark?, indicatorTitles?, rendererConfig (renderer.getConfig() document),
-//   drawings (drawings.toJSON() document), indicators: { manifest: string[], natives: string[] },
+//   drawings (drawings.toJSON() document), indicators: { manifest: IndicatorEntry[],
+//   natives: NativeIndicatorEntry[] },
 //   ext? (third-party per-chart state, by namespaced key) }
 // `ext` bags (document root and per chart) carry PLUGIN state — written and restored by
 // handlers plugins register (registerStatePersistence, see the plugin SDK); entries pass
@@ -243,6 +244,12 @@ ws.on('state:changed', () => {
     /* debounced (~500ms) — re-pull getState() */
 });
 ```
+
+Visible indicators use the compact string form in the indicator ledger. A hidden
+manifest instance carries `{ name, visible: false }`; a hidden native instance carries
+`{ type, visible: false }`. Input and declaration-property deltas remain beside `name`.
+Documents written before visibility persistence used only strings and continue to restore
+those indicators as visible.
 
 `getState()` is the SDK's one call to read the **config and current content of every
 chart**; `applyState()` is its inverse. Custom flows — server-side snapshots, share

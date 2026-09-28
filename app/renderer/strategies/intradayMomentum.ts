@@ -6,7 +6,7 @@ import {
     type IntradayWindows,
 } from '../../../src/core/analysis/intradayWindows';
 import type { RunnableStrategy } from '../../../shared/engine/backtest';
-import { RISK_PARAMS, positionSize } from '../../../shared/strategies/risk.js';
+import { RISK_PARAMS, leverageCap, positionSize } from '../../../shared/strategies/risk.js';
 import type { RiskMode } from '../../../shared/strategies/risk.js';
 import { cached, detectionCacheKey, type DetectionCache } from './detection';
 import type { StrategyParam, StrategyParams, StrategySpec } from './types';
@@ -271,6 +271,11 @@ export const INTRADAY_MOMENTUM_STRATEGY: StrategySpec = {
         const riskMode = stringOf(params, 'riskMode') as RiskMode;
         const riskValue = numberOf(params, 'riskValue');
         const maxLeverage = numberOf(params, 'maxLeverage');
+        /* Null when the ceiling is switched off: then the size is whatever the risk asks
+         * for, and being stopped out costs exactly what was typed in. Only the risk-based
+         * branch reads it — a position sized AT the ceiling has no other size to fall back
+         * on. See `leverageCap`. */
+        const cap = leverageCap(params);
         const stopAtrPct = numberOf(params, 'stopAtrPct');
         const mode = stringOf(params, 'mode') as SignalMode;
         const confirmMinutes = numberOf(params, 'confirmMinutes');
@@ -340,7 +345,7 @@ export const INTRADAY_MOMENTUM_STRATEGY: StrategySpec = {
                         long ? price - stopDistance : price + stopDistance,
                         riskMode,
                         riskValue,
-                        maxLeverage,
+                        cap,
                     );
                 } else {
                     // No stop, so no risk distance: the ceiling is the size.
