@@ -4,8 +4,8 @@
 
   <img src=".github/banner.png" alt="Vela™ — fast, extensible financial charts for the web" width="100%">
 
-  <p><strong>Fast, extensible financial charts for the web.</strong><br>
-  Headless core · native WebGL2 renderer · batteries-included workspace · plugin SDK</p>
+  <p><strong>Midorii — a local desktop workbench for backtesting and trading bots.</strong><br>
+  Replay · backtests · strategies · pattern search · paper and live trading</p>
 
   [![npm version][npm-version-img]][npm-link]
   [![Downloads][npm-downloads-img]][npm-link]
@@ -23,6 +23,14 @@
 </div>
 
 <!-- markdownlint-enable no-inline-html -->
+
+Midorii is an Electron desktop app that runs on your machine. It combines charts with
+market replay, backtesting, strategy and pattern research, alerts, and trading bots. It
+trades on paper or live through the connected venues (Binance Spot, Bybit, Capital and
+ProjectX). Start it with `start.bat` on Windows. Midorii is built on a fork of Vela™,
+the charting library described below.
+
+## Vela™ charting library
 
 Vela™ renders interactive financial charts with its own native renderer (WebGL2, with a
 canvas2d fallback) and keeps the chart itself headless: drive it entirely from code, or
