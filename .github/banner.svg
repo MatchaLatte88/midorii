@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 340" role="img" aria-label="Midorii — local backtesting and trading-bot workbench">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1f17"/>
+      <stop offset="1" stop-color="#05110c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="340" fill="url(#bg)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="640,300 760,250 840,270 940,190 1040,210 1140,120 1240,90" stroke="#2ecc8f" stroke-width="4" opacity="0.55"/>
+    <polyline points="640,310 740,285 860,300 960,240 1060,255 1160,190 1240,170" stroke="#2ecc8f" stroke-width="2" opacity="0.25"/>
+  </g>
+  <g fill="#2ecc8f">
+    <rect x="800" y="210" width="14" height="60" rx="2" opacity="0.5"/>
+    <rect x="900" y="150" width="14" height="70" rx="2" opacity="0.5"/>
+    <rect x="1000" y="170" width="14" height="60" rx="2" opacity="0.5"/>
+    <rect x="1100" y="90" width="14" height="70" rx="2" opacity="0.5"/>
+  </g>
+  <text x="80" y="170" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="96" font-weight="700" fill="#e8fff4">Midorii</text>
+  <text x="84" y="225" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="30" fill="#7fd8b0">Local backtesting and trading-bot workbench</text>
+</svg>

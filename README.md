@@ -2,17 +2,16 @@
 
 <div align="center">
 
-  <img src=".github/banner.png" alt="Vela™ — fast, extensible financial charts for the web" width="100%">
+  <img src=".github/banner.svg" alt="Midorii — local backtesting and trading-bot workbench" width="100%">
 
   <p><strong>Midorii — a local desktop workbench for backtesting and trading bots.</strong><br>
   Replay · backtests · strategies · pattern search · paper and live trading</p>
 
-  [![npm version][npm-version-img]][npm-link]
-  [![Downloads][npm-downloads-img]][npm-link]
+  [![Version][version-img]][releases-link]
   [![License][license-img]][license-link]
 
   <p>
-    <a href="https://luxalgo.com/vela">Homepage</a> ·
+    <a href="https://github.com/MatchaLatte88/midorii">GitHub</a> ·
     <a href="#quick-start">Quick start</a> ·
     <a href="docs/index.md">Documentation</a> ·
     <a href="#extending-plugin-sdk">Plugin SDK</a> ·
@@ -211,9 +210,8 @@ No scripting engine ships with this package; the Pine Script addon
 
 [homepage]: https://luxalgo.com/vela
 
-[npm-version-img]: https://img.shields.io/npm/v/%40luxalgo%2Fvela.svg
-[npm-downloads-img]: https://img.shields.io/npm/dm/%40luxalgo%2Fvela.svg
-[npm-link]: https://www.npmjs.com/package/@luxalgo/vela
+[version-img]: https://img.shields.io/github/package-json/v/MatchaLatte88/midorii.svg
+[releases-link]: https://github.com/MatchaLatte88/midorii/releases
 
 [license-img]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
 [license-link]: LICENSE
